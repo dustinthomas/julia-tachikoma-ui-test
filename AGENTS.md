@@ -12,7 +12,7 @@ Use this for developing and testing Julia + UI/agentic coding experiments with t
 
 - Grok automatically loads permissions and some hooks from `~/.claude/settings.local.json` and Claude plugins (compat layer is active).
 - We have a `.grok/` directory with:
-  - `config.toml` — subagent model routing between `grok-build` (lead/orchestrator) and `grok-composer-2.5-fast` (faster model).
+  - `config.toml` — subagent model routing between `grok-build` (lead/orchestrator) and `grok-composer-2.5-fast` (faster model for light roles).
 - Custom models (BYOM) are registered in the user `~/.grok/config.toml` using `[model.<name>]` sections. Mercury 2 (Inception Labs) has been added as an example fast reasoning model.
   - `personas/`, `agents/`, `skills/`, `hooks/`, `rules/` — ready for native ports.
 - Use `/config-agents`, `/personas`, `/skills`, `grok inspect`, and `/plan` for management.
@@ -21,7 +21,7 @@ Use this for developing and testing Julia + UI/agentic coding experiments with t
 
 - **Lead / Orchestrator**: `grok-build` — strong coding model.
 - **Scout / Explorer / Reviewer (lightweight)**: `grok-composer-2.5-fast` — fast model.
-- **Coder**: `grok-composer-2.5-fast` (reliable fast default). Mercury-2 (BYOM) can be used but subagent calls to it are often unreliable (env inheritance, client overhead).
+- **Coder**: `grok-composer-2.5` (balanced Composer 2.5). Mercury-2 (BYOM) can be used but subagent calls to it are often unreliable (env inheritance, client overhead).
 - **Coder / Validator / Planner (heavy)**: `grok-build` or appropriate override.
 
 BYOM example: Mercury 2 (`mercury-2`) from Inception Labs is registered globally as a fast OpenAI-compatible diffusion model (see `~/.grok/config.toml` and `.grok/config.toml`).
@@ -32,7 +32,7 @@ BYOM example: Mercury 2 (`mercury-2`) from Inception Labs is registered globally
 - Assign per persona: edit `model = "..."` in .grok/personas/NAME.toml. Or `-m` for lead.
 
 Current persona models (edit `model =` line in .grok/personas/*.toml to switch):
-- coder    = grok-composer-2.5-fast   (reliable; mercury-2 was unreliable for subagents)
+- coder    = grok-composer-2.5     (balanced for implementation)
 - reviewer = grok-composer-2.5-fast
 - scout    = grok-composer-2.5-fast
 - planner/validator = grok-build
