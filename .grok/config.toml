@@ -18,7 +18,7 @@
 # Personas win over most [subagents.models] routes.
 #
 # Current:
-#   coder    = grok-composer-2.5        (balanced Composer 2.5 for implementation)
+#   coder    = grok-composer-2.5-fast   (Composer 2.5 Fast)
 #   reviewer = grok-composer-2.5-fast
 #   scout    = grok-composer-2.5-fast
 #   planner  = grok-build
@@ -44,7 +44,7 @@ enabled = true
 # Lightweight / read-heavy roles (scout via explore, reviewer)
 explore = "grok-composer-2.5-fast"
 plan = "grok-composer-2.5-fast"
-# Coder uses persona model directly (grok-composer-2.5 for balanced quality)
+# Coder uses persona model directly (grok-composer-2.5-fast)
 
 # Add custom role routes here if needed:
 # coder = "mercury-2"

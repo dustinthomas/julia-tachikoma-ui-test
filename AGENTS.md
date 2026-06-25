@@ -21,7 +21,7 @@ Use this for developing and testing Julia + UI/agentic coding experiments with t
 
 - **Lead / Orchestrator**: `grok-build` — strong coding model.
 - **Scout / Explorer / Reviewer (lightweight)**: `grok-composer-2.5-fast` — fast model.
-- **Coder**: `grok-composer-2.5` (balanced Composer 2.5). Mercury-2 (BYOM) can be used but subagent calls to it are often unreliable (env inheritance, client overhead).
+- **Coder**: `grok-composer-2.5-fast` (Composer 2.5 Fast). Mercury-2 (BYOM) can be used but subagent calls to it are often unreliable (env inheritance, client overhead).
 - **Coder / Validator / Planner (heavy)**: `grok-build` or appropriate override.
 
 BYOM example: Mercury 2 (`mercury-2`) from Inception Labs is registered globally as a fast OpenAI-compatible diffusion model (see `~/.grok/config.toml` and `.grok/config.toml`).
@@ -32,7 +32,7 @@ BYOM example: Mercury 2 (`mercury-2`) from Inception Labs is registered globally
 - Assign per persona: edit `model = "..."` in .grok/personas/NAME.toml. Or `-m` for lead.
 
 Current persona models (edit `model =` line in .grok/personas/*.toml to switch):
-- coder    = grok-composer-2.5     (balanced for implementation)
+- coder    = grok-composer-2.5-fast
 - reviewer = grok-composer-2.5-fast
 - scout    = grok-composer-2.5-fast
 - planner/validator = grok-build
