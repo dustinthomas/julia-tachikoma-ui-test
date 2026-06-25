@@ -63,6 +63,18 @@ We will encode this as native Grok skills + personas + explicit use of `spawn_su
 - Use `todo_write` for multi-step work.
 - Follow `.grok/docs/token-efficiency.md` for context hygiene (phase summaries, artifact files in target dir, concise validator output, minimal context to subagents, diff-focused reviews).
 
+## Julia + Tachikoma Specific Rules
+
+- Always invoke Julia with `julia --project=.`.
+- Tachikoma apps follow Elm: `mutable struct X <: Model`, `should_quit`, `update!(m, KeyEvent)`, `view(m, Frame)`. Use `@tachikoma_app`.
+- **UI changes require TestBackend coverage** (see https://kahliburke.github.io/Tachikoma.jl/dev/testing). Validator will execute render + char_at / find_text / row_text / handle_key! + re-render checks.
+- Use widgets + layouts (Block, render, split_layout, constraints) heavily.
+- Test logic directly with `update!` on models; render widgets headless.
+- Property-based tests with Supposition.jl are encouraged for layouts/unicode/edge cases.
+- Recording (`record_app`, `record_widget`) useful for demos and visual verification outside strict tests.
+- Run `julia --project=. -e 'using Pkg; Pkg.test()'` or `julia --project=. test/runtests.jl` for validation.
+- The TestBackend + scripted injection is the killer feature that makes agentic TUI development reliable and repeatable.
+
 ## Model routing + custom models (BYOM)
 
 See `.grok/config.toml` for the project-scoped routing.

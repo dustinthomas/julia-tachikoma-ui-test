@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "echo 'Add your dev command here (e.g. vite or julia server). Running inside docker per policy.'",
-    "build": "echo 'build step (customize)'",
-    "test": "echo 'No tests yet. Add vitest/jest or julia tests.' && exit 0",
-    "typecheck": "echo 'typecheck not configured (add tsc if using TS)'"
+    "dev": "echo 'Legacy placeholder. Use: julia --project=.'",
+    "build": "echo 'Not applicable (native Julia TUI)'",
+    "test": "echo 'Use: julia --project=. -e \"using Pkg; Pkg.test()\"' && exit 0",
+    "typecheck": "echo 'Not applicable (Julia)'"
   },
   "devDependencies": {}
 }

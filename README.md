@@ -1,13 +1,23 @@
 # julia-tachikoma-ui-test
 
-Agentic coding environment for Julia + UI experiments/tests. Replicated from `test-grok-cli`.
+Agentic coding environment for **Julia + Tachikoma.jl TUI** experiments and high-quality development. Replicated from `test-grok-cli`.
+
+**Current primary demo (MVP)**: QCI-themed local AI Metrics dashboard for Grok Build (HEHS, tokens, efficiency stats). Pure Julia, rich widgets, full TestBackend.
+
+Run:
+```
+julia --project=. -e 'using TachikomaUITest; TachikomaUITest.run_ai_metrics_dashboard()'
+```
+Keys: r=refresh/ingest, j/k nav, q quit.
+
+See plan in .grok session for small-units breakdown.
 
 This workspace is set up with the full Grok-native multi-agent pipeline:
 
 - `.grok/` — personas (planner, scout, coder, validator, reviewer), skills (pipeline, prime, review, test, commit, caveman), config, safety hooks
 - Structured workflow: Plan → Scout → Implement/Validate loop → Review
 - Token efficiency practices and verbatim evidence requirements
-- Containerized Node policy support (Dockerfile + compose)
+- **Julia-first**: Project.toml + test/ harness using Tachikoma's excellent `TestBackend` for deterministic headless widget + app testing
 - Safety hooks + .env support for custom models (BYOM like Mercury-2)
 
 ## Quick Start (Agentic Workflow)
@@ -37,35 +47,63 @@ Available skills (slash or direct):
 Replicated files from `test-grok-cli`:
 - `.grok/config.toml`, `personas/*.toml`, `skills/*/SKILL.md`, `hooks/`
 - `AGENTS.md`
-- `.gitignore`, `.dockerignore`, `.env`
-- Docker + compose (adapt for your Julia/UI stack)
-- Helper scripts
+- `.gitignore`, `.env`
+- Helper scripts (legacy node scripts removed; this is a native Julia project)
 
 See `AGENTS.md` for full model routing, BYOM instructions, and workflow rules.
 
-## Project Goals (example)
+## Project Goals
 
-- Test Julia backend + modern UI/ frontend agentically
-- Exercise full Grok pipeline on real Julia + web UI code
-- Measure token efficiency, correctness, iteration quality in Tachikoma-themed experiments
+- Build real, rich Julia TUIs with Tachikoma.jl using the structured agentic pipeline (Plan/Scout/Implement/Validate/Review)
+- Leverage Tachikoma's **TestBackend** (headless rendering + KeyEvent injection + inspection APIs) for fully deterministic, CI-friendly, tty-free UI tests — this is what enables consistent high-quality agentic TUI work
+- Maintain excellent test coverage, style, and architecture using Julia idioms and Tachikoma patterns (Elm Model/Update/View + widgets/layouts)
+
+## Quick Dev Commands (Julia + Tachikoma)
+
+```bash
+# Always use project
+julia --project=.
+
+# Run the test harness (uses TestBackend extensively)
+julia --project=. -e 'using Pkg; Pkg.test()'
+# or directly
+julia --project=. test/runtests.jl
+
+# Run a TUI (example after you implement one)
+julia --project=. -e '
+using Tachikoma
+@tachikoma_app
+# ... define your Model + methods ...
+app(MyModel())
+'
+```
+
+See `test/test_tachikoma_basics.jl` for current TestBackend + model testing examples.
+
+Full Tachikoma docs: https://kahliburke.github.io/Tachikoma.jl/dev/ (especially /testing, /architecture, /getting-started, widgets + layout).
+
+## Testing Strategy (Critical for Quality)
+
+- Widget rendering + interaction: `TestBackend`, `render_widget!`, `char_at`/`find_text`/`row_text`, `handle_key!`, re-render + assert.
+- App logic: direct `update!(model, KeyEvent(...))`.
+- Layouts, unicode, edges: Supposition.jl property-based tests.
+- This replaces brittle "run the TUI and watch" with reproducible evidence — perfect for the validator persona.
 
 ## Container Notes
 
-Node.js/TS harness (if any) must run inside Docker per common security policies.
+None. This is a native Julia terminal application. 
 
-```bash
-docker build -t grok-benchmark .
-docker run --rm grok-benchmark npm test
-```
-
-For Julia parts: adapt `docker-compose.yml` and scripts as needed (see original test-grok-cli particle-life example).
+- Run directly with `julia --project=.` in any modern terminal (Kitty, WezTerm, iTerm2, etc. recommended for full graphics support).
+- CI uses standard `julia-actions` (see .github/workflows/CI.yml). TestBackend makes testing fully headless and reproducible.
+- No Docker, containers, or external services are required or used.
 
 ## Next
 
-Edit `.grok/personas/*.toml` to tune models per role if desired.
+- `/prime` to orient.
+- For real work: `/pipeline Build a <feature> TUI screen with full TestBackend coverage`
 
-Start by running `/prime` in your Grok session to orient the agent.
+Edit `.grok/personas/*.toml` (especially coder/validator) or skills if you need to tune.
 
 ---
 
-Replicated: 2026-06-24 from test-grok-cli agentic setup.
+Replicated/adapted: 2026-06-24 for Julia + Tachikoma TUI agentic development.

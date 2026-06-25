@@ -1,0 +1,21 @@
+name = "TachikomaUITest"
+uuid = "59cad2a4-db3d-4638-8f94-efc8bc97a770"
+authors = ["Grok Agentic Experiments"]
+version = "0.1.0"
+description = "Test harness + example TUIs for developing high-quality interactive terminal apps with Tachikoma.jl using structured agentic (Plan-Scout-Implement-Validate-Review) workflow."
+
+[deps]
+Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+[compat]
+julia = "1.10"
+Tachikoma = "2"
+JSON = "0.21"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Supposition = "5a0628fe-1738-4658-9b6d-0b7605a9755b"
+
+[targets]
+test = ["Test", "Supposition"]

@@ -20,7 +20,7 @@ Thumbs.db
 Manifest.toml
 .julia/
 
-# Build / node (policy: build inside docker or volume)
+# Build artifacts (if any)
 dist/
 build/
 package-lock.json
