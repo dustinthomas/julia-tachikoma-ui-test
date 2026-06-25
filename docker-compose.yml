@@ -1,0 +1,30 @@
+# docker-compose.yml
+# Containerized services for julia-tachikoma-ui-test
+#
+# Core policy service:
+#   node:  TypeScript/Node parts MUST run inside this container
+#
+# Add julia services, frontend, etc. as your project evolves.
+# See README and original test-grok-cli for GPU Julia + nginx examples.
+
+services:
+  node:
+    build: .
+    image: julia-tachikoma-ui-test:node
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    command: npm run dev
+
+  # Example: add your Julia service here
+  # julia:
+  #   build:
+  #     context: .
+  #     dockerfile: julia/Dockerfile   # or use official julia image
+  #   ports:
+  #     - "8081:8080"
+  #   volumes:
+  #     - ./julia:/app
+
+volumes:
+  node_modules:

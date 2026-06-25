@@ -1,0 +1,75 @@
+# .grok/config.toml — Project-scoped config for julia-tachikoma-ui-test
+# Replicated agentic coding environment (personas + pipeline + skills) from test-grok-cli
+#
+# Quick win: This demonstrates Grok-native configuration on top of
+# your existing ~/.claude/ compat (permissions, hooks, etc. are already
+# loading from .claude/settings.local.json and claude plugins).
+#
+# BYOM: "mercury-2" (Inception Labs Mercury 2) registered globally.
+# OpenAI-compatible: https://api.inceptionlabs.ai/v1   model="mercury-2"
+#
+# Key loading (no manual `export`):
+#   1. Edit .env and fill INCEPTION_API_KEY (or other keys)
+#   2. Launch with: set -a; source .env; set +a; grok ...
+#   .env is already gitignored.
+#
+# PERSONA MODEL SWITCH (easy)
+# Edit `model = "..."` line inside each .grok/personas/*.toml
+# Personas win over most [subagents.models] routes.
+#
+# Current:
+#   coder    = grok-composer-2.5-fast   (reliable fast default; mercury-2 was flaky for subagents)
+#   reviewer = grok-composer-2.5-fast
+#   scout    = grok-composer-2.5-fast
+#   planner  = grok-build
+#   validator = grok-build
+#
+# To switch: change one line in the persona file. Or set below (affects types; persona model often overrides).
+# Mercury-2 reliability: direct API works, but harness subagents often fall back or hang.
+# To force: set model = "mercury-2" + reasoning_effort="high" in coder.toml, then launch with proper env:
+#   set -a; source .env; set +a; grok ...
+#   (or env $(cat .env | xargs) grok ...)
+#
+# Subagent model routing lets the lead (grok-build) orchestrate
+# subagents on different models — exactly analogous to assigning
+# different models (inherit / haiku / sonnet) to your Claude agents.
+
+[subagents]
+enabled = true
+
+# Route specific subagent types / roles to models.
+# grok-build = full power coding model (default for lead)
+# grok-composer-2.5-fast = faster "Cursor-style" coding model (good for quick recon/review)
+[subagents.models]
+# Lightweight / read-heavy roles (scout via explore, reviewer)
+explore = "grok-composer-2.5-fast"
+plan = "grok-composer-2.5-fast"
+# Coder uses persona model directly (currently grok-composer-2.5-fast for reliability)
+
+# Add custom role routes here if needed:
+# coder = "mercury-2"
+# reviewer = "grok-composer-2.5-fast"
+
+# You can add more as we define custom roles:
+# validator = "grok-build"
+
+# Example of enabling/disabling built-ins (uncomment to experiment)
+# [subagents.toggle]
+# explore = true
+# plan = true
+
+# Note: Some subagent settings may also need to be in your global
+# ~/.grok/config.toml for full effect. Project config takes precedence
+# where supported (MCPs, plugins, certain permissions).
+
+
+
+# See global ~/.grok/config.toml [model.mercury-2] for BYOM + .env key load.
+# Launch: source .env && grok ...
+
+[compat.claude]
+# We are deliberately using the Claude compat layer for your existing
+# hooks and settings while we build native .grok/ equivalents.
+hooks = true
+rules = true
+skills = false   # we'll use native .grok/skills/ for translated commands

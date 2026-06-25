@@ -1,0 +1,13 @@
+{
+  "name": "julia-tachikoma-ui-test",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "echo 'Add your dev command here (e.g. vite or julia server). Running inside docker per policy.'",
+    "build": "echo 'build step (customize)'",
+    "test": "echo 'No tests yet. Add vitest/jest or julia tests.' && exit 0",
+    "typecheck": "echo 'typecheck not configured (add tsc if using TS)'"
+  },
+  "devDependencies": {}
+}

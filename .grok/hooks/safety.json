@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|run_terminal_command|Read|read_file|Write|Edit|search_replace",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .grok/hooks/safety.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

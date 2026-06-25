@@ -1,0 +1,35 @@
+# Local environment / secrets
+.local
+.env.local
+.env
+*.token
+gh_token
+github_token
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Julia
+Manifest.toml
+.julia/
+
+# Build / node (policy: build inside docker or volume)
+dist/
+build/
+package-lock.json
+
+# Tooling data (never commit)
+.ai-metrics/
+.grok/sessions/
+.grok/cache/
+
+# Project specific
+# Add your generated data, large models, etc.
+
