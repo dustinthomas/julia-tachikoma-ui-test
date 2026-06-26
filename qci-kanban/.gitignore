@@ -1,0 +1,10 @@
+# Julia
+Manifest.toml
+*.db
+*.sqlite
+*.sqlite3
+.qci-kanban/
+data/
+tmp/
+*.log
+.DS_Store

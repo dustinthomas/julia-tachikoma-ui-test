@@ -142,15 +142,13 @@ function move_selected!(m::KanbanModel, dir::Symbol)
 
     if dir == :left && cidx > 1
         new_status = cols[cidx-1]
-        # put at end of target
         target_cards = get(m.cards_by_status, new_status, [])
         new_pos = length(target_cards) + 1
         DB.update_issue_status_and_position!(m.db, id, new_status, new_pos)
         load_board!(m)
-        # select it in new column
         m.selected_col = cidx - 1
         newc = get(m.cards_by_status, new_status, [])
-        m.selected_idx = length(newc)
+        m.selected_idx = clamp(length(newc), 1, max(1, length(newc)))
         m.message = "moved → $(new_status)"
     elseif dir == :right && cidx < length(cols)
         new_status = cols[cidx+1]
@@ -160,22 +158,30 @@ function move_selected!(m::KanbanModel, dir::Symbol)
         load_board!(m)
         m.selected_col = cidx + 1
         newc = get(m.cards_by_status, new_status, [])
-        m.selected_idx = length(newc)
+        m.selected_idx = clamp(length(newc), 1, max(1, length(newc)))
         m.message = "moved → $(new_status)"
     elseif dir == :up && idx > 1
-        # swap with previous
         prev_card = cards[idx-1]
         DB.update_issue_status_and_position!(m.db, id, status, prev_card["position"])
         DB.update_issue_status_and_position!(m.db, prev_card["id"], status, card["position"])
         load_board!(m)
-        m.selected_idx = idx - 1
+        newc = get(m.cards_by_status, status, [])
+        m.selected_idx = clamp(idx - 1, 1, max(1, length(newc)))
+        m.message = "reordered ↑"
     elseif dir == :down && idx < length(cards)
         next_card = cards[idx+1]
         DB.update_issue_status_and_position!(m.db, id, status, next_card["position"])
         DB.update_issue_status_and_position!(m.db, next_card["id"], status, card["position"])
         load_board!(m)
-        m.selected_idx = idx + 1
+        newc = get(m.cards_by_status, status, [])
+        m.selected_idx = clamp(idx + 1, 1, max(1, length(newc)))
+        m.message = "reordered ↓"
     end
+    # final clamp for safety (empty cols, Backlog edge)
+    c = clamp(m.selected_col, 1, length(cols))
+    nc = get(m.cards_by_status, cols[c], [])
+    m.selected_col = c
+    m.selected_idx = clamp(m.selected_idx, 1, max(1, length(nc)))
 end
 
 function open_edit_modal!(m::KanbanModel; new::Bool=false)
@@ -184,7 +190,7 @@ function open_edit_modal!(m::KanbanModel; new::Bool=false)
     if new
         m.editing_id = nothing
         m.edit_title = TextInput(; focused=true)
-        m.edit_desc = TextArea()
+        m.edit_desc = TextArea(; focused=false)
         m.edit_priority = "Medium"
         m.message = "NEW CARD"
     else
@@ -197,7 +203,7 @@ function open_edit_modal!(m::KanbanModel; new::Bool=false)
         m.editing_id = card["id"]
         m.edit_title = TextInput(text = get(card, "title", ""); focused = true)
         desc = get(card, "description", "")
-        m.edit_desc = TextArea(text = desc)
+        m.edit_desc = TextArea(text = desc; focused = false)
         m.edit_priority = get(card, "priority", "Medium")
         m.message = "EDIT $(get(card,"key",""))"
     end
@@ -213,14 +219,13 @@ function save_modal!(m::KanbanModel)
     if m.editing_id === nothing
         # create
         ensure_db!(m)
-        new_id = DB.create_issue!(m.db; title=title, description=desc, status="To Do", priority=prio,
+        new_id = DB.create_issue!(m.db; title=title, description=desc, status="Backlog", priority=prio,
                                    assignee_id = m.current_user_id, position=999)
         load_board!(m)
-        # select the new one if possible (in To Do)
-        todo_idx = findfirst(==("To Do"), BOARD_COLUMNS)
-        m.selected_col = todo_idx !== nothing ? todo_idx : min(2, length(BOARD_COLUMNS))
-        td = get(m.cards_by_status, "To Do", [])
-        m.selected_idx = max(1, length(td))
+        # select the new one in Backlog (col 1 per kanban-func-plan)
+        m.selected_col = 1
+        bl = get(m.cards_by_status, "Backlog", [])
+        m.selected_idx = max(1, length(bl))
         m.message = "created $(get(DB.get_issue(m.db, new_id), "key", ""))"
     else
         DB.update_issue!(m.db, m.editing_id; title=title, description=desc, priority=prio)
@@ -288,13 +293,33 @@ function update!(m::KanbanModel, evt::KeyEvent)
         elseif evt.key == :escape
             close_modal!(m)
             return
+        elseif evt.key == :tab
+            # cycle title <-> desc (consume, do not feed to inputs)
+            if m.edit_title.focused
+                m.edit_title.focused = false
+                m.edit_desc.focused = true
+            else
+                m.edit_title.focused = true
+                m.edit_desc.focused = false
+            end
+            return
+        elseif evt.key == :backtab
+            # reverse cycle
+            if m.edit_desc.focused
+                m.edit_desc.focused = false
+                m.edit_title.focused = true
+            else
+                m.edit_desc.focused = true
+                m.edit_title.focused = false
+            end
+            return
         end
-        # quick priority (before feeding chars)
+        # quick priority (before feeding chars) - keep 1/2/3 always
         if evt.key == :char && evt.char in ('1','2','3')
             m.edit_priority = evt.char == '1' ? "High" : (evt.char == '2' ? "Medium" : "Low")
             return
         end
-        # feed to inputs
+        # feed to inputs (respects .focused internally)
         if handle_key!(m.edit_title, evt)
             return
         end
@@ -588,13 +613,15 @@ function view(m::KanbanModel, f::Frame)
         # Live form fields inside the bordered area (no duplicate snapshot text)
         y = inner.y + 1
         if y < bottom(inner)
-            set_string!(buf, inner.x + 1, y, "TITLE>", Style(; fg = QCI_CYAN))
+            tstyle = m.edit_title.focused ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+            set_string!(buf, inner.x + 1, y, "TITLE>", tstyle)
             tr = Rect(inner.x + 8, y, max(10, inner.width - 12), 1)
             render(m.edit_title, tr, buf)
             y += 2
         end
         if y + 1 < bottom(inner)
-            set_string!(buf, inner.x + 1, y, "DESC>", Style(; fg = QCI_CYAN))
+            dstyle = m.edit_desc.focused ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+            set_string!(buf, inner.x + 1, y, "DESC>", dstyle)
             dr = Rect(inner.x + 8, y, max(10, inner.width - 12), 3)
             render(m.edit_desc, dr, buf)
             y += 4
