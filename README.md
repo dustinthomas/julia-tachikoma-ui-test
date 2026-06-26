@@ -12,6 +12,20 @@ Keys: r=refresh/ingest, j/k nav, q quit.
 
 See plan in .grok session for small-units breakdown.
 
+## How the Metrics Hub Works (Grok Build + Terminal Logs)
+
+The dashboard is a **local viewer** only. Real data flows like this:
+
+1. **Login / Account**: Use the outer `grok` CLI (or the Grok environment running this session). Auth is handled there (first run or `grok login` equivalent). Your sessions use `grok-build` (lead) etc. as configured in `.grok/personas/*.toml`.
+2. **Logging (the "hooks hub" producer)**: The Grok CLI "shell" automatically emits structured events to `~/.grok/logs/unified.jsonl` on inference turns (`shell.turn.inference_done` + model/ctx events). See exact shapes in `test/test_ai_metrics_dashboard.jl:350`.
+3. **Attributions (manual credit)**: `~/.ai-metrics/data.json` stores per-sid `hehsManual` / `hehsActual` + `outcome` ("merged-clean" | "merged-rework"). Only these are credited in HEHS/value.
+4. **Ingestion**: Press `r` in the TUI (or `load_data!` in code/tests). Pure Julia parsers + calculators (ported from the original ai-metrics TS) compute everything.
+5. **Fallback**: If no real files or empty, shows safe dummy data for demos/tests.
+
+Current gaps (addressed in ongoing work): transparency (REAL/DEMO indicator), interactive tagging UI, onboarding docs. The actual log emission and primary auth live in the Grok CLI (replicated from test-grok-cli).
+
+To populate real numbers: do real Grok Build work (using the personas here), then tag outcomes in data.json (future: do it from the TUI).
+
 This workspace is set up with the full Grok-native multi-agent pipeline:
 
 - `.grok/` — personas (planner, scout, coder, validator, reviewer), skills (pipeline, prime, review, test, commit, caveman), config, safety hooks
@@ -101,6 +115,18 @@ None. This is a native Julia terminal application.
 
 - `/prime` to orient.
 - For real work: `/pipeline Build a <feature> TUI screen with full TestBackend coverage`
+
+## Also available
+
+**qci-kanban** (self-contained sub-project at `qci-kanban/`):
+
+Jira-inspired Kanban TUI (board + calendar, SQLite, login/users, full TestBackend).
+
+```bash
+julia --project=qci-kanban -e 'using QciKanban; QciKanban.kanban()'
+```
+
+See [qci-kanban/README.md](qci-kanban/README.md).
 
 Edit `.grok/personas/*.toml` (especially coder/validator) or skills if you need to tune.
 

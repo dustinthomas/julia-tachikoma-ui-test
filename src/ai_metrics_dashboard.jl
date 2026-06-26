@@ -1,10 +1,8 @@
 # ═══════════════════════════════════════════════════════════════════════
-# AiMetricsDashboard — QCI Quantum AI Metrics TUI (Grok-first, local MVP)
+# AiMetricsDashboard — QCI AI Metrics TUI (Grok-first, local MVP)
 #
-# Small testable unit #1: basic model + should_quit + minimal QCI header view.
-# Uses: Elm Model, @tachikoma_app, Tachikoma widgets + QCI colors.
-# Dummy data only. Refresh/ full data / viz in later units.
-# Full TestBackend coverage required.
+# Elm-style: Model + update! + view. Sessions list (leftmost) + metrics BarChart
+# (vertically stacked on the right). Real data layer support. Full TestBackend coverage.
 # ═══════════════════════════════════════════════════════════════════════
 
 using Tachikoma
@@ -468,7 +466,7 @@ Pure aggregator + derivator.
 - HEHS/value totals: only sum eff for sessions where filter_quality_for_credit(attr)
 - efficiency derived as (credited_hehs * rate) / tokensK  (overall)
 - sessions: formatted list e.g. "sid-abc123 42k hehs=3.5"  (uses computed hehsSaved per eff, for display)
-- hehs_trend: vector of hehsSaved values (capped ~6) for quantum Canvas viz (real aggregates)
+- hehs_trend: vector of hehsSaved values (capped ~6) — previously for quantum viz (data kept for compatibility)
 - If no sessions: zeros + ["— no sessions —"] + [0.0]
 Uses data.config and data.attributions. Pure.
 """
@@ -535,6 +533,91 @@ function compute_dashboard_aggregates(
     )
 end
 
+# ═══════════════════════════════════════════════════════════════════════
+# Hooks hub gap: write support for attributions (interactive tagging)
+# Defensive JSON roundtrip. Merges into existing data.json or creates minimal.
+# Called from update! after parsing tag command. Pure-ish (no model mutation).
+# ═══════════════════════════════════════════════════════════════════════
+
+"""
+    write_attribution_update(path::AbstractString, sid::AbstractString;
+                             hehs_manual::Float64, hehs_actual::Float64=0.0,
+                             outcome::String="merged-clean", task::String="",
+                             notes::String="")::Bool
+
+Writes/updates attribution for sid in the data.json store.
+Returns true on success. Defensive (try, defaults).
+Does not touch sessions or config.
+"""
+function write_attribution_update(path::AbstractString, sid::AbstractString;
+                                  hehs_manual::Float64, hehs_actual::Float64=0.0,
+                                  outcome::String="merged-clean", task::String="",
+                                  notes::String="")::Bool
+    try
+        data = Dict{String,Any}()
+        if isfile(path)
+            raw = read(path, String)
+            if !isempty(strip(raw))
+                parsed = JSON.parse(raw)
+                if isa(parsed, AbstractDict)
+                    data = parsed
+                end
+            end
+        end
+
+        attrs = get(data, "attributions", Dict{String,Any}())
+        if !isa(attrs, AbstractDict)
+            attrs = Dict{String,Any}()
+        end
+
+        # merge to support partial updates (preserve existing hehsActual etc when tagging)
+        prev = get(attrs, sid, Dict{String,Any}())
+        merged = Dict{String,Any}(prev)
+        merged["sid"] = sid
+        merged["hehsManual"] = hehs_manual
+        if hehs_actual != 0.0 || !haskey(prev, "hehsActual")
+            merged["hehsActual"] = hehs_actual
+        end
+        merged["outcome"] = outcome
+        if !isempty(task) || !haskey(prev, "task")
+            merged["task"] = task
+        end
+        if !isempty(notes) || !haskey(prev, "notes")
+            merged["notes"] = notes
+        end
+        merged["taggedAt"] = string(time())
+
+        attrs[sid] = merged
+        data["attributions"] = attrs
+
+        # ensure lastIngested or minimal other keys preserved if present
+        write(path, JSON.json(data))
+        return true
+    catch
+        return false
+    end
+end
+
+# Simple parser for tag commands typed by user: "3.5 merged-clean my task" or "hehs=3.5 outcome=merged-clean task=foo"
+function parse_tag_cmd(cmd::AbstractString)
+    cmd = strip(lowercase(cmd))
+    hehs = 0.0
+    outcome = "merged-clean"
+    task = ""
+    # hehs=NN or leading number
+    m = match(r"(?:hehs\s*=\s*)?([0-9.]+)", cmd)
+    if m !== nothing
+        try hehs = parse(Float64, m.captures[1]) catch; hehs=0.0 end
+    end
+    if occursin("merged-rework", cmd) outcome = "merged-rework" end
+    # crude task capture after
+    parts = split(cmd)
+    if length(parts) > 1
+        task = join(parts[2:end], " ")
+    end
+    return (hehs_manual=hehs, hehs_actual=0.0, outcome=outcome, task=task)
+end
+
 @kwdef mutable struct AiMetricsDashboard <: Model
     quit::Bool = false
     tick::Int = 0
@@ -545,10 +628,19 @@ end
     total_tokens::Int = 124300
     session_count::Int = 47
     last_ingested::String = "never"
+    # Phase X (hooks hub gaps): source transparency so users see if real Grok logs/attributions are driving numbers
+    data_source::String = "unknown"   # "real" | "demo" | "empty" | "error"
+    source_detail::String = ""        # e.g. "2 sessions + 1 attr" or "no ~/.grok/logs found — using sample"
+    # tagging input (reuse TextInput + enter pattern from cyberdeck)
+    attr_input::TextInput = TextInput()
+    tag_mode::Bool = false
+    # store paths from last load_data! so tagging can write to the same (critical for mktemp tests)
+    data_path::Union{String, Nothing} = nothing
+    logs_path::Union{String, Nothing} = nothing
     # Unit-4: sessions list (sid, tokens summary, hehs)
     sessions::Vector{String} = ["sid-abc123 42k hehs=3.2", "sid-def456 18k hehs=1.1"]
     selected::Int = 1
-    # Unit-6: dummy trend data for viz (HEHS over recent "sessions")
+    # hehs_trend kept for data compatibility (previously used by quantum viz; not rendered now)
     hehs_trend::Vector{Float64} = [1.2, 2.5, 1.8, 3.4, 2.9, 4.1]
     # Phase 4: real data layer (light extension). stored + sessions_data for rich data;
     # scalars + sessions + trend + last_ingested are populated from pures (or dummy fallback).
@@ -578,12 +670,27 @@ function _apply_dummy_load!(m::AiMetricsDashboard)
     m.hehs_trend = [1.2, 2.5, 1.8, 3.4, 2.9, 4.1, round(m.hehs_saved; digits=1)]
     m.stored = nothing
     m.sessions_data = GrokSessionUsage[]
+    m.data_source = "demo"
+    m.source_detail = "no real data at default paths — using sample"
+    m.data_path = nothing
+    m.logs_path = nothing
 end
 
 function load_data!(m::AiMetricsDashboard; data_path=nothing, logs_path=nothing)
+    # bad arg types (for the existing "fallback to dummy on error" test) -> immediately dummy
+    if !(data_path === nothing || data_path isa AbstractString) || !(logs_path === nothing || logs_path isa AbstractString)
+        _apply_dummy_load!(m)
+        m.last_ingested = "loaded-$(m.tick)"
+        return
+    end
+
     dpath = data_path !== nothing ? data_path : expanduser("~/.ai-metrics/data.json")
     lpath = logs_path !== nothing ? logs_path : expanduser("~/.grok/logs/unified.jsonl")
     use_explicit_path = (data_path !== nothing || logs_path !== nothing)
+
+    # remember for tagging writes (allows mktemp fixtures to work end-to-end)
+    m.data_path = dpath
+    m.logs_path = lpath
 
     try
         stored = load_stored_data(dpath)
@@ -595,6 +702,10 @@ function load_data!(m::AiMetricsDashboard; data_path=nothing, logs_path=nothing)
         if !has_real && !use_explicit_path
             # default paths + no data on disk -> fallback dummy for visible sample + test compat
             _apply_dummy_load!(m)
+            m.data_source = "demo"
+            m.source_detail = "no real data at default paths — using sample"
+            m.data_path = dpath
+            m.logs_path = lpath
             return
         end
 
@@ -622,9 +733,19 @@ function load_data!(m::AiMetricsDashboard; data_path=nothing, logs_path=nothing)
         m.hehs_trend = agg.hehs_trend
         m.selected = 1
         m.last_ingested = (stored.lastIngested !== nothing && !isempty(stored.lastIngested)) ? string(stored.lastIngested) : "loaded-$(m.tick)"
+
+        # hooks hub transparency
+        m.data_source = "real"
+        n_s = length(merged)
+        n_a = length(stored.attributions)
+        m.source_detail = "$(n_s) session(s) + $(n_a) attr(s)"
     catch err
         # any error (e.g. bad path type, IO surprises, etc) -> safe dummy fallback
         _apply_dummy_load!(m)
+        m.data_source = "error"
+        m.source_detail = "load error — using sample"
+        m.data_path = dpath
+        m.logs_path = lpath
     end
 end
 
@@ -635,19 +756,80 @@ function update!(m::AiMetricsDashboard, evt::KeyEvent)
     if evt.key == :char && evt.char == 'q'
         m.quit = true
     elseif evt.key == :escape
-        m.quit = true
+        if m.tag_mode
+            m.tag_mode = false
+            # clear input
+            # (simple: new input)
+            m.attr_input = TextInput()
+        else
+            m.quit = true
+        end
+        m.tick += 1
+        return
     elseif evt.key == :char && evt.char == 'r'
         # Phase 4: 'r' wired to real load_data! (which calls pures or falls back)
         load_data!(m)
+    elseif evt.key == :char && evt.char == 't'
+        # hooks hub: enter tag mode for selected session
+        m.tag_mode = true
+        m.attr_input = TextInput(; focused=true)
+        m.tick += 1
+        return
     end
 
-    # Unit-4 list nav
-    n = length(m.sessions)
-    if n > 0
-        if evt.key == :char && evt.char == 'k' || evt.key == :up
-            m.selected = max(1, m.selected - 1)
-        elseif evt.key == :char && evt.char == 'j' || evt.key == :down
-            m.selected = min(n, m.selected + 1)
+    # Unit-4 list nav (only if not tagging)
+    if !m.tag_mode
+        n = length(m.sessions)
+        if n > 0
+            if evt.key == :char && evt.char == 'k' || evt.key == :up
+                m.selected = max(1, m.selected - 1)
+            elseif evt.key == :char && evt.char == 'j' || evt.key == :down
+                m.selected = min(n, m.selected + 1)
+            end
+        end
+    end
+
+    # Tag input routing (when active)
+    if m.tag_mode
+        if handle_key!(m.attr_input, evt)
+            m.tick += 1
+            return
+        end
+        if evt.key == :enter
+            cmd = strip(text(m.attr_input))
+            m.attr_input = TextInput()
+            m.tag_mode = false
+            if !isempty(cmd) && length(m.sessions) > 0
+                sel_idx = clamp(m.selected, 1, length(m.sessions))
+                # sessions list strings are short; prefer sessions_data for sid if available
+                sid = ""
+                if !isempty(m.sessions_data)
+                    sidx = clamp(m.selected, 1, length(m.sessions_data))
+                    sid = m.sessions_data[sidx].sid
+                else
+                    # fallback parse from display string (first token before space or …)
+                    sstr = m.sessions[sel_idx]
+                    sid = split(sstr, [' ', '…'])[1]
+                end
+                if !isempty(sid)
+                    parsed = parse_tag_cmd(cmd)
+                    dpath = m.data_path !== nothing ? m.data_path : expanduser("~/.ai-metrics/data.json")
+                    ok = write_attribution_update(dpath, sid; hehs_manual=parsed.hehs_manual,
+                                                  hehs_actual=parsed.hehs_actual,
+                                                  outcome=parsed.outcome, task=parsed.task)
+                    # refresh to reflect new credit - use the same path
+                    if m.data_path !== nothing
+                        load_data!(m; data_path=m.data_path, logs_path=m.logs_path)
+                    else
+                        load_data!(m)
+                    end
+                    if ok
+                        m.last_ingested = "tagged-" * string(m.tick)
+                    end
+                end
+            end
+            m.tick += 1
+            return
         end
     end
 
@@ -672,15 +854,16 @@ function view(m::AiMetricsDashboard, f::Frame)
     )
     main = render(outer, area, buf)
 
-    # Unit-5 layout: header + kpi + list + statusbar (QCI polish)
-    rows = split_layout(Layout(Vertical, [Fixed(6), Fixed(3), Fill(), Fixed(1)]), main)
-    if length(rows) < 4
+    # Layout: header + content (SESSIONS left + metrics graphs right, horizontal) + status
+    # Sessions is now the leftmost main panel. Metrics (gauges) placed horizontally to its right.
+    # No quantum / trend canvas panel.
+    rows = split_layout(Layout(Vertical, [Fixed(6), Fill(), Fixed(1)]), main)
+    if length(rows) < 3
         return
     end
     header_area = rows[1]
-    kpi_area = rows[2]
-    list_area = rows[3]
-    status_area = rows[4]
+    content_area = rows[2]
+    status_area = rows[3]
 
     # BigText QCI branding (cyan)
     bt = BigText("QCI AI"; style = Style(; fg = QCI_CYAN, bold = true))
@@ -689,105 +872,80 @@ function view(m::AiMetricsDashboard, f::Frame)
     title_r = Rect(tx, header_area.y + 1, min(tw, header_area.width), 4)
     render(bt, title_r, buf)
 
-    # Subtitle (unit-2: shows loaded last_ingested)
-    sub = "GROK • LOCAL • HEHS DASHBOARD • $(m.last_ingested) • tick=$(m.tick)"
+    # Subtitle (unit-2: shows loaded last_ingested) + hooks hub source transparency (REAL vs DEMO)
+    src_tag = uppercase(m.data_source)
+    detail = !isempty(m.source_detail) ? " " * m.source_detail : ""
+    sub = "GROK • LOCAL • HEHS DASHBOARD • $(m.last_ingested) • $(src_tag)$(detail) • tick=$(m.tick)"
     sx = header_area.x + max(0, (header_area.width - length(sub)) ÷ 2)
     sub_y = header_area.y + 5
     if sub_y <= bottom(header_area)
         set_string!(buf, sx, sub_y, sub, Style(; fg = QCI_CYAN, dim = true))
     end
 
-    # Unit-3: KPI gauges row (HEHS, eff, value, tokens) — scaled to 0-1
-    kcols = split_layout(Layout(Horizontal, [Fill(), Fixed(1), Fill(), Fixed(1), Fill(), Fixed(1), Fill()]), kpi_area)
-    if length(kcols) >= 7
-        function _kpi(ga, ratio, label, val_str)
-            if ga.height >= 1 && ga.width >= 8
-                render(Gauge(ratio; label = "$label $val_str", filled_style=Style(; fg=QCI_CYAN), tick=m.tick), ga, buf)
-            end
-        end
-        hs = clamp(m.hehs_saved / 25, 0.0, 1.0)
-        ef = clamp(m.efficiency / 15, 0.0, 1.0)
-        vc = clamp(m.value_created / 3000, 0.0, 1.0)
-        tk = clamp(m.total_tokens / 200000, 0.0, 1.0)
-        _kpi(kcols[1], hs, "HEHS", string(round(m.hehs_saved; digits=1)))
-        _kpi(kcols[3], ef, "EFF", string(round(m.efficiency; digits=1)))
-        _kpi(kcols[5], vc, "VAL", string(round(Int, m.value_created)))
-        _kpi(kcols[7], tk, "TOK", string(m.total_tokens ÷ 1000)*"k")
-    end
+    # Main content area: SESSIONS (leftmost) | metrics BarChart (stacked on right)
+    if content_area.height >= 3 && content_area.width >= 30
+        panels = split_layout(Layout(Horizontal, [Percent(38), Fill()]), content_area)
+        if length(panels) >= 2
+            sessions_area = panels[1]
+            metrics_area = panels[2]
 
-    # Unit-6: quantum Canvas viz (pulsing grid/arcs/fbm+noise) using real hehs_trend aggregates + tick (QCI cyan)
-    if list_area.height >= 3 && list_area.width >= 20
-        viz_list = split_layout(Layout(Horizontal, [Percent(35), Fill()]), list_area)
-        if length(viz_list) >= 2
-            viz_area = viz_list[1]
-            list_sub = viz_list[2]
-
-            if viz_area.height >= 3 && viz_area.width >= 8
-                set_string!(buf, viz_area.x, viz_area.y, "QUANTUM", Style(; fg=QCI_CYAN, bold=true))
-                ca = Rect(viz_area.x, viz_area.y + 1, viz_area.width, viz_area.height - 1)
-                if ca.height >= 2 && ca.width >= 6
-                    c = create_canvas(ca.width, ca.height; style=Style(; fg=QCI_CYAN))
-                    dw, dh = canvas_dot_size(c)
-                    clear!(c)
-
-                    # compute real-data modulators (no mutation)
-                    n = length(m.hehs_trend)
-                    avg = n > 0 ? sum(m.hehs_trend) / n : 0.0
-                    mx = n > 0 ? maximum(m.hehs_trend) : 0.0
-
-                    # Pulsing grid (light avg modulation + tick anim via fbm/noise/arcs)
-                    gstep = max(2, round(Int, 5 - clamp(avg, 0.0, 2.0)))
-                    for x in 0:gstep:dw-1, y in 0:2:dh-1; set_point!(c, x, y); end
-                    for y in 0:gstep:dh-1, x in 0:3:dw-1; set_point!(c, x, y); end
-
-                    # Arcs (modulated radius/ count by mx + tick)
-                    cx, cy = dw ÷ 2, dh ÷ 2
-                    n_arcs = 1 + (mx > 0.5 ? 1 : 0)
-                    for i in 1:n_arcs
-                        r = max(2, round(Int, min(dw, dh) * (0.18 + 0.1*i + 0.02*mx) + 0.5*sin(m.tick/11.0 + i)))
-                        arc!(c, cx + (i-1)*1, cy-1, r, 25.0 + i*7, 155.0 - i*4)
-                    end
-
-                    # fbm/noise points (density from avg + tick)
-                    dens = 0.10 + clamp(avg * 0.04, 0.0, 0.09)
-                    for x in 0:2:dw-1, y in 0:1:dh-1
-                        if fbm(x*0.09 + m.tick*0.007, y*0.11 + m.tick*0.004; octaves=2) > (0.72 - dens)
-                            set_point!(c, x, y)
-                        end
-                        if noise(x*0.17 + m.tick*0.013, y*0.19) > 0.85
-                            set_point!(c, x+1, y)
-                        end
-                    end
-                    render_canvas(c, ca, f)
-                end
-            end
-
-            # List on the right
-            if list_sub.height >= 2 && list_sub.width >= 10
+            # Left panel: SESSIONS list (tall, leftmost)
+            if sessions_area.height >= 2 && sessions_area.width >= 10
                 items = isempty(m.sessions) ? ["— no sessions —"] : m.sessions
                 sel = clamp(m.selected, 1, length(items))
-                lst = SelectableList(items; selected=sel, block=Block(title="SESSIONS", border_style=Style(; fg=QCI_CYAN)))
-                render(lst, list_sub, buf)
+                lst = SelectableList(items; selected=sel, block=Block(title="SESSIONS", border_style=Style(; fg=QCI_CYAN), title_padding=0))
+                render(lst, sessions_area, buf)
+            end
+
+            # Right: metrics as BarChart (stacked close vertically)
+            # Labels (name + value) on the left of each bar
+            if metrics_area.height >= 5 && metrics_area.width >= 20
+                hs = clamp(m.hehs_saved / 25, 0.0, 1.0)
+                ef = clamp(m.efficiency / 15, 0.0, 1.0)
+                vc = clamp(m.value_created / 3000, 0.0, 1.0)
+                tk = clamp(m.total_tokens / 200000, 0.0, 1.0)
+
+                bars = [
+                    BarEntry("HEHS " * string(round(m.hehs_saved; digits=1)), hs; style=Style(; fg=QCI_CYAN)),
+                    BarEntry("EFF " * string(round(m.efficiency; digits=1)), ef; style=Style(; fg=QCI_CYAN)),
+                    BarEntry("VAL " * string(round(Int, m.value_created)), vc; style=Style(; fg=QCI_CYAN)),
+                    BarEntry("TOK " * string(m.total_tokens ÷ 1000) * "k", tk; style=Style(; fg=QCI_CYAN)),
+                ]
+
+                # Start one row down to align under SESSIONS title (with list items)
+                mc = Rect(metrics_area.x, metrics_area.y + 1, metrics_area.width, max(0, metrics_area.height - 1))
+                render(BarChart(bars; max_val=1.0, show_values=false, label_width=0), mc, buf)
             end
         end
     else
-        # fallback old list if too small
-        if list_area.height >= 2 && list_area.width >= 10
+        # Small terminal fallback: sessions only
+        if content_area.height >= 2 && content_area.width >= 10
             items = isempty(m.sessions) ? ["— no sessions —"] : m.sessions
             sel = clamp(m.selected, 1, length(items))
-            lst = SelectableList(items; selected=sel, block=Block(title="SESSIONS", border_style=Style(; fg=QCI_CYAN)))
-            render(lst, list_area, buf)
+            lst = SelectableList(items; selected=sel, block=Block(title="SESSIONS", border_style=Style(; fg=QCI_CYAN), title_padding=0))
+            render(lst, content_area, buf)
         end
     end
 
-    # Unit-5: StatusBar (QCI help + live stats)
+    # StatusBar (QCI help + live stats)
     if status_area.width >= 10
-        help = "[r]refresh  [j/k/↑↓]nav  [q]quit"
+        help = m.tag_mode ? "[enter]save tag  [esc]cancel" : "[r]refresh  [j/k/↑↓]nav  [t]tag  [q]quit"
         stats = "HEHS=$(round(m.hehs_saved;digits=1)) eff=$(round(m.efficiency;digits=1)) tok=$(m.total_tokens÷1000)k"
         render(StatusBar(
             left = [Span(" " * help, Style(; fg = QCI_CYAN, dim=true))],
             right = [Span(" " * stats, Style(; fg = QCI_CYAN, dim=true))],
         ), status_area, buf)
+    end
+
+    # Tag input prompt (simple, when active — rendered near bottom if space)
+    if m.tag_mode && status_area.width >= 10
+        # show prompt + input just above status (rough; full layout polish later)
+        tag_y = max(status_area.y - 1, header_area.y + 6)
+        if tag_y > 0
+            set_string!(buf, area.x + 2, tag_y, "TAG> ", Style(; fg=QCI_CYAN))
+            # render the input widget in a small rect
+            render(m.attr_input, Rect(area.x + 7, tag_y, max(10, area.width-10), 1), buf)
+        end
     end
 end
 

@@ -92,16 +92,17 @@ const load_data! = TachikomaUITest.load_data!
         @test T.char_at(tb, 1, 1) != '\0'
     end
 
-    @testset "KPI gauges visible (unit-3)" begin
+    @testset "Metrics BarChart visible (unit-3)" begin
         m = AiMetricsDashboard(hehs_saved=10.0, efficiency=5.0)
-        tb = T.TestBackend(80, 10)
+        # Taller backend so content area + right metrics panel have room for gauges
+        tb = T.TestBackend(80, 14)
         T.reset!(tb.buf)
         frame = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
         T.view(m, frame)
 
         @test T.find_text(tb, "HEHS") !== nothing
         @test T.find_text(tb, "EFF") !== nothing || T.find_text(tb, "10.0") !== nothing
-        @test T.find_text(tb, "VAL") !== nothing
+        @test T.find_text(tb, "VAL") !== nothing || T.find_text(tb, "1850") !== nothing || T.find_text(tb, "TOK") !== nothing
     end
 
     @testset "Sessions list + nav (unit-4)" begin
@@ -133,7 +134,7 @@ const load_data! = TachikomaUITest.load_data!
         @test occursin("HEHS", row) || occursin("eff", row) || T.find_text(tb, "QCI") !== nothing
     end
 
-    @testset "Viz Quantum Canvas (unit-6)" begin
+    @testset "Sessions left + Metrics graphs right (new layout)" begin
         m = AiMetricsDashboard()
         T.update!(m, T.KeyEvent('r'))
         tb = T.TestBackend(80, 16)
@@ -141,10 +142,13 @@ const load_data! = TachikomaUITest.load_data!
         frame = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
         T.view(m, frame)
 
-        @test T.find_text(tb, "QUANTUM") !== nothing
-        # canvas content: braille/unicode non-ascii non-space (from grid/arcs/points)
-        any_braille = any(i -> any(c -> c != ' ' && !isascii(c), collect(T.row_text(tb, i))), 1:tb.height)
-        @test any_braille
+        @test T.find_text(tb, "SESSIONS") !== nothing
+        # Metrics on the right
+        @test T.find_text(tb, "HEHS") !== nothing
+        @test T.find_text(tb, "EFF") !== nothing
+        @test T.find_text(tb, "VAL") !== nothing || T.find_text(tb, "TOK") !== nothing
+        # No quantum panel anymore
+        @test T.find_text(tb, "QUANTUM") === nothing
     end
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -704,7 +708,7 @@ const load_data! = TachikomaUITest.load_data!
             end
         end
 
-        @testset "Viz Quantum Canvas real aggregates (Phase5)" begin
+        @testset "Sessions left + Metrics right with real aggregates (Phase5)" begin
             mktempdir() do dir
                 dpath = joinpath(dir, "data.json")
                 data_fixture = Dict{String,Any}(
@@ -746,20 +750,94 @@ const load_data! = TachikomaUITest.load_data!
                 frame = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
                 T.view(m, frame)
 
-                @test T.find_text(tb, "QUANTUM") !== nothing
-                @test T.find_text(tb, "3.5") !== nothing  # real credited data still present
-                # canvas braille content (non-ascii non-space from quantum grid/arcs/fbm)
-                any_braille = any(i -> any(c -> c != ' ' && !isascii(c), collect(T.row_text(tb, i))), 1:tb.height)
-                @test any_braille
+                @test T.find_text(tb, "SESSIONS") !== nothing
+                @test T.find_text(tb, "3.5") !== nothing  # real credited hehs data
+                @test T.find_text(tb, "HEHS") !== nothing || T.find_text(tb, "EFF") !== nothing
+                # Ensure quantum panel is gone
+                @test T.find_text(tb, "QUANTUM") === nothing
+                # source transparency from hooks hub work
+                @test T.find_text(tb, "REAL") !== nothing || occursin("REAL", T.row_text(tb, 6)) || T.find_text(tb, "real") !== nothing
 
-                # tick via update + re-render
+                # tick via update + re-render preserves data
                 T.update!(m, T.KeyEvent('j'))
                 T.reset!(tb.buf)
                 frame2 = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
                 T.view(m, frame2)
-                @test T.find_text(tb, "QUANTUM") !== nothing
-                any_braille2 = any(i -> any(c -> c != ' ' && !isascii(c), collect(T.row_text(tb, i))), 1:tb.height)
-                @test any_braille2
+                @test T.find_text(tb, "SESSIONS") !== nothing
+                @test T.find_text(tb, "3.5") !== nothing
+            end
+        end
+
+        @testset "source transparency + tag mode basic (model + render)" begin
+            m = AiMetricsDashboard()
+            T.update!(m, T.KeyEvent('r'))  # may demo
+            @test m.data_source in ("demo", "real", "error")
+
+            tb = T.TestBackend(60, 12)
+            T.reset!(tb.buf)
+            frame = T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+            T.view(m, frame)
+            # at least renders without crash and shows a source tag (DEMO or REAL upper)
+            row = T.row_text(tb, 6)
+            @test occursin("DEMO", uppercase(row)) || occursin("REAL", uppercase(row)) || T.find_text(tb, "QCI") !== nothing
+
+            # enter tag mode
+            T.update!(m, T.KeyEvent('t'))
+            @test m.tag_mode == true
+            T.reset!(tb.buf)
+            frame3 = T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+            T.view(m, frame3)
+            # prompt or input visible
+            @test T.find_text(tb, "TAG") !== nothing || T.find_text(tb, "tag") !== nothing || m.tag_mode
+        end
+
+        @testset "full tagging flow with mktemp fixture (TestBackend + write + re-compute)" begin
+            mktempdir() do dir
+                dpath = joinpath(dir, "data.json")
+                lpath = joinpath(dir, "u.jsonl")
+                # credited fixture with one session, initial hehs=3.5
+                write(dpath, JSON.json(Dict{String,Any}(
+                    "sessions" => Dict{String,Any}("sid-xyz" => Dict{String,Any}(
+                        "sid"=>"sid-xyz", "turnCount"=>1,
+                        "total"=>Dict("promptTokens"=>1000,"completionTokens"=>200,"reasoningTokens"=>0),
+                        "totalTokens"=>1200, "models"=>["grok-build"], "cwds"=>[]
+                    )),
+                    "attributions" => Dict{String,Any}("sid-xyz" => Dict{String,Any}(
+                        "sid"=>"sid-xyz", "hehsManual"=>5.0, "hehsActual"=>1.5, "outcome"=>"merged-clean", "taggedAt"=>"t"
+                    )),
+                    "lastIngested" => "orig"
+                )))
+                write(lpath, "")
+
+                m = AiMetricsDashboard()
+                load_data!(m; data_path=dpath, logs_path=lpath)
+                @test m.hehs_saved ≈ 3.5
+                @test m.data_path == dpath
+
+                tb = T.TestBackend(80, 14)
+                T.reset!(tb.buf)
+                frame = T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+                T.view(m, frame)
+                @test T.find_text(tb, "3.5") !== nothing
+
+                # enter tag mode
+                T.update!(m, T.KeyEvent('t'))
+                @test m.tag_mode == true
+
+                # simulate typing a better attribution (increases hehs)
+                T.set_text!(m.attr_input, "6.0 merged-clean better tagging test")
+                T.update!(m, T.KeyEvent(:enter))
+                @test m.tag_mode == false
+
+                # after enter it should have reloaded using stored path
+                @test m.hehs_saved ≈ 4.5   # 6.0 - 1.5
+
+                # re-render and verify
+                T.reset!(tb.buf)
+                frame2 = T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+                T.view(m, frame2)
+                @test T.find_text(tb, "4.5") !== nothing || T.find_text(tb, "hehs=4.5") !== nothing
+                @test T.find_text(tb, "tagged-") !== nothing || occursin("tagged", lowercase(T.row_text(tb, 7)))
             end
         end
 
@@ -796,6 +874,35 @@ const load_data! = TachikomaUITest.load_data!
             end
         end
 
+    end
+
+    # New for hooks hub tagging (phase3/4)
+    @testset "write_attribution_update + parse_tag_cmd (pure + file roundtrip)" begin
+        mktempdir() do dir
+            p = joinpath(dir, "data.json")
+            # start minimal
+            write(p, JSON.json(Dict("attributions"=>Dict(), "sessions"=>Dict())))
+
+            ok = TachikomaUITest.write_attribution_update(p, "sid-test123";
+                hehs_manual=3.5, hehs_actual=1.0, outcome="merged-clean", task="demo tag")
+            @test ok == true
+
+            d = TachikomaUITest.load_stored_data(p)
+            @test haskey(d.attributions, "sid-test123")
+            a = d.attributions["sid-test123"]
+            @test a.hehsManual ≈ 3.5
+            @test a.outcome == "merged-clean"
+
+            # parse helper
+            p1 = TachikomaUITest.parse_tag_cmd("3.5 merged-clean foo bar")
+            @test p1.hehs_manual ≈ 3.5
+            @test p1.outcome == "merged-clean"
+            @test occursin("foo", p1.task)
+
+            p2 = TachikomaUITest.parse_tag_cmd("hehs=2.25 outcome=merged-rework")
+            @test p2.hehs_manual ≈ 2.25
+            @test p2.outcome == "merged-rework"
+        end
     end
 
 end

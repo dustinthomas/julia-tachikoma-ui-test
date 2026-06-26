@@ -19,6 +19,7 @@ export AiMetricsDashboard, ai_metrics_dashboard, run_ai_metrics_dashboard
 # Phase 1-3 pure data layer (per plan + review)
 export TokenBreakdown, GrokSessionUsage, Attribution, MetricsConfig, StoredData, DEFAULT_CONFIG
 export load_stored_data, parse_grok_unified_jsonl, compute_efficiency, compute_dashboard_aggregates, filter_quality_for_credit
+export write_attribution_update, parse_tag_cmd
 
 # Add shared utilities, demo apps, or reexports as the project grows.
 # Example:

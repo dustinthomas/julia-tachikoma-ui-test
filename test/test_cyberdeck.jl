@@ -188,7 +188,7 @@ const Cyberdeck = TachikomaUITest.Cyberdeck
         # Sparkline
         tb = T.TestBackend(20, 3)
         T.render_widget!(tb, T.Sparkline([0.1,0.4,0.9,0.3]; style=T.tstyle(:secondary)))
-        @test T.char_at(tb, 2, 2) != ' ' || true
+        @test any(c -> c != ' ', collect(T.row_text(tb, 2)))  # ensure sparkline drew visible content (was dead `|| true`)
 
         # BigText
         tb = T.TestBackend(30, 6)
