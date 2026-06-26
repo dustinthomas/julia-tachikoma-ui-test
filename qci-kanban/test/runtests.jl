@@ -1,0 +1,109 @@
+using Test
+using Tachikoma
+const T = Tachikoma
+
+using QciKanban
+const KanbanModel = QciKanban.KanbanModel
+
+# Visual inspection helpers (TestBackend row dumps + scenarios for verifying no artifacts)
+function visual_rows(m; w::Int = 80, h::Int = 20)
+    tb = T.TestBackend(w, h)
+    T.reset!(tb.buf)
+    T.view(m, T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[]))
+    [T.row_text(tb, i) for i in 1:h]
+end
+
+# Component tests (add more as we progress through phases)
+include("test_db.jl")
+include("test_board_render.jl")
+include("test_modal_move.jl")
+include("test_users.jl")
+include("test_calendar.jl")
+
+@testset "QciKanban Phase 0: scaffold + QCI branding + basic render" begin
+
+    @testset "Model + should_quit" begin
+        m = KanbanModel()
+        @test m isa KanbanModel
+        @test m isa T.Model
+        @test m.quit == false
+        @test T.should_quit(m) == false
+
+        m.quit = true
+        @test T.should_quit(m) == true
+    end
+
+    @testset "Basic keys (q/esc + view mode switches)" begin
+        m = KanbanModel()
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == true
+
+        m2 = KanbanModel()
+        T.update!(m2, T.KeyEvent(:escape))
+        @test m2.quit == true
+
+        m3 = KanbanModel()
+        T.update!(m3, T.KeyEvent('c'))
+        @test m3.view_mode == :calendar
+        @test occursin("Calendar", m3.message)
+
+        T.update!(m3, T.KeyEvent('b'))
+        @test m3.view_mode == :board
+    end
+
+    @testset "View renders QCI header + logo text (TestBackend)" begin
+        m = KanbanModel()
+        tb = T.TestBackend(60, 14)
+        T.reset!(tb.buf)
+        frame = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+        T.view(m, frame)
+
+        # Logo + branding evidence
+        @test T.find_text(tb, "QCI") !== nothing
+        @test T.find_text(tb, "KANBAN") !== nothing || T.find_text(tb, "QCI KANBAN") !== nothing
+        row = T.row_text(tb, 1)
+        @test occursin("QCI", row) || T.find_text(tb, "QCI") !== nothing
+
+        # Mode hint
+        @test T.find_text(tb, "board") !== nothing || T.find_text(tb, "BOARD") !== nothing
+    end
+
+    @testset "Small area guard" begin
+        m = KanbanModel()
+        tb = T.TestBackend(18, 4)
+        T.reset!(tb.buf)
+        frame = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+        T.view(m, frame)
+        @test T.find_text(tb, "small") !== nothing || T.find_text(tb, "QCI") !== nothing
+    end
+
+    @testset "QCI_SECONDARY exported + unselected list text visible (visual_rows + find_text/row_text after update!)" begin
+        @test isdefined(QciKanban, :QCI_SECONDARY)
+        sec = QciKanban.QCI_SECONDARY
+        @test sec isa T.ColorRGB
+        # board unselected after nav
+        m = KanbanModel()
+        m.db_path = ":memory:"
+        QciKanban.load_board!(m)
+        T.update!(m, T.KeyEvent('l'))
+        T.update!(m, T.KeyEvent('j'))
+        rows = visual_rows(m; w=80, h=18)
+        @test any(occursin("QCI-", r) for r in rows)  # unselected cards text present
+        @test any(occursin("To Do", r) || occursin("Backlog", r) for r in rows)
+        tb = T.TestBackend(80, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+        @test T.find_text(tb, "QCI-") !== nothing
+        @test T.row_text(tb, 9) !== nothing
+    end
+end
+
+@testset "record_app demo integration (visual capture outside TestBackend)" begin
+    mktempdir() do dir
+        cd(dir) do
+            fn = QciKanban.record_demo("test-kanban.tach"; frames=12, fps=4)
+            @test isfile(fn)
+            @test filesize(fn) > 100
+        end
+    end
+end
