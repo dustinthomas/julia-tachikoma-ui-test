@@ -2,7 +2,7 @@
 
 **Date**: 2026-06-22  
 **Goal**: Quantitatively measure the impact of the token-efficiency improvements on a realistic coding pipeline while keeping quality (correctness of delivered app) high.  
-**Key Constraint**: Keep `reasoning_effort = "high"` for mercury-2 in the coder persona for both runs.
+**Key Constraint**: Use only grok-composer-2.5-fast (native) for coder persona. No mercury-2.
 
 ## 1. Benchmark Task (identical for both runs)
 
@@ -72,7 +72,7 @@ Use the patterns documented in `.grok/docs/token-efficiency.md`:
 **Important**: The *same* model routing remains:
 - Planner + Validator + Lead: grok-build
 - Scout + Reviewers: grok-composer-2.5-fast
-- Coder: mercury-2 with `reasoning_effort = "high"`
+- Coder: grok-composer-2.5-fast (native only; locked)
 
 ## 3. Execution Protocol (same structure for both runs)
 
@@ -86,7 +86,7 @@ Both start with `git init` and no other files.
 1. **Plan** (planner persona, read-only) → write `plan.md` + short plan summary
 2. **Scout** (scout persona, read-only) → write `scout-report.md` + short summary
 3. **Implement/Validate Loop** (max 3 attempts)
-   - Coder (mercury-2 high) implements the current attempt
+   - Coder (grok-composer-2.5-fast native) implements the current attempt
    - Validator runs checks and reports (using the style for that run)
    - Lead decides next action or success
 4. **Review** (3 parallel reviewers)
@@ -140,7 +140,7 @@ For each delivered app:
 
 - Identical task description
 - Identical tech stack and constraints
-- Same model assignment (mercury high for coder)
+- Same model assignment (grok-composer-2.5-fast native only for coder)
 - Same max attempts (3)
 - Fresh directories (no carry-over files or .grok state in target dirs)
 - Same lead behavior except for the deliberate prompt/context differences being measured

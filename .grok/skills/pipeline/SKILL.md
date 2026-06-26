@@ -14,8 +14,8 @@ This skill encodes the deterministic quality pipeline from the fab-ui-2-0 Claude
 ## Prerequisites (always)
 - Read `AGENTS.md` and relevant personas first.
 - Current model routing (via `.grok/config.toml`):
-  - `grok-build`: lead + heavy work (coder, validator, complex planner)
-  - `grok-composer-2.5-fast`: fast/light roles (scout/explore, reviewer, simple plan)
+  - `grok-build`: lead + heavy work (planner, validator)
+  - `grok-composer-2.5-fast`: fast/light + coder (via persona: grok-composer-2.5-fast native only)
 - Use personas for consistent behavior: `planner`, `scout`, `coder`, `validator`, `reviewer`.
 - Demand **high-signal evidence** (see token-efficiency.md):
 - Validator: report exact command + exit_code + concise evidence (key lines or errors; full tail only on failures or "all pass" claims).
@@ -89,11 +89,11 @@ Max attempts default 4.
 
 For each attempt:
 
-**Coder** (write-capable, mercury-2 high reasoning):
+**Coder** (write-capable, grok-composer-2.5-fast native):
 ```
 spawn_subagent with:
   prompt: |
-    You are the Coder persona (mercury-2, reasoning_effort=high).
+    You are the Coder persona (grok-composer-2.5-fast native).
 
     Task: <task>
     Relevant Plan: See plan.md (focus on the phases for this attempt)

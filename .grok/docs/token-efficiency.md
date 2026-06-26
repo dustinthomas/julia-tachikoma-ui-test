@@ -1,7 +1,7 @@
 # Token Efficiency Improvements for the Pipeline
 
 **Status**: Implemented 2026-06-22
-**Core Constraint**: Keep `reasoning_effort = "high"` on mercury-2 for coder persona (highest quality first pass).
+**Core Constraint**: Use grok-composer-2.5-fast native only for coder persona (no mercury-2).
 
 ## Goals
 - Dramatically reduce lead context size (was hitting 140k+ prompt tokens)
@@ -43,7 +43,7 @@ This was the single biggest output bloat source.
 Standard prompt skeleton for coder (and similar for others):
 
 ```
-You are the Coder persona (mercury-2, high reasoning).
+You are the Coder persona (grok-composer-2.5-fast native).
 
 Task: <short task>
 Relevant Plan sections: Phase X + Y (see plan.md)
@@ -90,7 +90,7 @@ In pipeline skill examples and lead practice:
 - For follow-on work on the same project, consider reusing `scout-report.md` + `plan.md` unless the architecture or stack changed.
 
 ## What Was NOT Changed
-- `reasoning_effort = "high"` on mercury-2 coder persona (user requirement for highest first-pass quality).
+- grok-composer-2.5-fast native only for coder (locked in persona).
 - Core evidence rules (execute yourself, re-audit on "all pass", reviewers must open files and quote exactly).
 - The overall Plan → Scout → Implement/Validate ↔ Review loop.
 

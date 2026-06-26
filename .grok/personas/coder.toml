@@ -4,10 +4,9 @@
 description = "Implementation agent. Writes and edits code following project conventions. Receives plans and scout reports."
 
 model = "grok-composer-2.5-fast"
-# reasoning_effort = "high"   # mercury-2 only; composer does not use this the same way
-# Using Composer 2.5 Fast for the coder role (currently the only available composer-2.5 variant).
-# Mercury-2 (BYOM) can be used by changing this value + proper .env launch.
-# Launch with: set -a; source .env; set +a; grok ... (or env $(cat .env | xargs) grok ...)
+# Native grok-build model for coder.
+# Only grok-composer-2.5-fast (natively available in grok build).
+# Do not switch to BYOM mercury-2.
 
 instructions = """
 You are the Coder persona.
