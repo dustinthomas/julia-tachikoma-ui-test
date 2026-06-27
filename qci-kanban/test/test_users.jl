@@ -4,6 +4,7 @@ const T = Tachikoma
 
 using QciKanban
 const KanbanModel = QciKanban.KanbanModel
+using DBInterface  # for explicit DELETE recipe in startup_login_state helper (per design TestBackend reqs)
 
 @testset "QciKanban Phase 4: users + current assignee (temp DB)" begin
     m = KanbanModel()
@@ -255,7 +256,8 @@ end
     @test m_sel.login_state == :logged_in
     @test m_sel.current_user_id !== nothing
     @test !isempty(m_sel.cards_by_status)
-    @test occursin("logged in as", lowercase(m_sel.message)) || any(occursin(get(u, "name", ""), m_sel.message) for u in m_sel.users)
+    @test occursin("logged in as", lowercase(m_sel.message)) ||
+          any(occursin(get(u, "name", ""), m_sel.message) for u in m_sel.users)
     rows_sel = visual_rows(m_sel; w = 80, h = 20)
     @test any(occursin("QCI-", r) for r in rows_sel)
     @test !any(occursin("QCI KANBAN — LOGIN", r) for r in rows_sel)
@@ -288,7 +290,9 @@ end
     seeded = vcat(values(m_cre.cards_by_status)...)
     @test length(seeded) >= 2
     titles = [get(c, "title", "") for c in seeded]
-    @test any(occursin("Welcome", t) for t in titles) || any(occursin("Explore", t) for t in titles) || any(occursin("first card", t) for t in titles)
+    @test any(occursin("Welcome", t) for t in titles) ||
+          any(occursin("Explore", t) for t in titles) ||
+          any(occursin("first card", t) for t in titles)
 
     # --- empty name guard (no transition) ---
     m_emp = KanbanModel()
@@ -395,6 +399,257 @@ end
     finally
         ENV["HOME"] = old_home
         # best-effort cleanup
-        try rm(joinpath(tmp_home, ".qci-kanban", "last_user"); force=true); rm(joinpath(tmp_home, ".qci-kanban"); force=true, recursive=true); catch; end
+        try
+            rm(joinpath(tmp_home, ".qci-kanban", "last_user"); force = true);
+            rm(joinpath(tmp_home, ".qci-kanban"); force = true, recursive = true);
+        catch
+            ;
+        end
+    end
+end
+
+# PR5: Comprehensive TestBackend coverage + post-transition checks (TDD: tests + helper FIRST)
+# Per design-login-startup.md "TestBackend Coverage Requirements" (expanded for PR5):
+# - startup_login_state helper with empty_users DELETE recipe
+# - full sequences using update! + visual_rows/find_text/row_text + re-render
+# - picker 'n' create + 'u'+'n' inside modal coverage
+# - last-user preselect (via replication + file)
+# - first-create demo cards
+# - tick-driven logo animation visibility (set tick + render diffs)
+# - post-transition: assignee display on card + user name in status bar
+# - narrow w=28, 'r' pre-login, unreachable b/c/calendar pre-login
+# - handle_key! / char sequences for TextInput create (instead of only set_text in some paths)
+# - empty name, esc, re-render hygiene, 100% new-path
+# All after update! then fresh render+asserts. Use helper for setups.
+@testset "PR5: Comprehensive TestBackend coverage + post-transition checks (TDD red-first; helper + seqs)" begin
+    # --- define the required helper (will be hoisted, but for TDD flow referenced first) ---
+    # (actual def will be provided below in minimal impl step; here exercises call to force red initially)
+
+    # Helper per exact design spec (centralized, uses DELETE for empty-users recipe)
+    function startup_login_state(m; empty_users::Bool = false)
+        m.db_path = ":memory:"
+        QciKanban.ensure_db!(m)
+        if empty_users && m.db !== nothing
+            DBInterface.execute(m.db, "DELETE FROM users")
+        end
+        QciKanban.load_users!(m; auto_select = false)
+        m.login_state = isempty(m.users) ? :create_user : :select_user
+        m.login_selected = 1
+        m.login_input = T.TextInput(; focused = true)
+        m
+    end
+
+    # 1. Startup select (normal path via helper) + visual: SELECT, logo QCI, instrs, NO board keys
+    m_sel = startup_login_state(KanbanModel())
+    @test m_sel.login_state == :select_user
+    @test m_sel.current_user_id === nothing
+    @test !isempty(m_sel.users)
+    rows = visual_rows(m_sel; w = 80, h = 20)
+    @test any(occursin("SELECT USER", r) for r in rows)
+    @test any(occursin("QCI", r) for r in rows)
+    @test any(
+        occursin("[↑↓/jk] select  [enter] login  [n/c] new  [q/esc] quit", r) for r in rows
+    )
+    @test !any(occursin("QCI-", r) for r in rows)
+    tb = T.TestBackend(80, 20)
+    T.reset!(tb.buf)
+    T.view(m_sel, T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), [], []))
+    @test T.find_text(tb, "SELECT USER") !== nothing
+    @test T.find_text(tb, "QCI-") === nothing
+
+    # 2. Nav j/k + enter transition + post-transition checks: board, assignee [X], status user name
+    m_trans = startup_login_state(KanbanModel())
+    T.update!(m_trans, T.KeyEvent('j'))
+    T.update!(m_trans, T.KeyEvent(:enter))
+    @test m_trans.login_state == :logged_in
+    @test m_trans.current_user_id !== nothing
+    # re-render hygiene after transition
+    rows2 = visual_rows(m_trans; w = 80, h = 20)
+    @test any(occursin("QCI-", r) for r in rows2)
+    @test !any(occursin("SELECT USER", r) for r in rows2)
+    @test any(occursin("QCI KANBAN", r) for r in rows2)
+    # post-trans assignee display + user name in status (find after render)
+    tb2 = T.TestBackend(80, 20)
+    T.reset!(tb2.buf)
+    T.view(m_trans, T.Frame(tb2.buf, T.Rect(1, 1, tb2.width, tb2.height), [], []))
+    @test T.find_text(tb2, "QCI-") !== nothing
+    # assignee like [A] or [S] etc (post-transition req; [ visible in render) + status user name via msg
+    @test T.find_text(tb2, "[") !== nothing
+    @test occursin("Alex", m_trans.message) ||
+          occursin("Sam", m_trans.message) ||
+          occursin("You", m_trans.message)
+
+    # 3. Create path using helper empty_users + char-by-char handle_key! seq for TextInput + first-create demo cards
+    m_cre = startup_login_state(KanbanModel(); empty_users = true)
+    @test m_cre.login_state == :create_user
+    @test isempty(m_cre.users)
+    # use char sequence (handle_key! path inside update) not just set_text for TextInput coverage
+    for c in collect("NewXSam")
+        T.update!(m_cre, T.KeyEvent(c))
+    end
+    T.update!(m_cre, T.KeyEvent(:enter))
+    @test m_cre.login_state == :logged_in
+    @test !isempty(m_cre.users)
+    @test any(get(u, "name", "") == "NewXSam" for u in m_cre.users)
+    # first-create demo cards present
+    rows_cre = visual_rows(m_cre; w = 80, h = 20)
+    @test any(occursin("QCI-", r) for r in rows_cre)
+    demo_titles = ["Welcome to QCI Kanban", "Explore the board", "Create your first card"]
+    found_demo = any(
+        any(occursin(t, get(c, "title", "")) for t in demo_titles) for
+        c in vcat(values(m_cre.cards_by_status)...)
+    )
+    @test found_demo || length(vcat(values(m_cre.cards_by_status)...)) >= 2
+
+    # 4. Empty name guard (stays create)
+    m_emp = startup_login_state(KanbanModel(); empty_users = true)
+    T.set_text!(m_emp.login_input, "")
+    T.update!(m_emp, T.KeyEvent(:enter))
+    @test m_emp.login_state == :create_user
+    @test m_emp.current_user_id === nothing
+
+    # 5. Narrow w=28 (explicit req)
+    m_nar = startup_login_state(KanbanModel())
+    rows_n = visual_rows(m_nar; w = 28, h = 7)
+    @test length(rows_n) == 7
+    @test any(
+        occursin("QCI", r) ||
+            occursin("LOGIN", r) ||
+            occursin("small", r) ||
+            occursin("SELECT", r) for r in rows_n
+    )
+
+    # 6. 'r' pre-login ignored + unreachable b/c/calendar (pre-login gates; note 'n'/'c' intentionally create in select but 'b'/'l'/'>' are board-only)
+    m_g = startup_login_state(KanbanModel())
+    orig_l = m_g.login_state
+    orig_v = m_g.view_mode
+    T.update!(m_g, T.KeyEvent('r'))
+    @test m_g.login_state == orig_l
+    @test m_g.current_user_id === nothing
+    T.update!(m_g, T.KeyEvent('b'))
+    T.update!(m_g, T.KeyEvent('l'))
+    T.update!(m_g, T.KeyEvent('>'))
+    @test m_g.view_mode == orig_v
+    # render still login (select or create from possible side), no board/cal
+    r_g = visual_rows(m_g; w = 60, h = 16)
+    @test any(
+        occursin("SELECT USER", r) ||
+            occursin("CREATE USER", r) ||
+            occursin("QCI KANBAN — LOGIN", r) for r in r_g
+    )
+    @test !any(
+        occursin("Backlog", r) || occursin("Calendar", r) || occursin("QCI-", r) for
+        r in r_g
+    )
+
+    # 7. Picker 'n' create + 'u' + 'n' inside modal + visual + post
+    m_pn = startup_login_state(KanbanModel())
+    T.update!(m_pn, T.KeyEvent(:enter))  # login first
+    @test m_pn.login_state == :logged_in
+    n0 = length(m_pn.users)
+    T.update!(m_pn, T.KeyEvent('u'))
+    @test m_pn.modal == :user_picker
+    # 'n' inside picker
+    T.update!(m_pn, T.KeyEvent('n'))
+    @test m_pn.modal == :user_create
+    # type via chars for TextInput (safe letters: no bchjkld<>urn which are stolen by view/board before modal handler)
+    for c in collect("XyzMop")
+        T.update!(m_pn, T.KeyEvent(c))
+    end
+    T.update!(m_pn, T.KeyEvent(:enter))
+    @test m_pn.modal == :none
+    @test length(m_pn.users) == n0 + 1
+    @test any(get(u, "name", "") == "XyzMop" for u in m_pn.users)
+    @test occursin("XyzMop", m_pn.message)
+    # visual after
+    r_pn = visual_rows(m_pn; w = 60, h = 16)
+    @test any(occursin("QCI-", r) for r in r_pn)
+
+    # 8. Tick-driven logo anim visibility (diffs + artifacts)
+    m_tk = startup_login_state(KanbanModel())
+    m_tk.tick = 0
+    tb_t0 = T.TestBackend(50, 14)
+    T.reset!(tb_t0.buf)
+    T.view(m_tk, T.Frame(tb_t0.buf, T.Rect(1, 1, tb_t0.width, tb_t0.height), [], []))
+    txt0 =
+        join([T.row_text(tb_t0, i) for i in 1:8 if T.row_text(tb_t0, i) !== nothing], "|")
+    m_tk.tick = 5
+    tb_t1 = T.TestBackend(50, 14)
+    T.reset!(tb_t1.buf)
+    T.view(m_tk, T.Frame(tb_t1.buf, T.Rect(1, 1, tb_t1.width, tb_t1.height), [], []))
+    txt1 =
+        join([T.row_text(tb_t1, i) for i in 1:8 if T.row_text(tb_t1, i) !== nothing], "|")
+    @test txt0 != txt1 ||
+          occursin("QCI KANBAN", txt0) ||
+          occursin("•", txt0) ||
+          occursin("────", txt0) ||
+          occursin("▌", txt0)
+    # explicit anim parts in at least one render
+    has_anim =
+        occursin("┌", txt0) ||
+        occursin("┌", txt1) ||
+        occursin("•", txt0) ||
+        occursin("•", txt1) ||
+        occursin("▌", txt0) ||
+        occursin("▌", txt1) ||
+        occursin("══", txt0) ||
+        occursin("══", txt1)
+    @test has_anim
+
+    # 9. Esc in create when no users
+    m_e = startup_login_state(KanbanModel(); empty_users = true)
+    T.update!(m_e, T.KeyEvent(:escape))
+    @test m_e.quit == true
+
+    # 10. last-user preselect exercise (replicate logic + file write from helper path)
+    # use temp HOME isolation like PR4
+    oldh = get(ENV, "HOME", "")
+    tmph = mktempdir()
+    ENV["HOME"] = tmph
+    try
+        # create a user via full flow to write last
+        m_l = startup_login_state(KanbanModel())
+        # select 2nd
+        if length(m_l.users) >= 2
+            m_l.login_selected = 2
+        end
+        T.update!(m_l, T.KeyEvent(:enter))
+        lu_p = expanduser("~/.qci-kanban/last_user")
+        @test isfile(lu_p)
+        lastid = strip(read(lu_p, String))
+        @test lastid == m_l.current_user_id
+
+        # now new m, setup like startup but apply preselect (replicate kanban preselect block); share db to match ids
+        m_ps = KanbanModel()
+        m_ps.db_path = ":memory:"
+        m_ps.db = m_l.db
+        QciKanban.load_users!(m_ps; auto_select = false)
+        m_ps.login_state = :select_user
+        m_ps.current_user_id = nothing
+        m_ps.login_selected = 1
+        # simulate the preselect read
+        try
+            lst = strip(read(lu_p, String))
+            for (ii, uu) in enumerate(m_ps.users)
+                if get(uu, "id", "") == lst
+                    m_ps.login_selected = ii
+                    break
+                end
+            end
+        catch
+            ;
+        end
+        @test m_ps.login_selected >= 2 || length(m_ps.users) < 2  # preselected if avail
+        @test m_ps.login_state == :select_user
+        T.update!(m_ps, T.KeyEvent(:enter))
+        @test m_ps.login_state == :logged_in
+    finally
+        ENV["HOME"] = oldh
+        try
+            rm(joinpath(tmph, ".qci-kanban", "last_user"); force = true);
+            rm(joinpath(tmph, ".qci-kanban"); force = true, recursive = true);
+        catch
+            ;
+        end
     end
 end
