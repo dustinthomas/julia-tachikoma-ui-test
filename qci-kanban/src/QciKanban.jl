@@ -549,6 +549,37 @@ function view(m::KanbanModel, f::Frame)
 
     render_qci_logo(buf, logo_area)
 
+    if m.login_state != :logged_in
+        # PR2 skeleton (minimal): Block title + simple list/NAME> stub. Reuses split-derived content_area + logo.
+        # Full instructions, narrow handling, dynamic title, animations deferred to PR3. Early return gates board.
+        is_create = m.login_state == :create_user
+        title = is_create ? "CREATE USER" : "SELECT USER"
+        lblock = Block(
+            title = title,
+            border_style = Style(; fg = QCI_CYAN),
+            title_style = Style(; fg = QCI_CYAN, bold = true),
+        )
+        lw = min(44, content_area.width - 4)
+        lh = min(12, content_area.height - 2)
+        lx = content_area.x + (content_area.width - lw) ÷ 2
+        ly = content_area.y + 1
+        linner = render(lblock, Rect(lx, ly, lw, lh), buf)
+        y = linner.y + 1
+        if is_create
+            set_string!(buf, linner.x + 1, y, "NAME>", Style(; fg = QCI_CYAN, bold = true))
+        else
+            for (i, u) in enumerate(m.users)
+                if y > bottom(linner) - 2; break; end
+                sel = (i == m.login_selected)
+                p = sel ? "▶ " : "  "
+                sty = sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+                set_string!(buf, linner.x + 1, y, p * get(u, "name", "?"), sty)
+                y += 1
+            end
+        end
+        return
+    end
+
     mode_str = uppercase(string(m.view_mode))
 
     if m.view_mode == :board
