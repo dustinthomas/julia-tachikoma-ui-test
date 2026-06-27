@@ -123,29 +123,84 @@ function load_users!(m::KanbanModel; auto_select::Bool = true)
     end
 end
 
-# Login helpers (PR1 stubs: set state or minimal action; full create/login + seeding later)
+# Last-user persistence (simple file IO, best-effort, per design PR4)
+function _last_user_path()::String
+    expanduser("~/.qci-kanban/last_user")
+end
+
+function _write_last_user(id::AbstractString)
+    p = _last_user_path()
+    try
+        dir = dirname(p)
+        if !isdir(dir)
+            mkpath(dir)
+        end
+        write(p, string(id))
+    catch
+        # best-effort, ignore IO errors
+    end
+end
+
+
+function _read_last_user()::Union{String,Nothing}
+    p = _last_user_path()
+    try
+        if isfile(p)
+            return strip(read(p, String))
+        end
+    catch
+    end
+    nothing
+end
+
+# seed 2-3 demo cards for absolute first user create (pure create path)
+function seed_first_user_demo!(db::SQLite.DB, user_id::AbstractString)
+    today = Dates.today()
+    DB.create_issue!(db; title = "Welcome to QCI Kanban", status = "Backlog", priority = "Medium", assignee_id = user_id, position = 0)
+    DB.create_issue!(db; title = "Explore the board", status = "To Do", priority = "Medium", assignee_id = user_id, position = 0)
+    DB.create_issue!(db; title = "Create your first card", status = "To Do", priority = "Low", assignee_id = user_id, position = 1)
+end
+
+# Login helpers (real impl for PR4)
+
 function select_user_and_login!(m::KanbanModel)
     if !isempty(m.users)
         idx = clamp(m.login_selected, 1, length(m.users))
-        m.current_user_id = m.users[idx]["id"]
+        uid = m.users[idx]["id"]
+        m.current_user_id = uid
+        _write_last_user(uid)
     end
     m.login_state = :logged_in
-    load_board!(m)  # ensures cards + shim
+    load_board!(m)
+    if m.current_user_id !== nothing
+        u = DB.get_user(m.db, m.current_user_id)
+        nm = (u === nothing ? "?" : get(u, "name", "?"))
+        m.message = "logged in as $(nm)"
+    end
 end
 
 function create_and_login!(m::KanbanModel, name::AbstractString)
-    # PR1 stub (skeleton only): ignores name, does NOT call DB.create_user! or first-user demo seed (deferred).
-    # Sets :logged_in so guard passes and direct paths stay runnable.
-    # On empty-users path (test covered), current_user remains nothing and no cards auto-added here.
-    # Real create + select + conditional seed per design-login-startup.md happens in follow-up PRs.
+    nm = strip(string(name))
+    isempty(nm) && return
+    ensure_db!(m)
+    was_empty = isempty(m.users)
+    new_id = DB.create_user!(m.db, nm)
+    load_users!(m; auto_select = false)
+    m.current_user_id = new_id
+    _write_last_user(new_id)
     m.login_state = :logged_in
-    load_board!(m)  # harmless for logged; may populate if users present
+    if was_empty
+        seed_first_user_demo!(m.db, new_id)
+    end
+    load_board!(m)
+    m.message = "logged in as $(nm)"
 end
 
 function switch_to_create_user!(m::KanbanModel)
     m.login_state = :create_user
     m.login_input = TextInput(; focused = true)
 end
+
 
 function open_user_picker!(m::KanbanModel)
     load_users!(m; auto_select = true)
@@ -156,10 +211,18 @@ end
 function select_current_user!(m::KanbanModel)
     if !isempty(m.users)
         idx = clamp(m.user_selected, 1, length(m.users))
-        m.current_user_id = m.users[idx]["id"]
+        uid = m.users[idx]["id"]
+        m.current_user_id = uid
+        _write_last_user(uid)
     end
     m.modal = :none
+    if m.current_user_id !== nothing
+        u = DB.get_user(m.db, m.current_user_id)
+        nm = (u === nothing ? "?" : get(u, "name", "?"))
+        m.message = "logged in as $(nm)"
+    end
 end
+
 
 # Move selected card left/right (status) or within column (reorder)
 function move_selected!(m::KanbanModel, dir::Symbol)
@@ -319,10 +382,11 @@ function update!(m::KanbanModel, evt::KeyEvent)
     if evt.key == :char && evt.char == 'q'
         m.quit = true
         return
-    elseif evt.key == :escape
+    elseif evt.key == :escape && m.modal == :none && m.login_state == :logged_in
         m.quit = true
         return
     end
+
 
     if m.login_state != :logged_in
         # full early guard (PR1 wiring+safety): pass-through only for :logged_in or direct paths
@@ -462,12 +526,14 @@ function update!(m::KanbanModel, evt::KeyEvent)
         elseif evt.key == :down || (evt.key == :char && evt.char == 'j')
             m.selected_idx = min(max(1, ncards), m.selected_idx + 1)
             return
-        elseif evt.key == :char && evt.char == 'n'
+        elseif evt.key == :char && evt.char == 'n' && m.modal == :none
             open_edit_modal!(m; new = true)
             return
-        elseif evt.key == :enter
+
+        elseif evt.key == :enter && m.modal == :none
             open_edit_modal!(m; new = false)
             return
+
         elseif evt.key == :char && evt.char == 'd'
             delete_selected!(m)
             return
@@ -495,16 +561,49 @@ function update!(m::KanbanModel, evt::KeyEvent)
                 return
             elseif evt.key == :enter
                 select_current_user!(m)
-                m.message = "logged in"
                 return
             elseif evt.key == :escape
                 m.modal = :none
                 return
             end
         end
+        if evt.key == :char && evt.char in ('n', 'c')
+            m.login_input = TextInput(; focused = true)
+            m.modal = :user_create
+            return
+        end
+
+
         m.tick += 1
         return
     end
+
+    # Mid-session picker create (reuses login_input + hygiene; auto select on success)
+    if m.modal == :user_create
+        if evt.key == :enter
+            nm = strip(text(m.login_input))
+            if !isempty(nm)
+                ensure_db!(m)
+                new_id = DB.create_user!(m.db, nm)
+                load_users!(m; auto_select = false)
+                m.current_user_id = new_id
+                _write_last_user(new_id)
+                m.modal = :none
+                m.message = "logged in as $(nm)"
+            end
+            return
+        elseif evt.key == :escape
+            m.modal = :user_picker
+            m.user_selected = min(1, length(m.users))
+            return
+        end
+        if handle_key!(m.login_input, evt)
+            return
+        end
+        m.tick += 1
+        return
+    end
+
 
     # Calendar nav (Phase 5 minimal)
     if m.view_mode == :calendar && m.cal !== nothing
@@ -1012,7 +1111,36 @@ function view(m::KanbanModel, f::Frame)
             )
         end
     end
+
+    # Picker create form (minimal, reuses login_input; analogous to login create + card NAME>)
+    if m.modal == :user_create && area.width >= 24 && area.height >= 8
+        mw = min(40, area.width - 4)
+        mh = min(10, area.height - 4)
+        mx = area.x + (area.width - mw) ÷ 2
+        my = area.y + 4
+        ublock = Block(
+            title = "CREATE USER",
+            border_style = Style(; fg = QCI_CYAN),
+            title_style = Style(; fg = QCI_CYAN, bold = true),
+        )
+        uinner = render(ublock, Rect(mx, my, mw, mh), buf)
+        y = uinner.y + 1
+        set_string!(buf, uinner.x + 1, y, "NAME>", Style(; fg = QCI_CYAN, bold = true))
+        input_rect = Rect(uinner.x + 7, y, max(12, uinner.width - 10), 1)
+        render(m.login_input, input_rect, buf)
+        y += 2
+        if y < bottom(uinner)
+            set_string!(
+                buf,
+                uinner.x + 1,
+                y,
+                "[enter] create + select   [esc] back",
+                Style(; fg = QCI_SECONDARY, dim = true),
+            )
+        end
+    end
 end
+
 
 """
     kanban(; db_path=...)
@@ -1038,6 +1166,19 @@ function kanban(; db_path::AbstractString = DB.DEFAULT_DB_PATH)
     else
         m.login_state = :select_user
         m.login_selected = 1
+        # last-user preselect (read only; explicit Enter required, never auto-login)
+        try
+            last = _read_last_user()
+            if last !== nothing
+                for (i, u) in enumerate(m.users)
+                    if get(u, "id", "") == last
+                        m.login_selected = i
+                        break
+                    end
+                end
+            end
+        catch
+        end
     end
     app(m)
 end

@@ -248,7 +248,7 @@ end
         @test T.find_text(tb, "QCI") !== nothing  # logo still
     end
 
-    @testset "empty-users create path + stub + re-render (TDD for create stub consistency)" begin
+    @testset "empty-users create path (real create + login; post-PR4)" begin
         m = KanbanModel()
         m.db_path = ":memory:"
         m.db = QciKanban.DB.open_db(m.db_path)
@@ -260,19 +260,19 @@ end
         m.login_state = :create_user
         m.login_input = T.TextInput(; focused=true)
         T.set_text!(m.login_input, "TestUserEmpty")
-        # simulate enter in create (calls stub)
         T.update!(m, T.KeyEvent(:enter))
-        # stub sets logged; for skeleton on empty path, users stays 0, current nothing (no auto)
         @test m.login_state == :logged_in
-        @test isempty(m.users)
-        @test m.current_user_id === nothing
-        # re-render after "login" stub
+        @test !isempty(m.users)
+        @test m.current_user_id !== nothing
+        @test any(get(u, "name", "") == "TestUserEmpty" for u in m.users)
+        # re-render after real create+login
         rows = visual_rows(m; w=60, h=16)
         tb = T.TestBackend(60, 16)
         T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
         @test T.find_text(tb, "QCI") !== nothing
     end
+
 
     @testset "'r' pre-login ignored (no load_board side effects) + q/esc still functional pre-login" begin
         m = KanbanModel()

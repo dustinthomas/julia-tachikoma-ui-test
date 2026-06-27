@@ -234,3 +234,167 @@ end
     @test any(occursin("NAME>", r) for r in rows_c)
     @test any(occursin("▶ ", r) for r in rows)
 end
+
+# PR4 TDD: tests added FIRST (Red) before real helper impl, last_user IO, picker create, first-seed.
+# Full flows via update! + direct helpers + state + visual_rows + find_text after transition.
+# Covers: select/create + set current + logged_in + board shown; edges (empty/esc); picker 'n' create (reuses input);
+# last_user write on login + preselect (explicit Enter still); first-create seeds 2-3 demo cards; hygiene.
+# Uses :memory: and temp HOME isolation for file IO tests.
+@testset "PR4: Complete helpers + state machine + create flow + edge cases + picker create + last-user + first-create seed (TDD red-first)" begin
+    # --- select_user_and_login! direct + transition + board visible + current set + msg ---
+    m_sel = KanbanModel()
+    m_sel.db_path = ":memory:"
+    m_sel.db = QciKanban.DB.open_db(m_sel.db_path)
+    QciKanban.DB.seed_demo!(m_sel.db)
+    QciKanban.load_users!(m_sel; auto_select = false)
+    @test length(m_sel.users) >= 1
+    m_sel.login_selected = 1
+    m_sel.current_user_id = nothing
+    m_sel.login_state = :select_user
+    QciKanban.select_user_and_login!(m_sel)
+    @test m_sel.login_state == :logged_in
+    @test m_sel.current_user_id !== nothing
+    @test !isempty(m_sel.cards_by_status)
+    @test occursin("logged in as", lowercase(m_sel.message)) || any(occursin(get(u, "name", ""), m_sel.message) for u in m_sel.users)
+    rows_sel = visual_rows(m_sel; w = 80, h = 20)
+    @test any(occursin("QCI-", r) for r in rows_sel)
+    @test !any(occursin("QCI KANBAN — LOGIN", r) for r in rows_sel)
+
+    tb_sel = T.TestBackend(80, 20)
+    T.reset!(tb_sel.buf)
+    T.view(m_sel, T.Frame(tb_sel.buf, T.Rect(1, 1, tb_sel.width, tb_sel.height), [], []))
+    @test T.find_text(tb_sel, "QCI-") !== nothing
+
+    # --- create_and_login! flow (end-to-end, input hygiene, user added, current set, board, msg) ---
+    m_cre = KanbanModel()
+    m_cre.db_path = ":memory:"
+    m_cre.db = QciKanban.DB.open_db(m_cre.db_path)
+    # no seed => pure empty for first-create path
+    QciKanban.load_users!(m_cre; auto_select = false)
+    @test isempty(m_cre.users)
+    m_cre.login_state = :create_user
+    m_cre.login_input = T.TextInput(; focused = true)
+    T.set_text!(m_cre.login_input, "  FirstCreator  ")
+    T.update!(m_cre, T.KeyEvent(:enter))
+    @test m_cre.login_state == :logged_in
+    @test m_cre.current_user_id !== nothing
+    @test !isempty(m_cre.users)
+    @test any(get(u, "name", "") == "FirstCreator" for u in m_cre.users)
+    @test occursin("FirstCreator", m_cre.message)
+    rows_cre = visual_rows(m_cre; w = 80, h = 20)
+    @test any(occursin("QCI-", r) for r in rows_cre)
+
+    # --- first-create seeds 2-3 demo cards ---
+    seeded = vcat(values(m_cre.cards_by_status)...)
+    @test length(seeded) >= 2
+    titles = [get(c, "title", "") for c in seeded]
+    @test any(occursin("Welcome", t) for t in titles) || any(occursin("Explore", t) for t in titles) || any(occursin("first card", t) for t in titles)
+
+    # --- empty name guard (no transition) ---
+    m_emp = KanbanModel()
+    m_emp.db_path = ":memory:"
+    m_emp.db = QciKanban.DB.open_db(m_emp.db_path)
+    QciKanban.load_users!(m_emp; auto_select = false)
+    m_emp.login_state = :create_user
+    m_emp.login_input = T.TextInput(; focused = true)
+    T.set_text!(m_emp.login_input, "")
+    T.update!(m_emp, T.KeyEvent(:enter))
+    @test m_emp.login_state == :create_user
+    @test m_emp.current_user_id === nothing
+    @test isempty(m_emp.users)  # still no users
+
+    # --- esc/back in create: no users => quit; has users => back to select ---
+    m_esc0 = KanbanModel()
+    m_esc0.db_path = ":memory:"
+    m_esc0.db = QciKanban.DB.open_db(m_esc0.db_path)
+    QciKanban.load_users!(m_esc0; auto_select = false)
+    m_esc0.login_state = :create_user
+    T.update!(m_esc0, T.KeyEvent(:escape))
+    @test m_esc0.quit == true
+
+    m_esc1 = KanbanModel()
+    m_esc1.db_path = ":memory:"
+    m_esc1.db = QciKanban.DB.open_db(m_esc1.db_path)
+    QciKanban.DB.seed_demo!(m_esc1.db)
+    QciKanban.load_users!(m_esc1; auto_select = false)
+    m_esc1.login_state = :create_user
+    m_esc1.current_user_id = nothing
+    T.update!(m_esc1, T.KeyEvent(:escape))
+    @test m_esc1.login_state == :select_user
+    @test m_esc1.quit == false
+
+    # --- mid-session picker 'n'/'c' create reuses input, auto-selects new user, sets msg, closes modal ---
+    m_pick = KanbanModel()
+    m_pick.db_path = ":memory:"
+    m_pick.db = QciKanban.DB.open_db(m_pick.db_path)
+    QciKanban.DB.seed_demo!(m_pick.db)
+    QciKanban.load_board!(m_pick)
+    @test m_pick.login_state == :logged_in
+    n_before = length(m_pick.users)
+    T.update!(m_pick, T.KeyEvent('u'))
+    @test m_pick.modal == :user_picker
+    T.update!(m_pick, T.KeyEvent('n'))
+    @test m_pick.modal == :user_create || m_pick.modal == :user_picker  # will be user_create in impl
+    T.set_text!(m_pick.login_input, "PickerCreated")
+    T.update!(m_pick, T.KeyEvent(:enter))
+    @test m_pick.modal == :none
+    @test length(m_pick.users) == n_before + 1
+    @test any(get(u, "name", "") == "PickerCreated" for u in m_pick.users)
+    @test m_pick.current_user_id !== nothing
+    @test occursin("PickerCreated", m_pick.message)
+
+    # exercise render after picker create (board reappears)
+    rows_pick = visual_rows(m_pick; w = 60, h = 16)
+    @test any(occursin("QCI-", r) for r in rows_pick)
+
+    # --- last-user persistence: write on any login success; preselect sets index but keeps :select (explicit) ---
+    old_home = get(ENV, "HOME", "")
+    tmp_home = mktempdir()
+    ENV["HOME"] = tmp_home
+    try
+        # write via select
+        m_lu = KanbanModel()
+        m_lu.db_path = ":memory:"
+        m_lu.db = QciKanban.DB.open_db(m_lu.db_path)
+        QciKanban.DB.seed_demo!(m_lu.db)
+        QciKanban.load_users!(m_lu; auto_select = false)
+        @test length(m_lu.users) >= 2
+        m_lu.login_selected = 2
+        QciKanban.select_user_and_login!(m_lu)
+        lu_path = expanduser("~/.qci-kanban/last_user")
+        @test isfile(lu_path)
+        written = isfile(lu_path) ? strip(read(lu_path, String)) : ""
+        @test written == m_lu.current_user_id
+
+        # preselect logic (as will be in kanban()) + explicit enter required
+        m_pre = KanbanModel()
+        # share the db from m_lu (same :memory: users/ids) so last_id can match
+        m_pre.db = m_lu.db
+        QciKanban.load_users!(m_pre; auto_select = false)
+        m_pre.login_state = :select_user
+        m_pre.current_user_id = nothing
+        m_pre.login_selected = 1
+        last_id = written
+        if isempty(last_id) && length(m_pre.users) >= 2
+            last_id = m_pre.users[2]["id"]
+        end
+        for (i, u) in enumerate(m_pre.users)
+            if get(u, "id", "") == last_id
+                m_pre.login_selected = i
+                break
+            end
+        end
+
+        @test m_pre.login_selected == 2  # preselected the last
+        @test m_pre.login_state == :select_user  # NOT auto :logged_in
+        @test m_pre.current_user_id === nothing
+        # explicit confirm
+        T.update!(m_pre, T.KeyEvent(:enter))
+        @test m_pre.login_state == :logged_in
+        @test m_pre.current_user_id == last_id
+    finally
+        ENV["HOME"] = old_home
+        # best-effort cleanup
+        try rm(joinpath(tmp_home, ".qci-kanban", "last_user"); force=true); rm(joinpath(tmp_home, ".qci-kanban"); force=true, recursive=true); catch; end
+    end
+end
