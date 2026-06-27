@@ -22,6 +22,7 @@
 #   scout    = grok-composer-2.5-fast
 #   planner  = grok-build
 #   validator = grok-build
+#   tdd-orchestrator = grok-build (strong lead for hierarchical TDD red-green + coverage gate)
 #
 # Locked: only natively available grok models (grok-build + grok-composer-2.5-fast).
 # No BYOM mercury-2 routing for coder or others. Edit persona model= to change (but keep composer for coder).

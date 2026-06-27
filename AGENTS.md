@@ -4,7 +4,7 @@
 
 Project: **julia-tachikoma-ui-test**
 
-It includes the full `.grok/` native personas, skills (pipeline, prime, review, test, commit, caveman), safety hooks, and model routing.
+It includes the full `.grok/` native personas, skills (pipeline, prime, review, test, commit, caveman, tdd), safety hooks, and model routing.
 
 Use this for developing and testing Julia + UI/agentic coding experiments with the structured Grok multi-agent workflow (Plan → Scout → Implement/Validate → Review).
 
@@ -55,6 +55,39 @@ See `.grok/docs/token-efficiency.md` for the current practices that reduce token
 
 We will encode this as native Grok skills + personas + explicit use of `spawn_subagent`.
 
+## TDD Orchestration Architecture & 2026 Best Practices (Hierarchical + Scoped)
+
+This project supports a dedicated hierarchical TDD workflow in addition to the core pipeline.
+
+**Dedicated TDD Agent**
+- Use the `tdd-orchestrator` persona (strong model) when you want a lead whose entire job is to run the new workflow: it delegates to the three core actions, iterates strictly on validator/testing feedback, suggests next steps, and drives implementation until the coverage gate passes.
+- The invocable workflow is the `tdd` skill (`/tdd <task>`).
+
+See:
+- `.grok/personas/tdd-orchestrator.toml`
+- `.grok/skills/tdd/SKILL.md`
+- `.grok/docs/tdd-3-actions.md` (the three actions contract)
+- `.grok/docs/tdd-architecture.md`
+- `.grok/docs/tdd-workflow.md`
+
+**Core structure (Grok Build native)**
+- Orchestrator (lead on grok-build): owns the goal, TDD Red-Green-Refactor state machine, global state, checkpoints. Delegates **only scoped work**.
+- Specialized sub-agents (routed models):
+  - Test Writer (new persona, fast): given task + gaps → produces **failing tests only** (unified diff + JSON summary).
+  - Coder (grok-composer-2.5-fast native): receives **only** failing tests + relevant diff + plan excerpt. Writes the **minimal** code to pass.
+  - Validator (grok-build): executes real `julia --project=.` tests + coverage. Emits strict gate result. Loops until green **and** >=100% coverage on changed logic/UI.
+- UI work: **always** exercise Tachikoma.TestBackend (render + char_at/find_text/row_text after update!/handle_key! + re-render).
+- `todo_write` tracks TDD phase (Red / Green / Refactor + sub-tasks).
+- Persistent artifacts written to `agent_logs/<feature-slug>/` (checkpoints, diffs, validation-evidence, state.json, final-summary.md).
+
+**Mandatory rules**
+- 100% coverage target on changed logic/UI (non-negotiable except with explicit justification).
+- Strict loop order: tests first (failing) → minimal code → refactor only after green + gate.
+- Every handoff uses scoped context + instructs subagents to read plan/checkpoint artifacts from disk.
+- Checkpoints after every major phase.
+
+Use `/tdd` for feature slices where you want ironclad red-first TDD + coverage evidence. It pairs well with `/execute-plan` for PR stacks and `/pipeline` for broader flows.
+
 ## Conventions
 
 - Keep skills focused and version-controllable.
@@ -87,4 +120,4 @@ Custom models (e.g. Mercury 2) are configured in your global `~/.grok/config.tom
 - Verify models: `grok inspect` / `grok models`
 
 See `.grok/config.toml` and the personas for current defaults.
-The replicated environment already includes full pipeline, prime, test, review, commit, and caveman skills.
+The replicated environment includes the core skills (pipeline, prime, review, test, commit, caveman) plus the dedicated `/tdd` hierarchical TDD orchestration workflow with supporting personas (`tdd-orchestrator`, `test-writer`) and docs in `.grok/docs/tdd-*.md`. See AGENTS.md section on TDD Orchestration and `.grok/skills/tdd/SKILL.md`.
