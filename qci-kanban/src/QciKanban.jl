@@ -1146,6 +1146,11 @@ end
     kanban(; db_path=...)
 
 Launch the QCI Kanban app. Uses explicit QCI styling.
+
+On startup shows login picker (or create) before board; board gated until user selected/created.
+Supports 'n'/'c' to create in login and in mid-session 'u' picker. Last user preselected from ~/.qci-kanban/last_user (explicit Enter required).
+Branding animation on login screen (tick-driven).
+Direct `KanbanModel()` + `load_board!()` and record_demo paths are unaffected (remain :logged_in).
 """
 function kanban(; db_path::AbstractString = DB.DEFAULT_DB_PATH)
     m = KanbanModel(db_path = db_path)

@@ -6,7 +6,7 @@
 #   issues(id, key, title, description, status, priority, assignee_id, due_date, position, created, updated)
 #
 # All functions take a SQLite.DB (or path that is opened). Defensive.
-# Seed demo data on first run if tables empty.
+# Seed demo data on absolute first run if both users and issues tables are empty.
 # ═══════════════════════════════════════════════════════════════════════
 
 module DB
