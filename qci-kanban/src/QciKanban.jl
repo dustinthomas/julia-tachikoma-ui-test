@@ -61,8 +61,6 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
     login_state::Symbol = :logged_in
     login_selected::Int = 1
     login_input::TextInput = TextInput(; focused=true)
-    # Move lane picker (direct non-adjacent move)
-    move_lane_selected::Int = 1
     # Calendar (Phase 5)
     cal::Union{Calendar, Nothing} = nothing
     cal_selected_day::Int = Dates.day(Dates.today())
@@ -74,7 +72,7 @@ function ensure_db!(m::KanbanModel; seed::Bool = true)
     if m.db === nothing
         m.db = DB.open_db(m.db_path)
         if seed
-            DB.seed_demo!(m.db)
+            DB.seed_demo!(m.db)  # seed_demo! self-guards; kanban() uses parallel both-empty check for startup semantics (see design)
         end
     end
 end
@@ -85,7 +83,7 @@ function load_board!(m::KanbanModel)
     for status in BOARD_COLUMNS
         m.cards_by_status[status] = DB.list_issues(m.db; status=status)
     end
-    load_users!(m)
+    load_users!(m; auto_select=true)
     # clamp selection
     m.selected_col = clamp(m.selected_col, 1, length(BOARD_COLUMNS))
     n = length(get(m.cards_by_status, BOARD_COLUMNS[m.selected_col], []))
@@ -133,9 +131,12 @@ function select_user_and_login!(m::KanbanModel)
 end
 
 function create_and_login!(m::KanbanModel, name::AbstractString)
-    # PR1 stub: do not create yet; just force logged state (skeleton)
+    # PR1 stub (skeleton only): ignores name, does NOT call DB.create_user! or first-user demo seed (deferred).
+    # Sets :logged_in so guard passes and direct paths stay runnable.
+    # On empty-users path (test covered), current_user remains nothing and no cards auto-added here.
+    # Real create + select + conditional seed per design-login-startup.md happens in follow-up PRs.
     m.login_state = :logged_in
-    load_board!(m)
+    load_board!(m)  # harmless for logged; may populate if users present
 end
 
 function switch_to_create_user!(m::KanbanModel)
@@ -144,7 +145,7 @@ function switch_to_create_user!(m::KanbanModel)
 end
 
 function open_user_picker!(m::KanbanModel)
-    load_users!(m)
+    load_users!(m; auto_select=true)
     m.modal = :user_picker
     m.user_selected = 1
 end
@@ -154,35 +155,6 @@ function select_current_user!(m::KanbanModel)
         idx = clamp(m.user_selected, 1, length(m.users))
         m.current_user_id = m.users[idx]["id"]
     end
-    m.modal = :none
-end
-
-function open_move_lane_picker!(m::KanbanModel)
-    m.modal = :move_lane
-    m.move_lane_selected = clamp(m.selected_col, 1, length(BOARD_COLUMNS))
-end
-
-function confirm_move_to_lane!(m::KanbanModel)
-    ensure_db!(m)
-    cols = BOARD_COLUMNS
-    nl = length(cols)
-    target_idx = clamp(m.move_lane_selected, 1, nl)
-    target_status = cols[target_idx]
-    cidx = clamp(m.selected_col, 1, nl)
-    status = cols[cidx]
-    cards = get(m.cards_by_status, status, [])
-    idx = clamp(m.selected_idx, 1, length(cards))
-    isempty(cards) && (m.modal = :none; return)
-    card = cards[idx]
-    id = card["id"]
-    target_cards = get(m.cards_by_status, target_status, [])
-    new_pos = length(target_cards) + 1
-    DB.update_issue_status_and_position!(m.db, id, target_status, new_pos)
-    load_board!(m)
-    m.selected_col = target_idx
-    newc = get(m.cards_by_status, target_status, [])
-    m.selected_idx = clamp(length(newc), 1, max(1, length(newc)))
-    m.message = "moved → $(target_status)"
     m.modal = :none
 end
 
@@ -320,17 +292,14 @@ function update!(m::KanbanModel, evt::KeyEvent)
     if evt.key == :char && evt.char == 'q'
         m.quit = true
         return
-    elseif evt.key == :escape && m.modal == :none
+    elseif evt.key == :escape
         m.quit = true
-        return
-    elseif evt.key == :char && evt.char == 'r'
-        load_board!(m)
         return
     end
 
     if m.login_state != :logged_in
         # full early guard (PR1 wiring+safety): pass-through only for :logged_in or direct paths
-        # prevents all board/view/mode/modal bleed until login; q/esc/r handled above
+        # prevents all board/view/mode/modal bleed until login; q/esc handled above; 'r' ignored pre-login (handled only after guard)
         if m.login_state == :create_user
             if evt.key == :enter
                 name = strip(text(m.login_input))
@@ -373,6 +342,12 @@ function update!(m::KanbanModel, evt::KeyEvent)
             end
             return
         end
+    end
+
+    # 'r' reload (only reachable for :logged_in; pre-login 'r' ignored by early guard above per design)
+    if evt.key == :char && evt.char == 'r'
+        load_board!(m)
+        return
     end
 
     # View switching (works in any mode)
@@ -437,7 +412,7 @@ function update!(m::KanbanModel, evt::KeyEvent)
     end
 
     # Board navigation (Phase 2/3)
-    if m.view_mode == :board && m.modal == :none
+    if m.view_mode == :board
         cols = BOARD_COLUMNS
         cur_col = clamp(m.selected_col, 1, length(cols))
         cards = get(m.cards_by_status, cols[cur_col], Dict{String,Any}[])
@@ -477,9 +452,6 @@ function update!(m::KanbanModel, evt::KeyEvent)
         elseif evt.key == :char && evt.char == 'u'
             open_user_picker!(m)
             return
-        elseif evt.key == :char && evt.char == 'm'
-            open_move_lane_picker!(m)
-            return
         end
     end
 
@@ -501,26 +473,6 @@ function update!(m::KanbanModel, evt::KeyEvent)
                 m.modal = :none
                 return
             end
-        end
-        m.tick += 1
-        return
-    end
-
-    # Move lane picker nav (minimal, mirrors user_picker)
-    if m.modal == :move_lane
-        nl = length(BOARD_COLUMNS)
-        if evt.key == :up || (evt.key == :char && evt.char == 'k')
-            m.move_lane_selected = max(1, m.move_lane_selected - 1)
-            return
-        elseif evt.key == :down || (evt.key == :char && evt.char == 'j')
-            m.move_lane_selected = min(nl, m.move_lane_selected + 1)
-            return
-        elseif evt.key == :enter
-            confirm_move_to_lane!(m)
-            return
-        elseif evt.key == :escape
-            m.modal = :none
-            return
         end
         m.tick += 1
         return
@@ -600,8 +552,9 @@ function view(m::KanbanModel, f::Frame)
     mode_str = uppercase(string(m.view_mode))
 
     if m.view_mode == :board
-        # Ensure data loaded once visible
-        if isempty(m.cards_by_status)
+        # Ensure data loaded once visible.
+        # PR1: only when logged_in; prevents lazy load_board! (which forces login_state=:logged_in + auto current via shim) from mutating state on kanban() startup path (select/create).
+        if isempty(m.cards_by_status) && m.login_state == :logged_in
             load_board!(m)
         end
 
@@ -783,26 +736,6 @@ function view(m::KanbanModel, f::Frame)
             set_string!(buf, uinner.x + 2, y, "No users — seed issue?", Style(; fg=QCI_SECONDARY, dim=true))
         end
     end
-
-    if m.modal == :move_lane && area.width >= 24 && area.height >= 8
-        mw = min(40, area.width - 4)
-        mh = min(12, area.height - 4)
-        mx = area.x + (area.width - mw) ÷ 2
-        my = area.y + 4
-        mblock = Block(title="MOVE TO LANE", border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
-        inner = render(mblock, Rect(mx, my, mw, mh), buf)
-        y = inner.y + 1
-        for (i, col) in enumerate(BOARD_COLUMNS)
-            if y > bottom(inner) - 1; break; end
-            sel = (i == m.move_lane_selected)
-            p = sel ? "▶ " : "  "
-            set_string!(buf, inner.x + 1, y, p * col, sel ? Style(; fg=QCI_CYAN, bold=true) : Style(; fg=QCI_SECONDARY))
-            y += 1
-        end
-        if y < bottom(inner)
-            set_string!(buf, inner.x + 1, y, "[enter] move   [esc] cancel", Style(; fg = QCI_CYAN, dim = true))
-        end
-    end
 end
 
 """
@@ -816,6 +749,7 @@ function kanban(; db_path::AbstractString = DB.DEFAULT_DB_PATH)
         m.db = DB.open_db(m.db_path)
     end
     # conditional seed only if both users+issues empty (absolute first run)
+    # (dupe of ensure logic is minor; kept explicit for PR1 startup path; nit addressed via comment)
     pre_users = DB.list_users(m.db)
     pre_issues = DB.list_issues(m.db)
     if isempty(pre_users) && isempty(pre_issues)
