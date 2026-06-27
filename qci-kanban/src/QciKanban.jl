@@ -39,7 +39,8 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
     db_path::String = DB.DEFAULT_DB_PATH
     db::Union{SQLite.DB, Nothing} = nothing
     # Board data
-    cards_by_status::Dict{String, Vector{Dict{String,Any}}} = Dict{String,Vector{Dict{String,Any}}}()
+    cards_by_status::Dict{String, Vector{Dict{String, Any}}} =
+        Dict{String, Vector{Dict{String, Any}}}()
     # Selection
     selected_col::Int = 1
     selected_idx::Int = 1
@@ -49,18 +50,18 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
     search::String = ""
     # Modal / edit (Phase 3)
     modal::Symbol = :none          # :none | :card_edit | :user_picker
-    editing_id::Union{String,Nothing} = nothing
+    editing_id::Union{String, Nothing} = nothing
     edit_title::TextInput = TextInput()
     edit_desc::TextArea = TextArea()
     edit_priority::String = "Medium"
     # Users (Phase 4)
-    current_user_id::Union{String,Nothing} = nothing
-    users::Vector{Dict{String,Any}} = Dict{String,Any}[]
+    current_user_id::Union{String, Nothing} = nothing
+    users::Vector{Dict{String, Any}} = Dict{String, Any}[]
     user_selected::Int = 1
     # Login on startup (PR1: fields + guard skeleton; default :logged_in keeps direct paths)
     login_state::Symbol = :logged_in
     login_selected::Int = 1
-    login_input::TextInput = TextInput(; focused=true)
+    login_input::TextInput = TextInput(; focused = true)
     # Calendar (Phase 5)
     cal::Union{Calendar, Nothing} = nothing
     cal_selected_day::Int = Dates.day(Dates.today())
@@ -81,9 +82,9 @@ function load_board!(m::KanbanModel)
     ensure_db!(m)
     empty!(m.cards_by_status)
     for status in BOARD_COLUMNS
-        m.cards_by_status[status] = DB.list_issues(m.db; status=status)
+        m.cards_by_status[status] = DB.list_issues(m.db; status = status)
     end
-    load_users!(m; auto_select=true)
+    load_users!(m; auto_select = true)
     # clamp selection
     m.selected_col = clamp(m.selected_col, 1, length(BOARD_COLUMNS))
     n = length(get(m.cards_by_status, BOARD_COLUMNS[m.selected_col], []))
@@ -105,7 +106,9 @@ function sync_calendar!(m::KanbanModel)
                 if Dates.year(dd) == year && Dates.month(dd) == mon
                     push!(marked, Dates.day(dd))
                 end
-            catch; end
+            catch
+                ;
+            end
         end
     end
     m.cal = Calendar(year, mon; today = Dates.day(d), marked = marked)
@@ -145,7 +148,7 @@ function switch_to_create_user!(m::KanbanModel)
 end
 
 function open_user_picker!(m::KanbanModel)
-    load_users!(m; auto_select=true)
+    load_users!(m; auto_select = true)
     m.modal = :user_picker
     m.user_selected = 1
 end
@@ -172,7 +175,7 @@ function move_selected!(m::KanbanModel, dir::Symbol)
     id = card["id"]
 
     if dir == :left && cidx > 1
-        new_status = cols[cidx-1]
+        new_status = cols[cidx - 1]
         target_cards = get(m.cards_by_status, new_status, [])
         new_pos = length(target_cards) + 1
         DB.update_issue_status_and_position!(m.db, id, new_status, new_pos)
@@ -182,7 +185,7 @@ function move_selected!(m::KanbanModel, dir::Symbol)
         m.selected_idx = clamp(length(newc), 1, max(1, length(newc)))
         m.message = "moved → $(new_status)"
     elseif dir == :right && cidx < length(cols)
-        new_status = cols[cidx+1]
+        new_status = cols[cidx + 1]
         target_cards = get(m.cards_by_status, new_status, [])
         new_pos = length(target_cards) + 1
         DB.update_issue_status_and_position!(m.db, id, new_status, new_pos)
@@ -192,17 +195,27 @@ function move_selected!(m::KanbanModel, dir::Symbol)
         m.selected_idx = clamp(length(newc), 1, max(1, length(newc)))
         m.message = "moved → $(new_status)"
     elseif dir == :up && idx > 1
-        prev_card = cards[idx-1]
+        prev_card = cards[idx - 1]
         DB.update_issue_status_and_position!(m.db, id, status, prev_card["position"])
-        DB.update_issue_status_and_position!(m.db, prev_card["id"], status, card["position"])
+        DB.update_issue_status_and_position!(
+            m.db,
+            prev_card["id"],
+            status,
+            card["position"],
+        )
         load_board!(m)
         newc = get(m.cards_by_status, status, [])
         m.selected_idx = clamp(idx - 1, 1, max(1, length(newc)))
         m.message = "reordered ↑"
     elseif dir == :down && idx < length(cards)
-        next_card = cards[idx+1]
+        next_card = cards[idx + 1]
         DB.update_issue_status_and_position!(m.db, id, status, next_card["position"])
-        DB.update_issue_status_and_position!(m.db, next_card["id"], status, card["position"])
+        DB.update_issue_status_and_position!(
+            m.db,
+            next_card["id"],
+            status,
+            card["position"],
+        )
         load_board!(m)
         newc = get(m.cards_by_status, status, [])
         m.selected_idx = clamp(idx + 1, 1, max(1, length(newc)))
@@ -215,13 +228,13 @@ function move_selected!(m::KanbanModel, dir::Symbol)
     m.selected_idx = clamp(m.selected_idx, 1, max(1, length(nc)))
 end
 
-function open_edit_modal!(m::KanbanModel; new::Bool=false)
+function open_edit_modal!(m::KanbanModel; new::Bool = false)
     ensure_db!(m)
     m.modal = :card_edit
     if new
         m.editing_id = nothing
-        m.edit_title = TextInput(; focused=true)
-        m.edit_desc = TextArea(; focused=false)
+        m.edit_title = TextInput(; focused = true)
+        m.edit_desc = TextArea(; focused = false)
         m.edit_priority = "Medium"
         m.message = "NEW CARD"
     else
@@ -250,8 +263,15 @@ function save_modal!(m::KanbanModel)
     if m.editing_id === nothing
         # create
         ensure_db!(m)
-        new_id = DB.create_issue!(m.db; title=title, description=desc, status="Backlog", priority=prio,
-                                   assignee_id = m.current_user_id, position=999)
+        new_id = DB.create_issue!(
+            m.db;
+            title = title,
+            description = desc,
+            status = "Backlog",
+            priority = prio,
+            assignee_id = m.current_user_id,
+            position = 999,
+        )
         load_board!(m)
         # select the new one in Backlog (col 1 per kanban-func-plan)
         m.selected_col = 1
@@ -259,7 +279,13 @@ function save_modal!(m::KanbanModel)
         m.selected_idx = max(1, length(bl))
         m.message = "created $(get(DB.get_issue(m.db, new_id), "key", ""))"
     else
-        DB.update_issue!(m.db, m.editing_id; title=title, description=desc, priority=prio)
+        DB.update_issue!(
+            m.db,
+            m.editing_id;
+            title = title,
+            description = desc,
+            priority = prio,
+        )
         load_board!(m)
         m.message = "saved"
     end
@@ -282,7 +308,8 @@ function delete_selected!(m::KanbanModel)
     id = cards[idx]["id"]
     DB.delete_issue!(m.db, id)
     load_board!(m)
-    m.selected_idx = clamp(m.selected_idx, 1, max(1, length(get(m.cards_by_status, cols[cidx], []))))
+    m.selected_idx =
+        clamp(m.selected_idx, 1, max(1, length(get(m.cards_by_status, cols[cidx], []))))
     m.message = "deleted"
 end
 
@@ -396,8 +423,9 @@ function update!(m::KanbanModel, evt::KeyEvent)
             return
         end
         # quick priority (before feeding chars) - keep 1/2/3 always
-        if evt.key == :char && evt.char in ('1','2','3')
-            m.edit_priority = evt.char == '1' ? "High" : (evt.char == '2' ? "Medium" : "Low")
+        if evt.key == :char && evt.char in ('1', '2', '3')
+            m.edit_priority =
+                evt.char == '1' ? "High" : (evt.char == '2' ? "Medium" : "Low")
             return
         end
         # feed to inputs (respects .focused internally)
@@ -415,7 +443,7 @@ function update!(m::KanbanModel, evt::KeyEvent)
     if m.view_mode == :board
         cols = BOARD_COLUMNS
         cur_col = clamp(m.selected_col, 1, length(cols))
-        cards = get(m.cards_by_status, cols[cur_col], Dict{String,Any}[])
+        cards = get(m.cards_by_status, cols[cur_col], Dict{String, Any}[])
         ncards = length(cards)
 
         if evt.key == :left || (evt.key == :char && evt.char == 'h')
@@ -435,10 +463,10 @@ function update!(m::KanbanModel, evt::KeyEvent)
             m.selected_idx = min(max(1, ncards), m.selected_idx + 1)
             return
         elseif evt.key == :char && evt.char == 'n'
-            open_edit_modal!(m; new=true)
+            open_edit_modal!(m; new = true)
             return
         elseif evt.key == :enter
-            open_edit_modal!(m; new=false)
+            open_edit_modal!(m; new = false)
             return
         elseif evt.key == :char && evt.char == 'd'
             delete_selected!(m)
@@ -484,17 +512,28 @@ function update!(m::KanbanModel, evt::KeyEvent)
             # prev month
             c = m.cal
             y, mo = c.year, c.month
-            mo -= 1; if mo < 1; mo=12; y-=1; end
-            m.cal = Calendar(y, mo; today=0, marked = c.marked)  # keep marks for demo
+            mo -= 1;
+            if mo < 1
+                ;
+                mo=12;
+                y-=1;
+            end
+            m.cal = Calendar(y, mo; today = 0, marked = c.marked)  # keep marks for demo
             return
         elseif evt.key == :right || (evt.key == :char && evt.char == 'l')
             c = m.cal
             y, mo = c.year, c.month
-            mo += 1; if mo > 12; mo=1; y+=1; end
-            m.cal = Calendar(y, mo; today=0, marked = c.marked)
+            mo += 1;
+            if mo > 12
+                ;
+                mo=1;
+                y+=1;
+            end
+            m.cal = Calendar(y, mo; today = 0, marked = c.marked)
             return
-        elseif evt.key == :char && evt.char in ('j','k')
-            m.cal_selected_day = max(1, min(28, m.cal_selected_day + (evt.char=='j' ? 1 : -1)))
+        elseif evt.key == :char && evt.char in ('j', 'k')
+            m.cal_selected_day =
+                max(1, min(28, m.cal_selected_day + (evt.char=='j' ? 1 : -1)))
             return
         end
     end
@@ -503,7 +542,9 @@ function update!(m::KanbanModel, evt::KeyEvent)
 end
 
 # Simple QCI logo render using BigText + accent line (logo translation MVP)
-function render_qci_logo(buf::Buffer, area::Rect)
+# PR3: enhanced for geometric box-drawing mark (SVG-digitized style) + tick-driven
+# pulsing scan, typing tagline, orbiting dots/blocks. Lightweight, O(1). Works for login branding.
+function render_qci_logo(buf::Buffer, area::Rect; tick::Int = 0)
     # Centered BigText "QCI"
     bt = BigText("QCI"; style = Style(; fg = QCI_CYAN, bold = true))
     tw, th = intrinsic_size(bt)
@@ -512,12 +553,61 @@ function render_qci_logo(buf::Buffer, area::Rect)
     if area.height >= 1 && area.width >= 3
         render(bt, title_r, buf)
     end
-    # Small stylized tagline / mark hint under logo
+
+    # PR3 geometric stylized mark (box-drawing Q/C/I emblem, vector-like, positioned to side of BigText)
+    if area.height > 3 && area.width > (tw + 8)
+        gy = area.y + 2
+        gx = tx + tw + 2
+        gsty = Style(; fg = QCI_CYAN, bold = ((tick % 5) < 3))
+        set_string!(buf, gx, gy, "┌┬┐", gsty)
+        set_string!(buf, gx, gy+1, "├┼┤", gsty)
+        set_string!(buf, gx, gy+2, "└┴┘", gsty)
+    end
+
+    # tick-driven pulsing accent/scan line (under BigText)
+    if area.height >= 5 && area.width > 5
+        py = area.y + min(4, max(0, th))
+        phase = tick % 8
+        accent = phase < 4 ? "────" : "════"
+        ax_base = tx + (phase % max(1, tw - 2))
+        ax = max(area.x + 1, min(ax_base, area.x + area.width - 5))
+        set_string!(buf, ax, py, accent, Style(; fg = QCI_CYAN, dim = (phase % 2 == 1)))
+    end
+
+    # orbiting decorations (cycle positions + chars)
+    if area.height >= 3 && area.width > 12
+        orbit_chars = ['•', '○', '◉', '◎']
+        oi = (tick ÷ 2) % 4
+        och = orbit_chars[oi + 1]
+        # left, right, centerish relative positions (clamped)
+        lx = max(area.x, tx - 1)
+        rx = min(area.x + area.width - 1, tx + tw + 1)
+        cy = area.y + 1 + (tick % 3)
+        set_string!(buf, lx, cy, string(och), Style(; fg = QCI_CYAN))
+        set_string!(
+            buf,
+            rx,
+            area.y + 1 + ((tick + 2) % 3),
+            string(och),
+            Style(; fg = QCI_CYAN),
+        )
+    end
+
+    # Small stylized tagline / mark hint under logo (now typing animation when tick advances)
     y2 = area.y + 5
     if y2 < bottom(area) && area.width > 10
         tag = "QCI KANBAN"
+        vis = ((tick % 12) + 1)
+        if vis > length(tag)
+            ;
+            vis = length(tag);
+        end
+        typed = tag[1:vis]
+        if vis < length(tag) && (tick % 3 != 0)
+            typed *= "▌"
+        end
         sx = area.x + max(0, (area.width - length(tag)) ÷ 2)
-        set_string!(buf, sx, y2, tag, Style(; fg = QCI_NAVY, bold = true))
+        set_string!(buf, sx, y2, typed, Style(; fg = QCI_CYAN, bold = true))
     end
 end
 
@@ -526,13 +616,20 @@ function view(m::KanbanModel, f::Frame)
     area = f.area
 
     if area.width < 20 || area.height < 6
-        set_string!(buf, area.x, area.y, "QCI KANBAN (small)", Style(; fg = QCI_CYAN, dim = true))
+        set_string!(
+            buf,
+            area.x,
+            area.y,
+            "QCI KANBAN (small)",
+            Style(; fg = QCI_CYAN, dim = true),
+        )
         return
     end
 
     # Outer branded block
+    # PR3: dynamic title for login branding
     outer = Block(
-        title = "QCI KANBAN",
+        title = (m.login_state != :logged_in ? "QCI KANBAN — LOGIN" : "QCI KANBAN"),
         border_style = Style(; fg = QCI_CYAN),
         title_style = Style(; fg = QCI_CYAN, bold = true),
     )
@@ -547,11 +644,23 @@ function view(m::KanbanModel, f::Frame)
     content_area = rows[2]
     status_area = rows[3]
 
-    render_qci_logo(buf, logo_area)
+    render_qci_logo(buf, logo_area; tick = m.tick)
 
     if m.login_state != :logged_in
-        # PR2 skeleton (minimal): Block title + simple list/NAME> stub. Reuses split-derived content_area + logo.
-        # Full instructions, narrow handling, dynamic title, animations deferred to PR3. Early return gates board.
+        # PR3 full login content (exact per annotated concrete view block in design-login-startup.md).
+        # Reuses already-computed rows/split (no dup), immediately after logo, before mode_str.
+        # Narrow guard on content, full instrs, NAME> + render input, ▶ lists, early return. No clear-rect.
+        if content_area.width < 30 || content_area.height < 8
+            set_string!(
+                buf,
+                content_area.x + 1,
+                content_area.y + 1,
+                "QCI KANBAN - LOGIN (small)",
+                Style(; fg = QCI_CYAN, dim = true),
+            )
+            return
+        end
+
         is_create = m.login_state == :create_user
         title = is_create ? "CREATE USER" : "SELECT USER"
         lblock = Block(
@@ -566,18 +675,56 @@ function view(m::KanbanModel, f::Frame)
         linner = render(lblock, Rect(lx, ly, lw, lh), buf)
         y = linner.y + 1
         if is_create
+            # Create form (NAME> + focused TextInput)
             set_string!(buf, linner.x + 1, y, "NAME>", Style(; fg = QCI_CYAN, bold = true))
+            input_rect = Rect(linner.x + 7, y, max(12, linner.width - 10), 1)
+            render(m.login_input, input_rect, buf)
+            y += 1
+            if y < bottom(linner)
+                set_string!(
+                    buf,
+                    linner.x + 1,
+                    y,
+                    "[enter] create + login   [esc] back",
+                    Style(; fg = QCI_SECONDARY, dim = true),
+                )
+            end
         else
+            # Select list (exact user_picker style)
+            nu = length(m.users)
             for (i, u) in enumerate(m.users)
-                if y > bottom(linner) - 2; break; end
+                if y > bottom(linner) - 2
+                    ;
+                    break;
+                end
                 sel = (i == m.login_selected)
                 p = sel ? "▶ " : "  "
-                sty = sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+                sty =
+                    sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
                 set_string!(buf, linner.x + 1, y, p * get(u, "name", "?"), sty)
                 y += 1
             end
+            if nu == 0
+                set_string!(
+                    buf,
+                    linner.x + 2,
+                    y,
+                    "No users — press 'n' to create",
+                    Style(; fg = QCI_SECONDARY, dim = true),
+                )
+                y += 1
+            end
+            if y < bottom(linner)
+                set_string!(
+                    buf,
+                    linner.x + 1,
+                    y,
+                    "[↑↓/jk] select  [enter] login  [n/c] new  [q/esc] quit",
+                    Style(; fg = QCI_SECONDARY, dim = true),
+                )
+            end
         end
-        return
+        return   # gate: bypass board/status/modals
     end
 
     mode_str = uppercase(string(m.view_mode))
@@ -599,12 +746,14 @@ function view(m::KanbanModel, f::Frame)
 
             for (i, status) in enumerate(BOARD_COLUMNS)
                 ca = i <= length(col_areas) ? col_areas[i] : content_area
-                cards = get(m.cards_by_status, status, Dict{String,Any}[])
+                cards = get(m.cards_by_status, status, Dict{String, Any}[])
 
                 # Column header block
                 col_block = Block(
                     title = status,
-                    border_style = Style(; fg = (i == m.selected_col ? QCI_CYAN : QCI_NAVY)),
+                    border_style = Style(;
+                        fg = (i == m.selected_col ? QCI_CYAN : QCI_NAVY),
+                    ),
                     title_style = Style(; fg = QCI_CYAN, bold = (i == m.selected_col)),
                 )
                 col_inner = render(col_block, ca, buf)
@@ -636,49 +785,101 @@ function view(m::KanbanModel, f::Frame)
                     # truncate to fit (include suffix, clamp whole display)
                     avail = max(6, col_inner.width - 4)
                     suffix = " [" * a_initial * "]" * due_s
-                    base = key * " " * (length(title) > (avail - length(suffix) - 1) ? title[1:max(0, avail - length(suffix) - 2)] * "…" : title)
+                    base =
+                        key *
+                        " " *
+                        (
+                            length(title) > (avail - length(suffix) - 1) ?
+                            title[1:max(0, avail - length(suffix) - 2)] * "…" : title
+                        )
                     display = base * suffix
                     if length(display) > avail
-                        display = display[1:avail-1] * "…"
+                        display = display[1:(avail - 1)] * "…"
                     end
 
-                    sty = is_sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+                    sty =
+                        is_sel ? Style(; fg = QCI_CYAN, bold = true) :
+                        Style(; fg = QCI_SECONDARY)
                     set_string!(buf, col_inner.x + 1, y, prefix * display, sty)
                     y += 1
                 end
 
                 if isempty(cards)
-                    set_string!(buf, col_inner.x + 2, y, "— empty —", Style(; fg = QCI_SECONDARY, dim = true))
+                    set_string!(
+                        buf,
+                        col_inner.x + 2,
+                        y,
+                        "— empty —",
+                        Style(; fg = QCI_SECONDARY, dim = true),
+                    )
                 end
             end
         end
     else
         if m.view_mode == :calendar && m.cal !== nothing
             # Render the calendar widget
-            cal_area = Rect(content_area.x + 2, content_area.y + 1, min(26, content_area.width-4), 10)
+            cal_area = Rect(
+                content_area.x + 2,
+                content_area.y + 1,
+                min(26, content_area.width-4),
+                10,
+            )
             render(m.cal, cal_area, buf)
 
             # List due-ish cards for the month (simple)
             list_x = content_area.x + 30
-            set_string!(buf, list_x, content_area.y + 1, "DUE THIS MONTH", Style(; fg = QCI_CYAN, bold=true))
+            set_string!(
+                buf,
+                list_x,
+                content_area.y + 1,
+                "DUE THIS MONTH",
+                Style(; fg = QCI_CYAN, bold = true),
+            )
             yy = content_area.y + 2
             due_count = 0
             for cards in values(m.cards_by_status), c in cards
-                if yy > bottom(content_area) - 1; break; end
+                if yy > bottom(content_area) - 1
+                    ;
+                    break;
+                end
                 ds = get(c, "due_date", nothing)
                 if ds !== nothing && !ismissing(ds)
-                    set_string!(buf, list_x, yy, get(c,"key","") * " " * get(c,"title",""), Style(; fg = QCI_SECONDARY))
+                    set_string!(
+                        buf,
+                        list_x,
+                        yy,
+                        get(c, "key", "") * " " * get(c, "title", ""),
+                        Style(; fg = QCI_SECONDARY),
+                    )
                     yy += 1
                     due_count += 1
                 end
             end
             if due_count == 0
-                set_string!(buf, list_x, yy, "(no dues in data)", Style(; fg = QCI_SECONDARY, dim=true))
+                set_string!(
+                    buf,
+                    list_x,
+                    yy,
+                    "(no dues in data)",
+                    Style(; fg = QCI_SECONDARY, dim = true),
+                )
             end
         else
             # Other views stub
-            set_string!(buf, content_area.x + 2, content_area.y + 1, "View: $(mode_str) — $(m.message)", Style(; fg = QCI_SECONDARY))
-            set_string!(buf, content_area.x + 2, content_area.y + 3, "[b]oard  [c]alendar  [r]eload  [q]uit", Style(; fg = QCI_CYAN, dim = true))
+            set_string!(
+                buf,
+                content_area.x + 2,
+                content_area.y + 1,
+                "View: $(mode_str) — $(m.message)",
+                Style(; fg = QCI_SECONDARY),
+            )
+            set_string!(
+                buf,
+                content_area.x + 2,
+                content_area.y + 3,
+                "[b]oard  [c]alendar  [r]eload  [q]uit",
+                Style(; fg = QCI_CYAN, dim = true),
+            )
         end
     end
 
@@ -696,10 +897,19 @@ function view(m::KanbanModel, f::Frame)
                 user_name = " " * split(m.users[u]["name"])[1]
             end
         end
-        render(StatusBar(
-            left = [Span(" QCI • KANBAN ", Style(; fg = QCI_CYAN, dim = true))],
-            right = [Span("$(mode_str)$(sel_info)$(user_name) [u]ser r=reload ", Style(; fg = QCI_CYAN, dim = true))],
-        ), status_area, buf)
+        render(
+            StatusBar(
+                left = [Span(" QCI • KANBAN ", Style(; fg = QCI_CYAN, dim = true))],
+                right = [
+                    Span(
+                        "$(mode_str)$(sel_info)$(user_name) [u]ser r=reload ",
+                        Style(; fg = QCI_CYAN, dim = true),
+                    ),
+                ],
+            ),
+            status_area,
+            buf,
+        )
     end
 
     # Modal overlay (simple centered)
@@ -726,25 +936,41 @@ function view(m::KanbanModel, f::Frame)
         # Live form fields inside the bordered area (no duplicate snapshot text)
         y = inner.y + 1
         if y < bottom(inner)
-            tstyle = m.edit_title.focused ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+            tstyle =
+                m.edit_title.focused ? Style(; fg = QCI_CYAN, bold = true) :
+                Style(; fg = QCI_SECONDARY)
             set_string!(buf, inner.x + 1, y, "TITLE>", tstyle)
             tr = Rect(inner.x + 8, y, max(10, inner.width - 12), 1)
             render(m.edit_title, tr, buf)
             y += 2
         end
         if y + 1 < bottom(inner)
-            dstyle = m.edit_desc.focused ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+            dstyle =
+                m.edit_desc.focused ? Style(; fg = QCI_CYAN, bold = true) :
+                Style(; fg = QCI_SECONDARY)
             set_string!(buf, inner.x + 1, y, "DESC>", dstyle)
             dr = Rect(inner.x + 8, y, max(10, inner.width - 12), 3)
             render(m.edit_desc, dr, buf)
             y += 4
         end
         if y < bottom(inner)
-            set_string!(buf, inner.x + 1, y, "PRIORITY: $(m.edit_priority)  (press 1/2/3)", Style(; fg = QCI_SECONDARY))
+            set_string!(
+                buf,
+                inner.x + 1,
+                y,
+                "PRIORITY: $(m.edit_priority)  (press 1/2/3)",
+                Style(; fg = QCI_SECONDARY),
+            )
             y += 1
         end
         if y < bottom(inner)
-            set_string!(buf, inner.x + 1, y, "[enter] save   [esc] cancel", Style(; fg = QCI_CYAN, dim = true))
+            set_string!(
+                buf,
+                inner.x + 1,
+                y,
+                "[enter] save   [esc] cancel",
+                Style(; fg = QCI_CYAN, dim = true),
+            )
         end
     end
 
@@ -753,18 +979,37 @@ function view(m::KanbanModel, f::Frame)
         mh = min(10, area.height - 4)
         mx = area.x + (area.width - mw) ÷ 2
         my = area.y + 4
-        ublock = Block(title="SELECT USER", border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
+        ublock = Block(
+            title = "SELECT USER",
+            border_style = Style(; fg = QCI_CYAN),
+            title_style = Style(; fg = QCI_CYAN, bold = true),
+        )
         uinner = render(ublock, Rect(mx, my, mw, mh), buf)
         y = uinner.y + 1
         for (i, u) in enumerate(m.users)
-            if y > bottom(uinner) - 1; break; end
+            if y > bottom(uinner) - 1
+                ;
+                break;
+            end
             sel = (i == m.user_selected)
             p = sel ? "▶ " : "  "
-            set_string!(buf, uinner.x + 1, y, p * get(u, "name", "?"), sel ? Style(; fg=QCI_CYAN, bold=true) : Style(; fg=QCI_SECONDARY))
+            set_string!(
+                buf,
+                uinner.x + 1,
+                y,
+                p * get(u, "name", "?"),
+                sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY),
+            )
             y += 1
         end
         if isempty(m.users)
-            set_string!(buf, uinner.x + 2, y, "No users — seed issue?", Style(; fg=QCI_SECONDARY, dim=true))
+            set_string!(
+                buf,
+                uinner.x + 2,
+                y,
+                "No users — seed issue?",
+                Style(; fg = QCI_SECONDARY, dim = true),
+            )
         end
     end
 end
@@ -806,8 +1051,13 @@ Record a short headless demo session using Tachikoma.record_app.
 Produces a .tach recording file with scripted navigation, card creation, and view changes.
 Useful for visual verification outside of TestBackend unit tests.
 """
-function record_demo(filename::AbstractString = "qci-kanban-demo.tach";
-                     width::Int = 78, height::Int = 20, frames::Int = 72, fps::Int = 8)
+function record_demo(
+    filename::AbstractString = "qci-kanban-demo.tach";
+    width::Int = 78,
+    height::Int = 20,
+    frames::Int = 72,
+    fps::Int = 8,
+)
     m = KanbanModel()
     m.db_path = ":memory:"
     load_board!(m)
@@ -829,10 +1079,17 @@ function record_demo(filename::AbstractString = "qci-kanban-demo.tach";
         (60, KeyEvent('b')),          # back to board
     ]
 
-    record_app(m, filename; width=width, height=height, frames=frames, fps=fps, events=events)
+    record_app(
+        m,
+        filename;
+        width = width,
+        height = height,
+        frames = frames,
+        fps = fps,
+        events = events,
+    )
     @info "Recorded QCI Kanban demo" filename frames fps
     filename
 end
 
 end # module QciKanban
-
