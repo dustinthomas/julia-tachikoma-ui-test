@@ -68,7 +68,7 @@ See `AGENTS.md` for full model routing, BYOM instructions, and workflow rules.
 
 ## Project Goals
 
-- Build real, rich Julia TUIs with Tachikoma.jl using the structured agentic pipeline (Plan/Scout/Implement/Validate/Review)
+- Build real, rich Julia TUIs with Tachikoma.jl using the structured agentic pipeline (Plan/Scout/Implement/Validate/Review) or the 2026 TDD Orchestration workflow (hierarchical + scoped sub-agents + strict coverage gate — see AGENTS.md and .grok/docs/tdd-workflow.md)
 - Leverage Tachikoma's **TestBackend** (headless rendering + KeyEvent injection + inspection APIs) for fully deterministic, CI-friendly, tty-free UI tests — this is what enables consistent high-quality agentic TUI work
 - Maintain excellent test coverage, style, and architecture using Julia idioms and Tachikoma patterns (Elm Model/Update/View + widgets/layouts)
 

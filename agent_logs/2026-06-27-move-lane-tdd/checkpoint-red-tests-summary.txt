@@ -1,0 +1,21 @@
+Key new failing tests added (excerpted for scoped handoff):
+
+1. "'m' opens :move_lane modal..."
+   - update!('m') => m.modal == :move_lane
+   - visual_rows contain lane names + some "Move"/"MOVE"/"lane"
+   - TestBackend render: find MOVE or lane name; NO "QCI-" (bleed guard)
+
+2. "move via 'm' + nav + Enter non-adjacent Backlog->Done..."
+   - Select col1 idx1 (Backlog)
+   - 'm', then 4x 'j' (to reach last = Done), :enter
+   - After: modal=none, count Backlog--, Done >= prev+1
+   - selected_col == 5 (last), message contains moved/Done
+   - visual shows done_col
+   - 'r' + load => card id now found in Done
+
+3. "'esc' cancels..."
+   - 'm' then :escape => modal=none, counts unchanged
+
+These must become passing. Drive a :move_lane modal, lane picker nav, direct status change.
+
+Existing <>/move_selected! must continue to work (no breakage).

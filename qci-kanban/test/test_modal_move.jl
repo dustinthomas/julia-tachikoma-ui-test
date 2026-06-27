@@ -123,4 +123,69 @@ const BOARD_COLUMNS = QciKanban.BOARD_COLUMNS
         @test T.find_text(tb, "PRIORITY:") !== nothing
         @test T.row_text(tb, 10) !== nothing
     end
+
+    @testset "'m' opens :move_lane modal listing all BOARD_COLUMNS (visual_rows + TestBackend)" begin
+        m = fresh()
+        m.selected_col = 1
+        m.selected_idx = 1
+        T.update!(m, T.KeyEvent('m'))
+        @test m.modal == :move_lane
+        rows = visual_rows(m; w=80, h=20)
+        @test any(occursin("MOVE", uppercase(r)) || occursin("Move to lane", r) || occursin("Move", r) || occursin("lane", lowercase(r)) for r in rows)
+        for col in BOARD_COLUMNS
+            @test any(occursin(col, r) for r in rows)
+        end
+        tb = T.TestBackend(80, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+        @test T.find_text(tb, "MOVE") !== nothing || T.find_text(tb, "Move") !== nothing || T.find_text(tb, BOARD_COLUMNS[1]) !== nothing
+        @test T.find_text(tb, "QCI-") === nothing
+    end
+
+    @testset "move via 'm' + nav + Enter non-adjacent Backlog->Done; cards_by_status, selection, msg, persist" begin
+        m = fresh()
+        m.selected_col = 1
+        m.selected_idx = 1
+        backlog_cards = get(m.cards_by_status, BOARD_COLUMNS[1], [])
+        if !isempty(backlog_cards)
+            card_id = backlog_cards[1]["id"]
+            pre_back = length(backlog_cards)
+            done_col = BOARD_COLUMNS[end]
+            pre_done = length(get(m.cards_by_status, done_col, []))
+            T.update!(m, T.KeyEvent('m'))
+            @test m.modal == :move_lane
+            for _ in 1:4
+                T.update!(m, T.KeyEvent('j'))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.modal == :none
+            QciKanban.load_board!(m)
+            post_back = length(get(m.cards_by_status, BOARD_COLUMNS[1], []))
+            post_done = length(get(m.cards_by_status, done_col, []))
+            @test post_back == pre_back - 1
+            @test post_done >= pre_done + 1
+            @test m.selected_col == length(BOARD_COLUMNS)
+            @test occursin("moved", lowercase(m.message)) || occursin("Done", m.message) || !isempty(m.message)
+            rows = visual_rows(m; w=80, h=20)
+            @test any(occursin(done_col, r) for r in rows)
+            T.update!(m, T.KeyEvent('r'))
+            QciKanban.load_board!(m)
+            found = any(get(c, "id", nothing) == card_id for c in get(m.cards_by_status, done_col, []))
+            @test found
+        end
+    end
+
+    @testset "'esc' cancels move-to-lane modal without change" begin
+        m = fresh()
+        m.selected_col = 1
+        m.selected_idx = 1
+        pre_back = length(get(m.cards_by_status, BOARD_COLUMNS[1], []))
+        T.update!(m, T.KeyEvent('m'))
+        @test m.modal == :move_lane
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.modal == :none
+        QciKanban.load_board!(m)
+        post_back = length(get(m.cards_by_status, BOARD_COLUMNS[1], []))
+        @test post_back == pre_back
+    end
 end

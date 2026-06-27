@@ -1,0 +1,10 @@
+{
+  "run_id": "2026-06-27-move-lane-tdd",
+  "task": "Add the ability for the user to move task to a new lane (direct, any target via 'm' modal)",
+  "phase": "complete", "status": "success",
+  "status": "in_progress",
+  "checkpoints": [],
+  "coverage_target": 100,
+  "files_expected": ["qci-kanban/src/QciKanban.jl", "qci-kanban/test/test_modal_move.jl", "qci-kanban/README.md"],
+  "created": "2026-06-27"
+}

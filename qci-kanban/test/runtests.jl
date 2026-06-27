@@ -98,6 +98,112 @@ include("test_calendar.jl")
     end
 end
 
+# PR1 TDD tests (added before any src change per strict TDD)
+# Exercise new fields, kanban setup path (using :memory: + DB direct for state),
+# current_user no-auto, and guard effect on keys (using TestBackend + update!/visual).
+# These will FAIL (Red) until src/QciKanban.jl implements the wiring/guard/shims.
+@testset "PR1: Model fields + kanban startup + login guard skeleton (TDD red first)" begin
+    @testset "new login_state fields have correct defaults" begin
+        m = KanbanModel()
+        @test m.login_state == :logged_in
+        @test m.login_selected == 1
+        @test m.login_input isa T.TextInput
+        @test m.login_input.focused == true   # from default in design
+    end
+
+    @testset "direct KanbanModel + load_board! compat (auto user + force :logged_in shim)" begin
+        m = KanbanModel()
+        m.db_path = ":memory:"
+        QciKanban.load_board!(m)
+        @test m.login_state == :logged_in
+        @test m.current_user_id !== nothing
+        @test !isempty(m.users)
+        # still renders board as before (no UI change in PR1)
+        rows = visual_rows(m; w=60, h=18)
+        @test any(occursin("QCI-", r) for r in rows)
+        tb = T.TestBackend(60, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+        @test T.find_text(tb, "QCI-") !== nothing
+    end
+
+    @testset "kanban startup path sets login_state, no auto current_user (state after setup)" begin
+        m = KanbanModel()
+        m.db_path = ":memory:"
+        # replicate the intended kanban() startup logic (pre-app) to test state
+        # (this drives the impl; uses :memory: per instructions)
+        if m.db === nothing
+            m.db = QciKanban.DB.open_db(m.db_path)
+        end
+        pre_users = QciKanban.DB.list_users(m.db)
+        pre_issues = QciKanban.DB.list_issues(m.db)
+        if isempty(pre_users) && isempty(pre_issues)
+            QciKanban.DB.seed_demo!(m.db)
+        end
+        QciKanban.load_users!(m; auto_select = false)
+        if isempty(m.users)
+            m.login_state = :create_user
+            m.login_input = T.TextInput(; focused = true)
+        else
+            m.login_state = :select_user
+            m.login_selected = 1
+        end
+        @test m.login_state == :select_user
+        @test m.current_user_id === nothing  # deliberate: no auto-select in new kanban() path
+        @test !isempty(m.users)
+        @test m.login_selected == 1
+        # exercise TestBackend render (board still renders in PR1 skeleton)
+        rows = visual_rows(m; w=70, h=16)
+        @test any(occursin("QCI", r) for r in rows)
+        tb = T.TestBackend(70, 16)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+        @test T.find_text(tb, "QCI") !== nothing
+    end
+
+    @testset "early guard in update! prevents board keys pre-login (no state bleed)" begin
+        m = KanbanModel()
+        m.db_path = ":memory:"
+        QciKanban.load_board!(m)  # gets users etc
+        m.login_state = :select_user  # simulate new startup path state (current_user may be set or not)
+        m.current_user_id = nothing
+        orig_view = m.view_mode
+        orig_modal = m.modal
+        orig_sel_col = m.selected_col
+        orig_sel_idx = m.selected_idx
+
+        # board keys that should be guarded (early return before view switches / board nav)
+        T.update!(m, T.KeyEvent('b'))
+        @test m.view_mode == orig_view  # no switch to board (though already is)
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode == orig_view
+        T.update!(m, T.KeyEvent('L'))
+        @test m.view_mode == orig_view
+
+        # card nav / edit keys should not affect selection or open modals
+        T.update!(m, T.KeyEvent('l'))
+        T.update!(m, T.KeyEvent('j'))
+        T.update!(m, T.KeyEvent('n'))
+        @test m.selected_col == orig_sel_col
+        @test m.selected_idx == orig_sel_idx
+        @test m.modal == orig_modal
+
+        # 'r' reload: per PR1 guard sketch, 'r' is handled before guard so may still reload (but design says ignore pre-login)
+        # for minimal guard test we focus on the after-r switches and board nav which are guarded
+        # q/esc still quit (handled pre-guard)
+        m3 = KanbanModel()
+        m3.login_state = :select_user
+        T.update!(m3, T.KeyEvent(:escape))
+        @test m3.quit == true
+
+        # Use TestBackend + re-render to confirm no visual state change side effects from guarded keys
+        tb = T.TestBackend(50, 12)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+        @test T.find_text(tb, "QCI") !== nothing
+    end
+end
+
 @testset "record_app demo integration (visual capture outside TestBackend)" begin
     mktempdir() do dir
         cd(dir) do

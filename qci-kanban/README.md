@@ -35,7 +35,8 @@ See tests (e.g. `test_board_render.jl`) for examples using the `visual_rows` hel
 Keys (board):
 - `h/l` or `←/→` : column
 - `j/k` or `↑/↓` : card
-- `<` / `>` : move card to prev/next column
+- `<` / `>` : move card to prev/next column (adjacent)
+- `m` : move to any lane (opens picker; j/k + enter)
 - `n` : new card
 - `Enter` : edit selected
 - `d` : delete

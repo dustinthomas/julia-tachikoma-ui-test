@@ -1,0 +1,131 @@
+diff --git a/qci-kanban/src/QciKanban.jl b/qci-kanban/src/QciKanban.jl
+index f6d0f35..f09b0a9 100644
+--- a/qci-kanban/src/QciKanban.jl
++++ b/qci-kanban/src/QciKanban.jl
+@@ -57,6 +57,8 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
+     current_user_id::Union{String,Nothing} = nothing
+     users::Vector{Dict{String,Any}} = Dict{String,Any}[]
+     user_selected::Int = 1
++    # Move lane picker (direct non-adjacent move)
++    move_lane_selected::Int = 1
+     # Calendar (Phase 5)
+     cal::Union{Calendar, Nothing} = nothing
+     cal_selected_day::Int = Dates.day(Dates.today())
+@@ -127,6 +129,35 @@ function select_current_user!(m::KanbanModel)
+     m.modal = :none
+ end
+ 
++function open_move_lane_picker!(m::KanbanModel)
++    m.modal = :move_lane
++    m.move_lane_selected = clamp(m.selected_col, 1, length(BOARD_COLUMNS))
++end
++
++function confirm_move_to_lane!(m::KanbanModel)
++    ensure_db!(m)
++    cols = BOARD_COLUMNS
++    nl = length(cols)
++    target_idx = clamp(m.move_lane_selected, 1, nl)
++    target_status = cols[target_idx]
++    cidx = clamp(m.selected_col, 1, nl)
++    status = cols[cidx]
++    cards = get(m.cards_by_status, status, [])
++    idx = clamp(m.selected_idx, 1, length(cards))
++    isempty(cards) && (m.modal = :none; return)
++    card = cards[idx]
++    id = card["id"]
++    target_cards = get(m.cards_by_status, target_status, [])
++    new_pos = length(target_cards) + 1
++    DB.update_issue_status_and_position!(m.db, id, target_status, new_pos)
++    load_board!(m)
++    m.selected_col = target_idx
++    newc = get(m.cards_by_status, target_status, [])
++    m.selected_idx = clamp(length(newc), 1, max(1, length(newc)))
++    m.message = "moved → $(target_status)"
++    m.modal = :none
++end
++
+ # Move selected card left/right (status) or within column (reorder)
+ function move_selected!(m::KanbanModel, dir::Symbol)
+     ensure_db!(m)
+@@ -261,7 +292,7 @@ function update!(m::KanbanModel, evt::KeyEvent)
+     if evt.key == :char && evt.char == 'q'
+         m.quit = true
+         return
+-    elseif evt.key == :escape
++    elseif evt.key == :escape && m.modal == :none
+         m.quit = true
+         return
+     elseif evt.key == :char && evt.char == 'r'
+@@ -331,7 +362,7 @@ function update!(m::KanbanModel, evt::KeyEvent)
+     end
+ 
+     # Board navigation (Phase 2/3)
+-    if m.view_mode == :board
++    if m.view_mode == :board && m.modal == :none
+         cols = BOARD_COLUMNS
+         cur_col = clamp(m.selected_col, 1, length(cols))
+         cards = get(m.cards_by_status, cols[cur_col], Dict{String,Any}[])
+@@ -371,6 +402,9 @@ function update!(m::KanbanModel, evt::KeyEvent)
+         elseif evt.key == :char && evt.char == 'u'
+             open_user_picker!(m)
+             return
++        elseif evt.key == :char && evt.char == 'm'
++            open_move_lane_picker!(m)
++            return
+         end
+     end
+ 
+@@ -397,6 +431,26 @@ function update!(m::KanbanModel, evt::KeyEvent)
+         return
+     end
+ 
++    # Move lane picker nav (minimal, mirrors user_picker)
++    if m.modal == :move_lane
++        nl = length(BOARD_COLUMNS)
++        if evt.key == :up || (evt.key == :char && evt.char == 'k')
++            m.move_lane_selected = max(1, m.move_lane_selected - 1)
++            return
++        elseif evt.key == :down || (evt.key == :char && evt.char == 'j')
++            m.move_lane_selected = min(nl, m.move_lane_selected + 1)
++            return
++        elseif evt.key == :enter
++            confirm_move_to_lane!(m)
++            return
++        elseif evt.key == :escape
++            m.modal = :none
++            return
++        end
++        m.tick += 1
++        return
++    end
++
+     # Calendar nav (Phase 5 minimal)
+     if m.view_mode == :calendar && m.cal !== nothing
+         if evt.key == :left || (evt.key == :char && evt.char == 'h')
+@@ -654,6 +708,26 @@ function view(m::KanbanModel, f::Frame)
+             set_string!(buf, uinner.x + 2, y, "No users — seed issue?", Style(; fg=QCI_SECONDARY, dim=true))
+         end
+     end
++
++    if m.modal == :move_lane && area.width >= 24 && area.height >= 8
++        mw = min(40, area.width - 4)
++        mh = min(12, area.height - 4)
++        mx = area.x + (area.width - mw) ÷ 2
++        my = area.y + 4
++        mblock = Block(title="MOVE TO LANE", border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
++        inner = render(mblock, Rect(mx, my, mw, mh), buf)
++        y = inner.y + 1
++        for (i, col) in enumerate(BOARD_COLUMNS)
++            if y > bottom(inner) - 1; break; end
++            sel = (i == m.move_lane_selected)
++            p = sel ? "▶ " : "  "
++            set_string!(buf, inner.x + 1, y, p * col, sel ? Style(; fg=QCI_CYAN, bold=true) : Style(; fg=QCI_SECONDARY))
++            y += 1
++        end
++        if y < bottom(inner)
++            set_string!(buf, inner.x + 1, y, "[enter] move   [esc] cancel", Style(; fg = QCI_CYAN, dim = true))
++        end
++    end
+ end
+ 
+ """

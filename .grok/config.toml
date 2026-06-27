@@ -47,6 +47,10 @@ plan = "grok-composer-2.5-fast"
 # You can add more as we define custom roles:
 # validator = "grok-build"
 
+# New in 2026 TDD workflow: test-writer persona (fast model) for Red phase.
+# Orchestrator/lead (grok-build) coordinates Test Writer → Coder → Validator gate.
+# See AGENTS.md "TDD Orchestration" and .grok/docs/tdd-workflow.md.
+
 # Example of enabling/disabling built-ins (uncomment to experiment)
 # [subagents.toggle]
 # explore = true

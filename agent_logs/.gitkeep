@@ -1,0 +1,12 @@
+# agent_logs — persistent TDD/orchestrator checkpoints and structured artifacts
+#
+# Per the TDD workflow (see .grok/docs/tdd-workflow.md and AGENTS.md):
+#   agent_logs/<feature-slug-or-run-id>/
+#     - tdd-plan.json
+#     - checkpoint-*.md
+#     - coverage-report.json
+#     - *.diff
+#     - state.json
+#
+# These are working artifacts. You may gitignore the directory or commit selected runs.
+# The orchestrator and sub-agents are instructed to read from here for scoped context.

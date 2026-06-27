@@ -206,3 +206,11 @@ Return a structured summary:
 See the personas in `.grok/personas/` for exact behavioral contracts.
 
 This replaces the old `pipeline.js` + named `agent()` calls with native Grok primitives.
+
+## 2026 TDD Note (see AGENTS.md + .grok/docs/tdd-workflow.md)
+For strict TDD + 100% coverage work, prefer:
+- The dedicated test-writer persona (new) + tightened coder/validator.
+- agent_logs/<slug>/ checkpoints + scoped (diff + failing tests only) handoffs.
+- Or the stronger bundled skills: `/design` followed by `/execute-plan` (worktree isolation, resume_from, per-PR mandatory review until 0 issues) or `/implement --effort N`.
+
+You can still run this pipeline; just feed the TDD orchestrator prompt and require the JSON gates from validator.
