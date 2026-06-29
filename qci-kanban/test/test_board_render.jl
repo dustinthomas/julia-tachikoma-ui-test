@@ -10,9 +10,10 @@ const BOARD_COLUMNS = QciKanban.BOARD_COLUMNS
 
     function fresh_model()
         m = KanbanModel()
-        # Use in-memory for isolation (monkey patch path before load)
+        # Use in-memory for isolation; go through real login gate so board renders (current_user set)
         m.db_path = ":memory:"
-        QciKanban.load_board!(m)
+        QciKanban.load_users!(m)
+        T.update!(m, T.KeyEvent(:enter))
         m
     end
 

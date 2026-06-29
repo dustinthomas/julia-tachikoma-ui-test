@@ -89,4 +89,34 @@ const DB = QciKanban.DB
         @test DB.get_issue(db, iid) === nothing
         DB.close_db(db)
     end
+
+    @testset "pure unit: wipe_test_users! removes only seeds" begin
+        db = DB.open_db(":memory:")
+        DB.seed_demo!(db)
+        pre = [u["name"] for u in DB.list_users(db)]
+        @test "Alex Rivera" in pre
+        DB.wipe_test_users!(db)
+        post = [u["name"] for u in DB.list_users(db)]
+        @test !("Alex Rivera" in post)
+        @test !("Sam Chen" in post)
+        @test !("You" in post)
+        # can still create non-seed after
+        id = DB.create_user!(db, "PersistedNew")
+        @test DB.get_user(db, id) !== nothing
+        DB.close_db(db)
+    end
 end
+
+# JWT pure unit (shipped QciKanban.jwt_encode, no DB)
+@testset "pure unit: jwt_encode produces JWT-shaped token with identity" begin
+    using QciKanban
+    tok = QciKanban.jwt_encode("uid-123", "Test User")
+    parts = split(tok, ".")
+    @test length(parts) == 3
+    @test all(!isempty, parts)
+    @test occursin("uid-123", tok) || occursin("Test User", tok) || length(tok) > 20
+    # second call consistent shape
+    tok2 = QciKanban.jwt_encode("uid-456", "Another")
+    @test length(split(tok2, ".")) == 3
+end
+

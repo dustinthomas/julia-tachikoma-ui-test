@@ -11,7 +11,8 @@ const BOARD_COLUMNS = QciKanban.BOARD_COLUMNS
     function fresh()
         m = KanbanModel()
         m.db_path = ":memory:"
-        QciKanban.load_board!(m)
+        QciKanban.load_users!(m)
+        T.update!(m, T.KeyEvent(:enter))  # real login gate path
         m
     end
 
@@ -122,5 +123,25 @@ const BOARD_COLUMNS = QciKanban.BOARD_COLUMNS
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
         @test T.find_text(tb, "PRIORITY:") !== nothing
         @test T.row_text(tb, 10) !== nothing
+    end
+
+    @testset "escape from card_edit modal (targeted): closes without quit, board visible after (no bleed)" begin
+        m = fresh()
+        T.update!(m, T.KeyEvent('n'))
+        @test m.modal == :card_edit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.modal == :none
+        @test m.quit == false
+        # post-escape render: board headers + QCI- cards; no modal
+        rows = visual_rows(m; w=80, h=18)
+        @test any(occursin("Backlog", r) || occursin("To Do", r) for r in rows)
+        @test any(occursin("QCI-", r) for r in rows)
+        @test !any(occursin("NEW CARD", r) for r in rows)
+        tb = T.TestBackend(80, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+        @test T.find_text(tb, "QCI-") !== nothing
+        @test T.find_text(tb, "NEW CARD") === nothing
+        @test T.char_at(tb, 2, 3) isa Char
     end
 end

@@ -15,6 +15,7 @@ module QciKanban
 using Tachikoma
 using Dates
 using UUIDs
+using Base64
 @tachikoma_app
 
 include("db.jl")
@@ -48,7 +49,7 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
     message::String = ""
     search::String = ""
     # Modal / edit (Phase 3)
-    modal::Symbol = :none          # :none | :card_edit | :user_picker
+    modal::Symbol = :none          # :none | :card_edit | :user_picker | :help
     editing_id::Union{String,Nothing} = nothing
     edit_title::TextInput = TextInput()
     edit_desc::TextArea = TextArea()
@@ -60,6 +61,9 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
     # Calendar (Phase 5)
     cal::Union{Calendar, Nothing} = nothing
     cal_selected_day::Int = Dates.day(Dates.today())
+    # Login create + JWT + admin (for ACs)
+    login_name::TextInput = TextInput()
+    jwt_token::Union{String,Nothing} = nothing
 end
 
 # ── Board loading (Phase 2) ─────────────────────────────────────────────
@@ -108,9 +112,8 @@ end
 function load_users!(m::KanbanModel)
     ensure_db!(m)
     m.users = DB.list_users(m.db)
-    if m.current_user_id === nothing && !isempty(m.users)
-        m.current_user_id = m.users[1]["id"]
-    end
+    # Do NOT auto-assign current_user_id here. Login gate requires explicit selection from initial state.
+    # (load_board! calls this; gate logic and kanban() defer board until after login.)
 end
 
 function open_user_picker!(m::KanbanModel)
@@ -119,10 +122,19 @@ function open_user_picker!(m::KanbanModel)
     m.user_selected = 1
 end
 
+function wipe_test_users!(m::KanbanModel)
+    ensure_db!(m)
+    DB.wipe_test_users!(m.db)
+    m.users = DB.list_users(m.db)
+    m.user_selected = 1
+end
+
 function select_current_user!(m::KanbanModel)
     if !isempty(m.users)
         idx = clamp(m.user_selected, 1, length(m.users))
-        m.current_user_id = m.users[idx]["id"]
+        u = m.users[idx]
+        m.current_user_id = u["id"]
+        m.jwt_token = jwt_encode(u["id"], get(u, "name", ""))
     end
     m.modal = :none
 end
@@ -255,18 +267,179 @@ function delete_selected!(m::KanbanModel)
     m.message = "deleted"
 end
 
+# Screen-relevant key tips for bottom of non-modal screens (side-effect free, testable directly)
+function screen_key_tips(view_mode::Symbol)
+    if view_mode == :board
+        "h/l j/k < > n Enter d u ?"
+    elseif view_mode == :calendar
+        "h/l mo j/k b ?"
+    else
+        "b c L ?"
+    end
+end
+
+# Minimal JWT-shaped token (no real crypto; for future DB hook simulation per plan)
+function jwt_encode(user_id::AbstractString, name::AbstractString)::String
+    hdr = replace(String(base64encode("""{"alg":"none","typ":"JWT"}""")), "=" => "")
+    pay = replace(String(base64encode("""{"sub":"$user_id","name":"$name"}""")), "=" => "")
+    sig = replace(String(base64encode("local")), "=" => "")
+    "$hdr.$pay.$sig"
+end
+
+# Unified gate modal layout: one source of truth for reduced dims + dual-axis center + unconditional hint_y
+function gate_modal_rect(content_area; n_body_lines::Int = 0, hint::Bool = true)
+    w = min(48, max(30, content_area.width - 6))
+    needed = 4 + n_body_lines + (hint ? 1 : 0)
+    # Height sized to fit all content (names + hint) without clipping; always reduced width + x/y center offset vs full content_area (smaller centered block). For large frames cap further for compactness.
+    h = min( max(needed, 5), content_area.height )
+    if content_area.height > 12
+      h = min(h, 11)
+    end
+    x = content_area.x + (content_area.width - w) ÷ 2
+    y = content_area.y + max(0, (content_area.height - h) ÷ 4)
+    r = Rect(x, y, w, h)
+    hint_y = y + h - 2   # last content line before bottom border (unconditional)
+    (rect = r, hint_y = hint_y, inner_y = y + 1, inner_bottom = y + h - 2)
+end
+
+function render_gate_modal!(buf, content_area, title; body_lines::Vector{String} = String[], hint_text::String = "")
+    info = gate_modal_rect(content_area; n_body_lines = length(body_lines) + (isempty(hint_text) ? 0 : 1), hint = !isempty(hint_text))
+    r = info.rect
+    # clear under
+    for yy in r.y:(r.y + r.height - 1)
+        set_string!(buf, r.x, yy, repeat(" ", r.width))
+    end
+    blk = Block(title=title, border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
+    inn = render(blk, r, buf)
+    y = inn.y   # start at first inner line to maximize text slots for names + hint on tight frames
+    max_body_y = isempty(hint_text) ? info.inner_bottom : (info.inner_bottom - 1)
+    for line in body_lines
+        if y > max_body_y; break; end
+        set_string!(buf, inn.x + 1, y, line, Style(; fg=QCI_SECONDARY))
+        y += 1
+    end
+    if !isempty(hint_text)
+        set_string!(buf, inn.x + 1, info.hint_y, hint_text, Style(; fg=QCI_CYAN, dim = true))
+    end
+end
+
 should_quit(m::KanbanModel) = m.quit
 
 function update!(m::KanbanModel, evt::KeyEvent)
     if evt.key == :char && evt.char == 'q'
         m.quit = true
         return
-    elseif evt.key == :escape
-        m.quit = true
+    end
+
+    # === LOGIN GATE: when no current_user_id, only 'q' (already handled) + login selection keys allowed ===
+    # All other keys (incl. 'r' reload, board nav, card actions, view switches) are ignored; no board load, no current_user set.
+    # This enforces the gate before ANY board load (AC4).
+    # Extended for create ('c'), admin ('a'/'w' wipe), JWT on auth.
+    if m.current_user_id === nothing
+        if m.modal == :login_create
+            if evt.key == :enter
+                name = strip(text(m.login_name))
+                if !isempty(name)
+                    ensure_db!(m)
+                    newid = DB.create_user!(m.db, name)
+                    load_users!(m)
+                    idx = findfirst(i -> get(m.users[i], "id", "") == newid, 1:length(m.users))
+                    if idx !== nothing
+                        m.user_selected = idx
+                    end
+                    select_current_user!(m)
+                    load_board!(m)
+                    m.login_name = TextInput()
+                    m.message = "created and logged in"
+                    return
+                else
+                    m.modal = :none
+                    m.login_name = TextInput()
+                    return
+                end
+            elseif evt.key == :escape
+                m.modal = :none
+                m.login_name = TextInput()
+                return
+            else
+                if handle_key!(m.login_name, evt)
+                    return
+                end
+                m.tick += 1
+                return
+            end
+        elseif m.modal == :admin
+            if (evt.key == :char && evt.char == 'w')
+                wipe_test_users!(m)
+                return
+            elseif evt.key == :escape || (evt.key == :char && evt.char == 'a')
+                m.modal = :none
+                return
+            end
+            m.tick += 1
+            return
+        end
+        # normal gated list selection (pre any create/admin)
+        nu = length(m.users)
+        if nu > 0
+            if evt.key == :up || (evt.key == :char && evt.char == 'k')
+                m.user_selected = max(1, m.user_selected - 1)
+                return
+            elseif evt.key == :down || (evt.key == :char && evt.char == 'j')
+                m.user_selected = min(nu, m.user_selected + 1)
+                return
+            elseif evt.key == :enter
+                select_current_user!(m)
+                load_board!(m)  # now safe to load board/cards after login
+                m.message = "logged in"
+                return
+            elseif evt.key == :escape
+                # stay gated; do not quit or transition (only 'q' quits)
+                m.tick += 1
+                return
+            end
+        end
+        if evt.key == :char && evt.char == 'c'
+            m.modal = :login_create
+            m.login_name = TextInput(; focused = true)
+            return
+        elseif evt.key == :char && evt.char == 'a'
+            load_users!(m)
+            m.modal = :admin
+            return
+        elseif evt.key == :char && evt.char == 'w'
+            wipe_test_users!(m)
+            return
+        end
+        # ignore every other key while gated (no board state mutation, no modals, no view change)
+        m.tick += 1
         return
-    elseif evt.key == :char && evt.char == 'r'
+    end
+
+    # Reload only allowed when logged in (post-gate). 'r' must never reach here pre-login.
+    if evt.key == :char && evt.char == 'r'
         load_board!(m)
         return
+    end
+
+    # Escape performs back navigation (modal close or view to board); never quits.
+    # Modals handled in their dedicated branches below to keep existing close_modal! reachable.
+    if evt.key == :escape && m.modal == :none && m.view_mode != :board
+        m.view_mode = :board
+        load_board!(m)
+        return
+    end
+
+    # '?' invokes help menu (from non-modal screens); toggle/close with ?/Esc handled in modal branch
+    if evt.key == :char && evt.char == '?'
+        if m.modal == :none
+            m.modal = :help
+            return
+        elseif m.modal == :help
+            m.modal = :none
+            return
+        end
+        # inside card_edit etc: fallthrough (allowed per non-goal; help works from board/calendar)
     end
 
     # View switching (works in any mode)
@@ -397,6 +570,16 @@ function update!(m::KanbanModel, evt::KeyEvent)
         return
     end
 
+    # Help modal: close on Esc or ? (simple dismiss; no other keys)
+    if m.modal == :help
+        if evt.key == :escape || (evt.key == :char && evt.char == '?')
+            m.modal = :none
+            return
+        end
+        m.tick += 1
+        return
+    end
+
     # Calendar nav (Phase 5 minimal)
     if m.view_mode == :calendar && m.cal !== nothing
         if evt.key == :left || (evt.key == :char && evt.char == 'h')
@@ -467,6 +650,38 @@ function view(m::KanbanModel, f::Frame)
     status_area = rows[3]
 
     render_qci_logo(buf, logo_area)
+
+    # LOGIN GATE VIEW: when not logged in, render smaller centered block for user selection (or create/admin subviews).
+    # Reduced dims + center offset (copied math from card_edit modal) instead of full content_area.
+    # Uses Block + set_string for TestBackend (find_text/row_text/char_at). Preserves gate invariant.
+    if m.current_user_id === nothing
+        if m.modal == :admin
+            # unified via extracted helper: body = just names (compact to fit all 3 + hint on small h=16), centers, unconditional hint_y
+            body = String[get(u, "name", "?") for u in m.users]
+            render_gate_modal!(buf, content_area, "ADMIN"; body_lines = body, hint_text = "[w] wipe test users   [esc/a] close")
+            return
+        elseif m.modal == :login_create
+            # use full helper for budget/center/hint (body prompt); overlay live TextInput
+            body = ["NAME>"]
+            render_gate_modal!(buf, content_area, "CREATE NEW USER"; body_lines = body, hint_text = "[enter] create & login   [esc] cancel")
+            # re-paint input at appropriate position inside (after the NAME> line painted by helper)
+            # for simplicity, use a fixed offset inside the last used area; relies on helper rect
+            info = gate_modal_rect(content_area; n_body_lines = 2, hint = true)
+            # find a y after title for input (simplified; in practice the previous manual did this)
+            # to ensure budget, we already called the helper above
+            # paint input near center of the modal rect
+            ir = Rect(info.rect.x + 8, info.rect.y + 3, max(10, info.rect.width - 12), 1)
+            render(m.login_name, ir, buf)
+            return
+        else
+            # login list via unified helper (reduced dims + offset + unconditional hint)
+            n = length(m.users)
+            body = String[ (i == m.user_selected ? "▶ " : "  ") * get(u, "name", "?") for (i,u) in enumerate(m.users) ]
+            hint = isempty(m.users) ? "" : "[j/k]sel [enter] [c] [a] [w]"
+            render_gate_modal!(buf, content_area, "LOGIN - SELECT USER"; body_lines = body, hint_text = hint)
+            return
+        end
+    end
 
     mode_str = uppercase(string(m.view_mode))
 
@@ -583,9 +798,10 @@ function view(m::KanbanModel, f::Frame)
                 user_name = " " * split(m.users[u]["name"])[1]
             end
         end
+        tips = screen_key_tips(m.view_mode)
         render(StatusBar(
             left = [Span(" QCI • KANBAN ", Style(; fg = QCI_CYAN, dim = true))],
-            right = [Span("$(mode_str)$(sel_info)$(user_name) [u]ser r=reload ", Style(; fg = QCI_CYAN, dim = true))],
+            right = [Span("$(mode_str)$(sel_info)$(user_name) $(tips) ", Style(; fg = QCI_CYAN, dim = true))],
         ), status_area, buf)
     end
 
@@ -654,6 +870,37 @@ function view(m::KanbanModel, f::Frame)
             set_string!(buf, uinner.x + 2, y, "No users — seed issue?", Style(; fg=QCI_SECONDARY, dim=true))
         end
     end
+
+    # Help overlay menu (invoked by '?', dismiss Esc/? ; clear under to avoid bleed)
+    if m.modal == :help && area.width >= 28 && area.height >= 8
+        hw = min(48, area.width - 4)
+        hh = min(14, area.height - 4)
+        hx = area.x + (area.width - hw) ÷ 2
+        hy = area.y + 3
+        for y in hy:(hy + hh - 1)
+            set_string!(buf, hx, y, repeat(" ", hw))
+        end
+        hblock = Block(title="HELP - press Esc or ? to close", border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
+        hinner = render(hblock, Rect(hx, hy, hw, hh), buf)
+        y = hinner.y + 1
+        helplines = [
+            "q : quit app",
+            "Esc : back / close menu",
+            "? : toggle this help",
+            "",
+            "Board:",
+            " h/l or arrows : col   j/k or arrows : card",
+            " < > : move lane   n:new  Enter:edit  d:del",
+            " u:user  r:reload  b/c/L:views",
+            "",
+            "Calendar: h/l month  j/k day",
+        ]
+        for line in helplines
+            if y > bottom(hinner) - 1; break; end
+            set_string!(buf, hinner.x + 1, y, line, Style(; fg = QCI_SECONDARY))
+            y += 1
+        end
+    end
 end
 
 """
@@ -663,7 +910,8 @@ Launch the QCI Kanban app. Uses explicit QCI styling.
 """
 function kanban(; db_path::AbstractString = DB.DEFAULT_DB_PATH)
     m = KanbanModel(db_path = db_path)
-    load_board!(m)   # initial load + demo seed
+    load_users!(m)   # initialize users (seeds DB) for login page; defer board load until after explicit login via gate
+    # current_user_id remains nothing; view/update enforce login gate before any board content
     app(m)
 end
 
@@ -680,7 +928,8 @@ function record_demo(filename::AbstractString = "qci-kanban-demo.tach";
                      width::Int = 78, height::Int = 20, frames::Int = 72, fps::Int = 8)
     m = KanbanModel()
     m.db_path = ":memory:"
-    load_board!(m)
+    load_users!(m)
+    update!(m, KeyEvent(:enter))  # login gate so demo starts on board (events assume logged)
 
     # Scripted key events (frame, event) to exercise board nav + modal + calendar
     events = [

@@ -21,6 +21,7 @@ export open_db, init_schema!, seed_demo!, close_db
 export list_users, create_user!, get_user
 export list_issues, create_issue!, update_issue!, update_issue_status_and_position!
 export get_issue, delete_issue!
+export wipe_test_users!
 
 const DEFAULT_DB_PATH = expanduser("~/.qci-kanban/kanban.db")
 
@@ -238,6 +239,12 @@ function seed_demo!(db::SQLite.DB)
 
     create_issue!(db; title="Initial DB schema", status="Done", priority="High", assignee_id=u3, due_date=past, position=0)
     create_issue!(db; title="Scaffold QciKanban package", status="Done", priority="High", assignee_id=u3, due_date=past, position=1)
+end
+
+function wipe_test_users!(db::SQLite.DB)
+    for n in ("Alex Rivera", "Sam Chen", "You")
+        DBInterface.execute(db, "DELETE FROM users WHERE name = ?", [n])
+    end
 end
 
 end # module DB
