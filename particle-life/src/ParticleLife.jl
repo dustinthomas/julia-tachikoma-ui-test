@@ -267,7 +267,7 @@ end
     world_w::Float64 = DEFAULT_WORLD_W
     world_h::Float64 = DEFAULT_WORLD_H
     message::String = "Particle Life • fluid CPU"
-    substeps::Int = 2   # for fluidity
+    substeps::Int = 4   # for fluidity / visible motion per frame when running
     pulse::Int = 0
 end
 
@@ -474,6 +474,15 @@ function view(m::ParticleLifeModel, f::Frame)
 
     # --- SIM PANE: artistic canvas field (single style for texture) + reliable per-group colored glyphs (no last-wins overwrite) ---
     if canvas_area.width >= 6 && canvas_area.height >= 4
+        # IMPORTANT: fully clear the sim area each frame.
+        # Without this, old particle glyphs ('●' etc) and braille from previous
+        # frames linger (render_canvas skips 0-bit cells; we only draw current stamps).
+        # This makes the animation appear frozen even though state advances.
+        for dy in 0:(canvas_area.height-1)
+            yy = canvas_area.y + dy
+            set_string!(buf, canvas_area.x, yy, " "^canvas_area.width)
+        end
+
         # Subtle high-res field texture (one canvas, neutral style)
         c = create_canvas(canvas_area.width, canvas_area.height; style=Style(; fg=ColorRGB(0x55,0x55,0x66), dim=true))
         clear!(c)
