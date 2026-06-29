@@ -489,7 +489,7 @@ end
             row = T.row_text(tb_final, r)
             rowstr = row === nothing ? "" : row
             if occursin('●', rowstr) || occursin('◆', rowstr) || occursin('▲', rowstr) || occursin('■', rowstr)
-                push!(evidence, "  " * rowstr[1:min(70,length(rowstr))]); break
+                push!(evidence, "  " * first(rowstr, 70)); break
             end
         end
         push!(evidence, "=== END EVIDENCE ===")
