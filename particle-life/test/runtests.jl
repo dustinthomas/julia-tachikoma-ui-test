@@ -215,4 +215,20 @@ end
         ch = T.char_at(tb, 2, 2)
         @test ch !== nothing   # something rendered
     end
+
+    @testset "pre_render! drives autonomous substeps (idle fluid, no KeyEvent)" begin
+        m = PL.create_model(n_per_group=6)
+        t0 = m.tick
+        # direct pre_render + view (simulates per-frame drive without update keys)
+        if isdefined(PL, :pre_render!); PL.pre_render!(m); end
+        tb = T.TestBackend(60,12); T.reset!(tb.buf); T.view(m, T.Frame(tb.buf, T.Rect(1,1,60,12),[],[]))
+        @test m.tick > t0   # tick advanced by pre_render
+        # require exact colored stamps from set_char path
+        stamps = 0
+        for r in 3:9, c in 3:35
+            ch = T.char_at(tb, c, r)
+            if ch !== nothing && ch in ('●','◆','▲','■'); stamps += 1; end
+        end
+        @test stamps > 0
+    end
 end
