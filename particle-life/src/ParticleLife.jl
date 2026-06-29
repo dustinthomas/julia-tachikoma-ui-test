@@ -14,6 +14,7 @@ module ParticleLife
 using Tachikoma
 import Random
 @tachikoma_app
+import Tachikoma: pre_render!
 
 export Particle, create_particles, apply_forces!, integrate!, clamp_bounds!,
        random_rules!, symmetric_rules!, ParticleLifeModel, create_model,
@@ -416,15 +417,10 @@ end
 
 # pre_render! drives fixed-timestep substeps every frame for fluid idle animation (even with no KeyEvents).
 # Called by Tachikoma app loop before view (per plan + architecture). View remains pure render.
+# Delegates to advance_sim! (with force) for single source of truth on sim advance + tick/pulse.
 function pre_render!(m::ParticleLifeModel)
-    if m.running && !isempty(m.xs)
-        for _ in 1:max(1, m.substeps)
-            step_soa!(m.xs, m.ys, m.vxs, m.vys, m.grps, m.rules;
-                      cutoff = m.cutoff, viscosity = m.viscosity,
-                      w = m.world_w, h = m.world_h)
-        end
-        m.tick += 1
-        if m.pulse > 0; m.pulse = max(0, m.pulse - 1); end
+    if m.running
+        advance_sim!(m; steps=max(1, m.substeps), force=true)
     end
 end
 

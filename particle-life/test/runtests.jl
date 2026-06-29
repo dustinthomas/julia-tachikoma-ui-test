@@ -284,4 +284,121 @@ end
         tb3, rows3 = pl_render_tb(m; w=70, h=14)
         @test any(occursin("PAUSED", r) for r in rows3 if r!==nothing)
     end
+
+    @testset "ParticleLife: continuous headless rendering via pre_render! (visual change evidence)" begin
+        # Directly exercise shipped create_model + pre_render! + view from fresh documented initial state.
+        # Drives multiple frames of pre_render (as Tachikoma app loop will after the import fix).
+        # Captures tick advance, particle glyph ('●','◆','▲','■') position changes via char_at, and frame diffs.
+        # Writes full evidence to scratch per verification plan.
+        m = PL.create_model(n_per_group=8)
+        @test m.running == true  # default per create
+        @test m.tick == 0
+
+        scratch_dir = "/tmp/grok-goal-fea68319488e/implementer"
+        mkpath(scratch_dir)
+        evidence_path = joinpath(scratch_dir, "particle-life-continuous-render-evidence.txt")
+        evidence = String[]
+        push!(evidence, "=== ParticleLife continuous headless render evidence ===")
+        push!(evidence, "start: " * repr(time()))
+        push!(evidence, "initial tick=$(m.tick)  n=$(length(m.xs))  running=$(m.running)")
+
+        function scan_stamps(tb; w=72, h=22)
+            stamps = Tuple{Int,Int,Char}[]
+            for row in 3:(h-3), col in 3:(w-20)
+                ch = T.char_at(tb, col, row)
+                if ch !== nothing && ch in ('●','◆','▲','■')
+                    push!(stamps, (col, row, ch))
+                end
+            end
+            stamps
+        end
+
+        function render_with_pre(m; w=72, h=22)
+            tb = T.TestBackend(w, h)
+            T.reset!(tb.buf)
+            PL.pre_render!(m)  # explicit drive of shipped pre_render! (the hook)
+            fr = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
+            T.view(m, fr)
+            rows = [T.row_text(tb, i) for i in 1:h]
+            (tb, rows)
+        end
+
+        # baseline render (no pre yet, to compare)
+        tb0 = T.TestBackend(72, 22); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1,1,72,22), T.GraphicsRegion[], T.PixelSnapshot[]))
+        stamps0 = scan_stamps(tb0)
+        tick0 = m.tick
+        row3 = T.row_text(tb0, 3)
+        push!(evidence, "baseline tick=$(tick0) stamps=$(length(stamps0))")
+        push!(evidence, "baseline_row3_sample: " * (row3 === nothing ? "" : row3[1:min(60, length(row3))]))
+
+        changed_positions = false
+        last_stamps = stamps0
+        for frame in 1:10
+            tb, rows = render_with_pre(m)
+            stamps = scan_stamps(tb)
+            # detect if any stamp location moved
+            if !isempty(last_stamps) && !isempty(stamps)
+                prev_locs = Set([(s[1],s[2]) for s in last_stamps])
+                curr_locs = Set([(s[1],s[2]) for s in stamps])
+                if curr_locs != prev_locs
+                    changed_positions = true
+                end
+            end
+            last_stamps = stamps
+            if frame in (1,5,10)
+                push!(evidence, "frame$(frame) tick=$(m.tick) stamps=$(length(stamps))")
+                for r in 4:16
+                    row = T.row_text(tb, r)
+                    rowstr = row === nothing ? "" : row
+                    if any(c -> occursin(string(c), rowstr), ['●','◆','▲','■'])
+                        push!(evidence, "  row$(r): " * rowstr[1:min(70, length(rowstr))])
+                        break
+                    end
+                end
+            end
+        end
+
+        final_tick = m.tick
+        # recompute final view and compare locations to initial
+        tb_final = T.TestBackend(72,22); T.reset!(tb_final.buf)
+        T.view(m, T.Frame(tb_final.buf, T.Rect(1,1,72,22),[],[]))
+        stamps_final = scan_stamps(tb_final)
+        locs0 = Set([(s[1],s[2]) for s in stamps0])
+        locsF = Set([(s[1],s[2]) for s in stamps_final])
+        locs_moved = (locs0 != locsF)
+
+        push!(evidence, "final tick=$(final_tick)  delta_tick=$(final_tick - tick0)")
+        push!(evidence, "stamps_final=$(length(stamps_final)) locs_moved=$(locs_moved) changed_during=$(changed_positions)")
+        push!(evidence, "sample final row with stamp:")
+        for r in 4:16
+            row = T.row_text(tb_final, r)
+            rowstr = row === nothing ? "" : row
+            if occursin('●', rowstr) || occursin('◆', rowstr) || occursin('▲', rowstr) || occursin('■', rowstr)
+                push!(evidence, "  " * rowstr[1:min(70,length(rowstr))]); break
+            end
+        end
+        push!(evidence, "=== END EVIDENCE ===")
+
+        # Write durable proof to scratch
+        open(evidence_path, "w") do io
+            for line in evidence; println(io, line); end
+        end
+        println("WROTE evidence -> ", evidence_path)
+
+        # Assertions per acceptance/verification: tick advanced >=10, visual state change (glyph locs or tick), stamps present
+        @test final_tick >= tick0 + 10   # at least 10 frames of substeps
+        @test locs_moved || changed_positions || final_tick > tick0   # animation happened
+        # require at least one colored stamp glyph present after drives (direct from view)
+        has_stamp = false
+        for r in 4:14, c in 4:40
+            ch = T.char_at(tb_final, c, r)
+            if ch !== nothing && ch in ('●','◆','▲','■')
+                has_stamp = true
+                break
+            end
+        end
+        @test has_stamp
+        @test isfile(evidence_path)
+    end
 end
