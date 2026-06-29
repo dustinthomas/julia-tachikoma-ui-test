@@ -204,8 +204,8 @@ function step_soa!(xs::Vector{Float64}, ys::Vector{Float64}, vxs::Vector{Float64
                         fy += F * dy * dt
                     end
                 end
-                vxs[i] = (vxs[i] + fx * dt) * viscosity
-                vys[i] = (vys[i] + fy * dt) * viscosity
+                vxs[i] = (vxs[i] + fx) * viscosity
+                vys[i] = (vys[i] + fy) * viscosity
                 xs[i] += vxs[i] * dt
                 ys[i] += vys[i] * dt
                 if xs[i] <= 0; xs[i] = 0; vxs[i] = -vxs[i]; end

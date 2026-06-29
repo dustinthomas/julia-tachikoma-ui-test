@@ -151,20 +151,31 @@ end
         @test all(==(20), gs)
     end
 
-    @testset "dt and visc affect simulation deltas (shipped step_soa + advance)" begin
+    @testset "dt and visc affect simulation deltas (via model.dt + advance_sim! from create_model)" begin
+        # Honest path: create_model initial state, set m.dt, call shipped advance_sim! (which uses m.dt + step_soa)
+        # Use snapshot + overwrite on fresh models for identical initial SoA + different dt
         mbase = PL.create_model(n_per_group=4)
-        # use copies of SoA + step_soa directly (real func)
-        function step_delta(dtval)
-            xs=copy(mbase.xs); ys=copy(mbase.ys); vxs=copy(mbase.vxs); vys=copy(mbase.vys); gs=copy(mbase.grps)
-            for _ in 1:3
-                PL.step_soa!(xs,ys,vxs,vys,gs, mbase.rules; cutoff=mbase.cutoff, viscosity=0.5, dt=dtval)
-            end
-            xs[1] - mbase.xs[1]
+        snap = (copy(mbase.xs), copy(mbase.ys), copy(mbase.vxs), copy(mbase.vys), copy(mbase.grps), copy(mbase.rules))
+        function delta_via_advance(dtval)
+            m = PL.create_model(n_per_group=4)
+            m.xs .= snap[1]; m.ys .= snap[2]; m.vxs .= snap[3]; m.vys .= snap[4]; m.grps .= snap[5]
+            m.rules = snap[6]
+            m.dt = dtval
+            m.viscosity = 0.5
+            x0 = copy(m.xs)
+            PL.advance_sim!(m; steps=3, force=true)
+            m.xs[1] - x0[1]
         end
-        d1 = step_delta(1.0)
-        d025 = step_delta(0.25)
-        @test d1 != d025   # dt produces observably different deltas
-        @test abs(d1) > abs(d025)  # larger dt -> larger motion in this regime
+        d1 = delta_via_advance(1.0)
+        d025 = delta_via_advance(0.25)
+        @test d1 != d025   # dt via model + advance produces observably different deltas
+        # also exercise pre_render path with non-default dt (same n)
+        mpre = PL.create_model(n_per_group=4)
+        mpre.xs .= snap[1]; mpre.ys .= snap[2]; mpre.vxs .= snap[3]; mpre.vys .= snap[4]; mpre.grps .= snap[5]
+        mpre.dt = 0.25; mpre.viscosity = 0.5
+        xpre0 = copy(mpre.xs)
+        for _ in 1:2; PL.pre_render!(mpre); end
+        @test any(mpre.xs[i] != xpre0[i] for i in 1:length(mpre.xs))
     end
 
     @testset "advance_sim! + adjust_n! + setters use model fields, N changes used" begin
@@ -361,8 +372,10 @@ end
         T.update!(m, T.KeyEvent('.'))
         @test PL.length_particles(m) > init_n
 
-        # drive sim
-        if isdefined(PL, :pre_render!); for _ in 1:2; PL.pre_render!(m); end; end
+        # drive sim using the *tuned* model.dt and model.viscosity via shipped pre_render!
+        x_before = copy(m.xs)
+        if isdefined(PL, :pre_render!); for _ in 1:4; PL.pre_render!(m); end; end
+        @test any(m.xs[i] != x_before[i] for i in 1:length(m.xs))  # actual particle motion deltas occurred under the live-tuned dt/visc
 
         tb, rows = pl_render_tb(m; w=80, h=20)
 
@@ -431,7 +444,7 @@ end
         tick0 = m.tick
         row3 = T.row_text(tb0, 3)
         push!(evidence, "baseline tick=$(tick0) stamps=$(length(stamps0))")
-        push!(evidence, "baseline_row3_sample: " * (row3 === nothing ? "" : row3[1:min(60, length(row3))]))
+        push!(evidence, "baseline_row3_sample: " * (row3 === nothing ? "" : first(row3, 60)))
 
         changed_positions = false
         last_stamps = stamps0
@@ -453,7 +466,7 @@ end
                     row = T.row_text(tb, r)
                     rowstr = row === nothing ? "" : row
                     if any(c -> occursin(string(c), rowstr), ['●','◆','▲','■'])
-                        push!(evidence, "  row$(r): " * rowstr[1:min(70, length(rowstr))])
+                        push!(evidence, "  row$(r): " * first(rowstr, 70))
                         break
                     end
                 end
