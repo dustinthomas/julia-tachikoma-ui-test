@@ -382,11 +382,6 @@ function update!(m::ParticleLifeModel, evt::KeyEvent)
         m.quit = true
         return
     end
-    if evt.key == :char && evt.char == ' '
-        # force step even when paused (advertised as "step")
-        advance_sim!(m; steps=1, force=true)
-        return
-    end
     if evt.key == :char && evt.char == 'r'
         reset_particles!(m)
         return
@@ -520,7 +515,7 @@ function view(m::ParticleLifeModel, f::Frame)
     if cy <= maxcy
         set_string!(buf, cx, cy, "CONTROLS", Style(; fg = ColorRGB(0x99,0x99,0xaa), bold=true)); cy += 1
     end
-    for h in ["r reset", "x rand", "s sym", "1/2 preset", "p pause", "u pulse", "␣ step", "q quit"]
+    for h in ["r reset", "x rand", "s sym", "1/2 preset", "p pause/play", "u pulse", "q quit"]
         cy <= maxcy || break
         set_string!(buf, cx, cy, h, Style(; fg = ColorRGB(0x66,0x66,0x77), dim = !m.running ))
         cy += 1

@@ -19,12 +19,11 @@ Keys (in-app):
 - r : reset particles
 - x : random rules
 - s : symmetrize rules
-- p : pause / play (continuous run when playing)
+- p : play/pause (steps continuously through the simulation when played)
 - u : pulse (inject energy)
-- space : single step (works when paused)
 - q : quit
 
-Simulation advances continuously via pre_render when playing (no keys needed). p toggles play/pause; space steps once while paused.
+'p' is the play/pause button. The simulation steps through continuously when played (via frame-driven pre_render! when running). No step button.
 
 ## Architecture notes
 

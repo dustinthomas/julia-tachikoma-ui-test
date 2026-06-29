@@ -89,7 +89,7 @@ end
         @test size(m.rules) == (4,4)
     end
 
-    @testset "update! q sets quit; r resets particles; p toggles run; space steps" begin
+    @testset "update! q sets quit; r resets particles; p toggles run; space does nothing" begin
         m = PL.create_model(n_per_group=1)
         init_n = PL.length_particles(m)
         T.update!(m, T.KeyEvent('q'))
@@ -106,10 +106,12 @@ end
         T.update!(m3, T.KeyEvent('p'))
         @test m3.running == !was
 
+        # space does nothing (no step button); test on paused
         m4 = PL.create_model(n_per_group=2)
+        T.update!(m4, T.KeyEvent('p'))
         t0 = m4.tick
         T.update!(m4, T.KeyEvent(' '))
-        @test m4.tick >= t0
+        @test m4.tick == t0
     end
 
     @testset "x/s randomize and symmetrize rules" begin
@@ -235,14 +237,14 @@ end
         @test stamps > 0
     end
 
-    @testset "pause toggle + manual step (space advances exactly once when paused)" begin
+    @testset "pause toggle + space produces delta==0 when paused (no step button)" begin
         m = PL.create_model(n_per_group=5)
         # start running, drive some
         t0 = m.tick
         x0 = copy(m.xs)
         if isdefined(PL, :pre_render!); for _ in 1:2; PL.pre_render!(m); end; end
         @test m.tick > t0
-        # now toggle pause via 'p' key (or direct toggle_pause!)
+        # now toggle pause via 'p' key
         T.update!(m, T.KeyEvent('p'))
         @test m.running == false
         t1 = m.tick; x1 = copy(m.xs)
@@ -250,15 +252,15 @@ end
         if isdefined(PL, :pre_render!); for _ in 1:3; PL.pre_render!(m); end; end
         @test m.tick == t1
         @test all(m.xs[i] == x1[i] for i in 1:length(m.xs))
-        # manual step (space) advances exactly once
+        # space (no step button) produces delta==0 when paused
         T.update!(m, T.KeyEvent(' '))
-        @test m.tick == t1 + 1
-        @test any(m.xs[i] != x1[i] for i in 1:length(m.xs))
-        # unhandled/idle key (e.g. 'l') when paused must NOT advance tick (fix for skeptic gap)
+        @test m.tick == t1
+        @test all(m.xs[i] == x1[i] for i in 1:length(m.xs))
+        # unhandled/idle key when paused must NOT advance tick
         t_pre = m.tick
         T.update!(m, T.KeyEvent('l'))
-        @test m.tick == t_pre  # no advance on idle key when paused
-        @test !m.running  # still paused
+        @test m.tick == t_pre
+        @test !m.running
         # re-toggle to running, drive should advance
         T.update!(m, T.KeyEvent('p'))
         @test m.running == true
@@ -278,8 +280,7 @@ end
         tb2, rows2 = pl_render_tb(m; w=70, h=14)
         @test T.find_text(tb2, "PAUSED") !== nothing || any(occursin("PAUSED", r) for r in rows2 if r!==nothing)
         @test T.find_text(tb2, "RUNNING") === nothing || !any(occursin("RUNNING", r) for r in rows2 if r!==nothing)
-        # manual step while paused still renders paused
-        T.update!(m, T.KeyEvent(' '))
+        # re-render while paused (no step) confirms PAUSED
         tb3, rows3 = pl_render_tb(m; w=70, h=14)
         @test any(occursin("PAUSED", r) for r in rows3 if r!==nothing)
     end
