@@ -133,14 +133,82 @@ function clamp_bounds!(ps::Vector{Particle};
     ps
 end
 
-"Full sim step: forces -> integrate -> bounds. Returns ps for chaining."
+"Full sim step (more ref-faithful): per (target_group, source_group) pair: accumulate forces for targets then integrate+bound those targets immediately (interleaved visc/pos like original rule() calls)."
 function step_particles!(ps::Vector{Particle}, rules::Matrix{Float64};
                          cutoff::Float64=DEFAULT_CUTOFF, viscosity::Float64=DEFAULT_VISC,
                          w::Float64=DEFAULT_WORLD_W, h::Float64=DEFAULT_WORLD_H)
-    apply_forces!(ps, rules, cutoff)
-    integrate!(ps, viscosity)
-    clamp_bounds!(ps; w=w, h=h)
+    n = length(ps)
+    for gi in 0:(NUM_GROUPS-1)
+        # accumulate for this gi from all gj (or do per gj + integrate per gj for closer interleaving)
+        for gj in 0:(NUM_GROUPS-1)
+            g = rules[gi+1, gj+1]
+            # temp per-particle for this pair only (to apply visc per pair like ref)
+            for i in 1:n
+                a = ps[i]
+                a.group == gi || continue
+                fx = 0.0; fy = 0.0
+                for j in 1:n
+                    b = ps[j]
+                    b.group == gj || continue
+                    i==j && continue
+                    dx = a.x - b.x; dy = a.y - b.y
+                    d = sqrt(dx*dx + dy*dy)
+                    if d > 0 && d < cutoff
+                        F = g / d
+                        fx += F * dx
+                        fy += F * dy
+                    end
+                end
+                # per-pair integrate like ref rule()
+                a.vx = (a.vx + fx) * viscosity
+                a.vy = (a.vy + fy) * viscosity
+                a.x += a.vx
+                a.y += a.vy
+                # immediate bounds per particle (ref style)
+                if a.x <= 0; a.x=0; a.vx = -a.vx; end
+                if a.x >= w; a.x=w; a.vx = -a.vx; end
+                if a.y <= 0; a.y=0; a.vy = -a.vy; end
+                if a.y >= h; a.y=h; a.vy = -a.vy; end
+                ps[i] = a
+            end
+        end
+    end
     ps
+end
+
+"Fast in-place SoA version of the faithful per-pair step (used by model for CPU perf)."
+function step_soa!(xs::Vector{Float64}, ys::Vector{Float64}, vxs::Vector{Float64}, vys::Vector{Float64}, grps::Vector{Int},
+                   rules::Matrix{Float64}; cutoff::Float64=DEFAULT_CUTOFF, viscosity::Float64=DEFAULT_VISC,
+                   w::Float64=DEFAULT_WORLD_W, h::Float64=DEFAULT_WORLD_H)
+    n = length(xs)
+    for gi in 0:(NUM_GROUPS-1)
+        for gj in 0:(NUM_GROUPS-1)
+            g = rules[gi+1, gj+1]
+            for i in 1:n
+                grps[i] == gi || continue
+                fx = 0.0; fy = 0.0
+                for j in 1:n
+                    grps[j] == gj || continue
+                    i == j && continue
+                    dx = xs[i] - xs[j]; dy = ys[i] - ys[j]
+                    d = sqrt(dx*dx + dy*dy)
+                    if d > 0 && d < cutoff
+                        F = g / d
+                        fx += F * dx
+                        fy += F * dy
+                    end
+                end
+                vxs[i] = (vxs[i] + fx) * viscosity
+                vys[i] = (vys[i] + fy) * viscosity
+                xs[i] += vxs[i]
+                ys[i] += vys[i]
+                if xs[i] <= 0; xs[i] = 0; vxs[i] = -vxs[i]; end
+                if xs[i] >= w; xs[i] = w; vxs[i] = -vxs[i]; end
+                if ys[i] <= 0; ys[i] = 0; vys[i] = -vys[i]; end
+                if ys[i] >= h; ys[i] = h; vys[i] = -vys[i]; end
+            end
+        end
+    end
 end
 
 # ── Rule matrix helpers ─────────────────────────────────────────────────
@@ -185,7 +253,12 @@ end
 @kwdef mutable struct ParticleLifeModel <: Model
     quit::Bool = false
     tick::Int = 0
-    particles::Vector{Particle} = Particle[]
+    # SoA for CPU-optimized in-place simulation (per plan)
+    xs::Vector{Float64} = Float64[]
+    ys::Vector{Float64} = Float64[]
+    vxs::Vector{Float64} = Float64[]
+    vys::Vector{Float64} = Float64[]
+    grps::Vector{Int} = Int[]
     rules::Matrix{Float64} = default_rules()
     running::Bool = true
     viscosity::Float64 = DEFAULT_VISC
@@ -198,18 +271,35 @@ end
     pulse::Int = 0
 end
 
+# Convenience for tests / public API (Vector{Particle} view of SoA when needed)
+function particles(m::ParticleLifeModel)
+    n = length(m.xs)
+    [Particle(m.xs[i], m.ys[i], m.vxs[i], m.vys[i], m.grps[i]) for i in 1:n]
+end
+length_particles(m::ParticleLifeModel) = length(m.xs)
+
 should_quit(m::ParticleLifeModel) = m.quit
 
 function create_model(; kwargs...)
     m = ParticleLifeModel(; kwargs...)
-    if isempty(m.particles)
-        m.particles = create_particles(m.n_per_group; w=m.world_w, h=m.world_h)
+    if isempty(m.xs)
+        ps = create_particles(m.n_per_group; w=m.world_w, h=m.world_h)
+        resize!(m.xs, length(ps)); resize!(m.ys, length(ps))
+        resize!(m.vxs, length(ps)); resize!(m.vys, length(ps)); resize!(m.grps, length(ps))
+        for (i,p) in enumerate(ps)
+            m.xs[i]=p.x; m.ys[i]=p.y; m.vxs[i]=p.vx; m.vys[i]=p.vy; m.grps[i]=p.group
+        end
     end
     m
 end
 
 function reset_particles!(m::ParticleLifeModel)
-    m.particles = create_particles(m.n_per_group; w=m.world_w, h=m.world_h)
+    ps = create_particles(m.n_per_group; w=m.world_w, h=m.world_h)
+    n = length(ps)
+    resize!(m.xs, n); resize!(m.ys, n); resize!(m.vxs, n); resize!(m.vys, n); resize!(m.grps, n)
+    for (i,p) in enumerate(ps)
+        m.xs[i]=p.x; m.ys[i]=p.y; m.vxs[i]=p.vx; m.vys[i]=p.vy; m.grps[i]=p.group
+    end
     m.tick = 0
     m.pulse = 0
     m.message = "reset"
@@ -251,27 +341,29 @@ function load_preset!(m::ParticleLifeModel, which::Int=1)
     m
 end
 
-function step_sim!(m::ParticleLifeModel; steps::Int = m.substeps)
-    if !m.running || isempty(m.particles); return m; end
+function advance_sim!(m::ParticleLifeModel; steps::Int=1, force::Bool=false)
+    if (!m.running && !force) || isempty(m.xs); return m; end
     for _ in 1:steps
-        step_particles!(m.particles, m.rules;
-                        cutoff = m.cutoff, viscosity = m.viscosity,
-                        w = m.world_w, h = m.world_h)
+        step_soa!(m.xs, m.ys, m.vxs, m.vys, m.grps, m.rules;
+                  cutoff = m.cutoff, viscosity = m.viscosity,
+                  w = m.world_w, h = m.world_h)
     end
     m.tick += 1
-    if m.pulse > 0; m.pulse -= 1; end
+    if m.pulse > 0; m.pulse = max(0, m.pulse - 1); end
     m
 end
 
+# Back-compat for older call sites / tests; delegates to advance
+function step_sim!(m::ParticleLifeModel; steps::Int = m.substeps)
+    advance_sim!(m; steps=steps, force=false)
+end
+
 function pulse!(m::ParticleLifeModel; strength::Float64 = 0.8)
-    # inject kinetic energy / small outward-ish perturbation on some
-    n = length(m.particles)
+    n = length(m.xs)
     for i in 1:n
         if Random.rand() < 0.6
-            p = m.particles[i]
-            p.vx += (Random.rand()-0.5) * strength * 1.5
-            p.vy += (Random.rand()-0.5) * strength * 1.5
-            m.particles[i] = p
+            m.vxs[i] += (Random.rand()-0.5) * strength * 1.5
+            m.vys[i] += (Random.rand()-0.5) * strength * 1.5
         end
     end
     m.pulse = 8
@@ -291,7 +383,8 @@ function update!(m::ParticleLifeModel, evt::KeyEvent)
         return
     end
     if evt.key == :char && evt.char == ' '
-        step_sim!(m; steps=1)
+        # force step even when paused (advertised as "step")
+        advance_sim!(m; steps=1, force=true)
         return
     end
     if evt.key == :char && evt.char == 'r'
@@ -320,12 +413,14 @@ function update!(m::ParticleLifeModel, evt::KeyEvent)
         pulse!(m)
         return
     end
-    # arrows / vim for minor nudge later; for now tick
-    if evt.key == :left || evt.key == :right || evt.key == :up || evt.key == :down ||
-       (evt.key == :char && evt.char in ('h','j','k','l'))
+
+    # Pump sim for fluidity on input when running (mutations only via pure helper from update!)
+    if m.running
+        advance_sim!(m; steps = max(1, m.substeps), force=false)
+    else
+        # visual tick only when paused (no physics)
         m.tick += 1
     end
-    m.tick += 1   # always advance visual tick for subtle anim
 end
 
 # ── Artistic rendering: clean modern UI with colored Canvas particles ────
@@ -342,16 +437,7 @@ function view(m::ParticleLifeModel, f::Frame)
     buf = f.buffer
     area = f.area
 
-    # Drive fluid animation in view (substeps) when running -- per plan and Tachikoma examples
-    if m.running && !isempty(m.particles)
-        for _ in 1:max(1, m.substeps)
-            step_particles!(m.particles, m.rules; cutoff=m.cutoff, viscosity=m.viscosity,
-                            w=m.world_w, h=m.world_h)
-        end
-        m.tick += 1
-        if m.pulse > 0; m.pulse -= 1; end
-    end
-
+    # Pure render only. All sim state mutations (advance, tick, pulse) happen in update! via pure helpers.
     # Small guard
     if area.width < 30 || area.height < 10
         set_string!(buf, area.x, area.y, "Particle Life (too small)", Style(; fg = GROUP_COLORS[1], dim=true))
@@ -381,22 +467,37 @@ function view(m::ParticleLifeModel, f::Frame)
     canvas_area = split[1]
     ctrl_area = length(split) > 1 ? split[2] : sim_area
 
-    # --- SIM PANE: multi-color Canvas braille for fluid beautiful particles (diff render = no flicker) ---
+    # --- SIM PANE: artistic canvas field (single style for texture) + reliable per-group colored glyphs (no last-wins overwrite) ---
     if canvas_area.width >= 6 && canvas_area.height >= 4
-        dw, dh = canvas_area.width * 2, canvas_area.height * 4
-        for g in 0:(NUM_GROUPS-1)
-            col = GROUP_COLORS[clamp(g+1, 1, length(GROUP_COLORS))]
-            c = create_canvas(canvas_area.width, canvas_area.height; style = Style(; fg = col, bold = (m.pulse > 0)))
-            clear!(c)
-            for p in m.particles
-                p.group == g || continue
-                dx = clamp( round(Int, (p.x / m.world_w) * (dw - 1)) , 0, dw-1)
-                dy = clamp( round(Int, (p.y / m.world_h) * (dh - 1)) , 0, dh-1)
-                set_point!(c, dx, dy)
-                dx < dw-1 && set_point!(c, dx+1, dy)
-                dy < dh-1 && set_point!(c, dx, dy+1)
+        # Subtle high-res field texture (one canvas, neutral style)
+        c = create_canvas(canvas_area.width, canvas_area.height; style=Style(; fg=ColorRGB(0x55,0x55,0x66), dim=true))
+        clear!(c)
+        dw, dh = canvas_area.width*2, canvas_area.height*4
+        # light procedural field points (stable look, differential safe)
+        for i in 1:2:length(m.xs)
+            x = m.xs[i]; y = m.ys[i]
+            dx = clamp(round(Int, (x / m.world_w)*(dw-1)), 0, dw-1)
+            dy = clamp(round(Int, (y / m.world_h)*(dh-1)), 0, dh-1)
+            set_point!(c, dx, dy)
+            if (i & 3) == 0 && dx+1 < dw; set_point!(c, dx+1, dy); end
+        end
+        render_canvas(c, canvas_area, f)
+
+        # Now stamp vibrant colored particle glyphs directly on buffer (per-group color guaranteed)
+        cw = canvas_area.width
+        ch = canvas_area.height
+        n = length(m.xs)
+        for i in 1:n
+            x = m.xs[i]; y = m.ys[i]; g = m.grps[i]
+            cx = canvas_area.x + clamp( floor(Int, (x / m.world_w) * cw ), 0, cw-1 )
+            cy = canvas_area.y + clamp( floor(Int, (y / m.world_h) * ch ), 0, ch-1 )
+            gg = clamp(g + 1, 1, NUM_GROUPS)
+            glyph = (g == 0) ? '●' : (g == 1 ? '◆' : (g == 2 ? '▲' : '■'))
+            sty = Style(; fg = GROUP_COLORS[gg], bold = (m.pulse > 0))
+            set_char!(buf, cx, cy, glyph, sty)
+            if cx+1 <= canvas_area.x + cw - 1
+                set_char!(buf, cx+1, cy, '•', Style(; fg=GROUP_COLORS[gg], dim=true))
             end
-            render_canvas(c, canvas_area, f)
         end
     else
         set_string!(buf, canvas_area.x+1, canvas_area.y+1, "sim", Style(;fg=GROUP_COLORS[2]))
@@ -416,7 +517,7 @@ function view(m::ParticleLifeModel, f::Frame)
     end
     cy += 1
     if cy <= maxcy
-        set_string!(buf, cx, cy, "N=$(length(m.particles))", Style(; fg = ColorRGB(0x88,0x88,0x99)))
+        set_string!(buf, cx, cy, "N=$(length(m.xs))", Style(; fg = ColorRGB(0x88,0x88,0x99)))
     end
     cy += 1
     if cy <= maxcy

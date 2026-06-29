@@ -85,20 +85,20 @@ end
         @test m isa PL.ParticleLifeModel
         @test m isa T.Model
         @test T.should_quit(m) == false
-        @test length(m.particles) == 8
+        @test PL.length_particles(m) == 8
         @test size(m.rules) == (4,4)
     end
 
     @testset "update! q sets quit; r resets particles; p toggles run; space steps" begin
         m = PL.create_model(n_per_group=1)
-        init_n = length(m.particles)
+        init_n = PL.length_particles(m)
         T.update!(m, T.KeyEvent('q'))
         @test m.quit == true
         @test T.should_quit(m) == true
 
         m2 = PL.create_model(n_per_group=1)
         T.update!(m2, T.KeyEvent('r'))
-        @test length(m2.particles) == init_n   # still same count after reset
+        @test PL.length_particles(m2) == init_n   # still same count after reset
         @test m2.tick == 0
 
         m3 = PL.create_model()
@@ -155,36 +155,51 @@ end
     end
 
     @testset "update! + re-render shows running state + sim area has non-space particle glyphs" begin
-        m = PL.create_model(n_per_group=8)
-        tb, rows = pl_render_tb(m; w=64, h=16)
-        # sim content: look for non-ascii braille or dense non-space in middle rows (canvas area)
-        mid = rows[5]
-        has_content = mid !== nothing && (any(c -> c != ' ' && !isascii(c), collect(mid)) || count(c -> c != ' ', mid) > 4)
-        @test has_content || T.find_text(tb, "PARTICLE") !== nothing  # allow fallback
+        m = PL.create_model(n_per_group=12)
+        tb, rows = pl_render_tb(m; w=72, h=18)
+        # STRICT: require particle evidence in sim pane interior (cols ~3-45, rows ~3-14), independent of borders/title/controls
+        # Sample with char_at in the left/sim zone (avoids right "CONTROLS" and │ borders)
+        sim_glyphs = 0
+        for row in 3:14, col in 3:42
+            ch = T.char_at(tb, col, row)
+            if ch !== nothing && ch != ' ' && ch != '│' && ch != '╭' && ch != '╮' && ch != '╰' && ch != '╯'
+                if !isascii(ch) || ch == '●' || ch == '•' || ch == '◆' || ch == '◦'
+                    sim_glyphs += 1
+                end
+            end
+        end
+        @test sim_glyphs > 0   # must have real particle drawing in sim area (would fail without canvas/set_point or colored set_char)
 
         T.update!(m, T.KeyEvent('p'))  # pause
-        tb2, rows2 = pl_render_tb(m; w=64, h=16)
+        tb2, rows2 = pl_render_tb(m; w=72, h=18)
         @test T.find_text(tb2, "PAUSED") !== nothing || any(occursin("PAUSED", uppercase(r)) for r in rows2 if r!==nothing)
     end
 
     @testset "reset (r) + view keeps chrome and particles reappear (density check)" begin
-        m = PL.create_model(n_per_group=6)
+        m = PL.create_model(n_per_group=10)
         T.update!(m, T.KeyEvent('r'))
-        tb, rows = pl_render_tb(m; w=60, h=14)
-        @test T.find_text(tb, "PARTICLE") !== nothing || any(occursin("CONTROLS", r) for r in rows if r!==nothing)
-        # at least some rows in sim region have visible glyph content
-        simrow = rows[4]
-        @test simrow !== nothing
-        @test any(c->c!=' ', collect(simrow)) || length(filter(!isnothing, rows)) > 5
+        tb, rows = pl_render_tb(m; w=72, h=16)
+        @test T.find_text(tb, "PARTICLE") !== nothing || T.find_text(tb, "CONTROLS") !== nothing
+        # STRICT density in sim interior (no reliance on title)
+        sim_glyphs = 0
+        for row in 4:12, col in 4:40
+            ch = T.char_at(tb, col, row)
+            if ch !== nothing && ch != ' ' && ch != '│'
+                if !isascii(ch) || ch in ('●','•','◆')
+                    sim_glyphs += 1
+                end
+            end
+        end
+        @test sim_glyphs > 0
     end
 
     @testset "pulse (u) and random rules (x) + re-render update message/status" begin
         m = PL.create_model(n_per_group=5)
         T.update!(m, T.KeyEvent('u'))
-        tb, _ = pl_render_tb(m; w=50, h=12)
-        @test T.find_text(tb, "pulse") !== nothing || m.pulse > 0 || T.find_text(tb, "PARTICLE") !== nothing
+        tb, rows = pl_render_tb(m; w=60, h=14)
+        @test T.find_text(tb, "pulse") !== nothing || m.pulse > 0 || any(occursin("u pulse", lowercase(r)) for r in rows if r!==nothing)
         T.update!(m, T.KeyEvent('x'))
-        tb2, rows2 = pl_render_tb(m; w=50, h=12)
+        tb2, rows2 = pl_render_tb(m; w=60, h=14)
         @test any(occursin("rand", lowercase(r)) || occursin("random", lowercase(r)) for r in rows2 if r!==nothing) || T.find_text(tb2, "CONTROLS") !== nothing
     end
 
