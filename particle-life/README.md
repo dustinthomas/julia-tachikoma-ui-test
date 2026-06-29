@@ -32,8 +32,9 @@ Live tuning: dt, viscosity and particle count (N) are adjustable on the fly via 
 
 ## Architecture notes
 
-- Pure CPU sim primitives: `create_particles`, `apply_forces!`, `integrate!`, `clamp_bounds!`, `step_particles!` (vector of mutable Particle, N² loops, tuned ~120 particles).
-- Ref mechanics: dx = a.x-b.x ; if d<cutoff F=g/d ; vx +=F*dx ; v*=visc ; pos+=v ; bounce.
+- Pure CPU sim primitives: `create_particles`, `apply_forces!`, `integrate!`, `clamp_bounds!` (legacy), `step_particles!` (vector of mutable Particle, N² loops, tuned ~120 particles).
+- Ref mechanics: dx = a.x-b.x ; if d<cutoff F=g/d ; vx +=F*dx ; v*=visc ; pos+=v ; wrap (mod world).
+- Boundaries wrap (periodic) instead of hard edges/bounce; velocities unaffected on wrap.
 - Tachikoma Elm: `mutable struct <: Model`, `update!(m, KeyEvent)`, `view(m, Frame)`, `@tachikoma_app`.
 - Rendering: multi-style `create_canvas` + `set_point!` + `render_canvas` (braille high-res) layered for vibrant groups + Block/StatusBar chrome.
 - Continuous sim advance in `pre_render!` (per-frame substeps when running) for fluid animation even idle/no keys (double-buffer diff safe; view is pure render). pre_render! or equivalent allowed by plan for fluidity.

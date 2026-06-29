@@ -43,14 +43,30 @@ const PL = ParticleLife
         @test ps[1].y ≈ 2.0
     end
 
-    @testset "clamp_bounds! bounces and clamps at edges (reverse vel)" begin
-        p = PL.Particle(x=-1.0, y=305.0, vx=-3.0, vy=7.0, group=0)
-        ps = [p]
-        PL.clamp_bounds!(ps; w=300.0, h=300.0)
-        @test ps[1].x == 0.0
-        @test ps[1].vx > 0.0   # reversed
-        @test ps[1].y == 300.0
-        @test ps[1].vy < 0.0
+    @testset "wrap boundaries via real advance_sim! / step from create_model() (no vel reverse)" begin
+        # drive shipped paths only, from fresh create_model initial state
+        m = PL.create_model(n_per_group=1)
+        w = m.world_w; h = m.world_h
+        # cross right edge
+        m.xs[1] = w - 1.5; m.ys[1] = h/2
+        m.vxs[1] = 5.0; m.vys[1] = 0.0
+        vx_sign_before = sign(m.vxs[1])
+        PL.advance_sim!(m; steps=1, force=true)
+        @test 0 <= m.xs[1] < w   # wrapped
+        @test sign(m.vxs[1]) == vx_sign_before  # vel not reversed
+        # cross left (negative)
+        m.xs[1] = 0.5; m.vxs[1] = -8.0
+        vx_sign_before = sign(m.vxs[1])
+        PL.advance_sim!(m; steps=1, force=true)
+        @test 0 <= m.xs[1] < w
+        @test sign(m.vxs[1]) == vx_sign_before
+        # also via direct step_soa on snapshot from create
+        m2 = PL.create_model(n_per_group=2)
+        xs=copy(m2.xs); ys=copy(m2.ys); vxs=copy(m2.vxs); vys=copy(m2.vys); gs=copy(m2.grps)
+        xs[1] = m2.world_w + 2.0; vxs[1] = 1.0
+        PL.step_soa!(xs,ys,vxs,vys,gs, m2.rules; w=m2.world_w, h=m2.world_h, cutoff=m2.cutoff, viscosity=m2.viscosity, dt=m2.dt)
+        @test 0 <= xs[1] < m2.world_w
+        @test vxs[1] > 0
     end
 
     @testset "step_particles! / step_sim! composes force+integrate+bounds (small deterministic)" begin
@@ -303,6 +319,25 @@ end
             if ch !== nothing && ch in ('●','◆','▲','■'); stamps += 1; end
         end
         @test stamps > 0
+    end
+
+    @testset "wrap motion via pre_render! still produces glyphs (TestBackend from create_model)" begin
+        # from fresh create_model(), force a particle to cross former hard edge, drive, confirm glyphs via char_at
+        m = PL.create_model(n_per_group=4)
+        w = m.world_w; h = m.world_h
+        # near right edge, +vx to wrap
+        m.xs[1] = w - 0.5; m.ys[1] = h * 0.5; m.vxs[1] = 20.0; m.vys[1] = 0.0
+        pre_x = m.xs[1]
+        if isdefined(PL, :pre_render!); for _ in 1:4; PL.pre_render!(m); end; end
+        @test m.xs[1] < pre_x || m.xs[1] < 10   # wrapped (now small or continued)
+        tb = T.TestBackend(72, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,72,18), [], []))
+        stamps = 0
+        for r in 3:15, c in 3:60
+            ch = T.char_at(tb, c, r)
+            if ch !== nothing && ch in ('●','◆','▲','■'); stamps += 1; end
+        end
+        @test stamps > 0  # glyphs still rendered post-wrap
     end
 
     @testset "pause toggle + space produces delta==0 when paused (no step button)" begin

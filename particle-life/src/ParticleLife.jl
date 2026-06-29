@@ -169,11 +169,9 @@ function step_particles!(ps::Vector{Particle}, rules::Matrix{Float64};
                 a.vy = (a.vy + fy) * viscosity
                 a.x += a.vx * dt
                 a.y += a.vy * dt
-                # immediate bounds per particle (ref style)
-                if a.x <= 0; a.x=0; a.vx = -a.vx; end
-                if a.x >= w; a.x=w; a.vx = -a.vx; end
-                if a.y <= 0; a.y=0; a.vy = -a.vy; end
-                if a.y >= h; a.y=h; a.vy = -a.vy; end
+                # wrap around (periodic boundaries); velocities unchanged (no bounce)
+                a.x = mod(a.x, w)
+                a.y = mod(a.y, h)
                 ps[i] = a
             end
         end
@@ -208,10 +206,9 @@ function step_soa!(xs::Vector{Float64}, ys::Vector{Float64}, vxs::Vector{Float64
                 vys[i] = (vys[i] + fy) * viscosity
                 xs[i] += vxs[i] * dt
                 ys[i] += vys[i] * dt
-                if xs[i] <= 0; xs[i] = 0; vxs[i] = -vxs[i]; end
-                if xs[i] >= w; xs[i] = w; vxs[i] = -vxs[i]; end
-                if ys[i] <= 0; ys[i] = 0; vys[i] = -vys[i]; end
-                if ys[i] >= h; ys[i] = h; vys[i] = -vys[i]; end
+                # wrap around (periodic boundaries); velocities unchanged (no bounce)
+                xs[i] = mod(xs[i], w)
+                ys[i] = mod(ys[i], h)
             end
         end
     end
