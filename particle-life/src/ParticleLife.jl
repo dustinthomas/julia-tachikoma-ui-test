@@ -18,7 +18,8 @@ import Tachikoma: pre_render!
 
 export Particle, create_particles, apply_forces!, integrate!, clamp_bounds!,
        random_rules!, symmetric_rules!, ParticleLifeModel, create_model,
-       step_sim!, reset_particles!, pulse!, particle_life
+       step_sim!, advance_sim!, reset_particles!, pulse!, particle_life,
+       length_particles, set_dt!, set_viscosity!, adjust_n!
 
 # ── Core simulation types and pure CPU primitives (TDD-first) ────────────
 
@@ -35,6 +36,7 @@ const DEFAULT_WORLD_W = 300.0
 const DEFAULT_WORLD_H = 300.0
 const DEFAULT_CUTOFF = 80.0
 const DEFAULT_VISC = 0.5
+const DEFAULT_DT = 1.0
 const DEFAULT_N_PER_GROUP = 40   # limited for fluid CPU (total ~160); N^2 ~ 4*40^2 ~6.4k ops/frame + substeps ok
 const NUM_GROUPS = 4
 
@@ -57,13 +59,14 @@ function create_particles(n_per::Int = DEFAULT_N_PER_GROUP;
 end
 
 """
-    apply_forces!(ps, rules::Matrix{Float64}, cutoff=DEFAULT_CUTOFF)
+    apply_forces!(ps, rules::Matrix{Float64}, cutoff=DEFAULT_CUTOFF, dt=DEFAULT_DT)
 
 In-place pairwise force accumulation into velocities (F = g / d ; fx += F*dx ...).
 Does NOT integrate or move positions. Pure CPU double loops.
 rules[i+1, j+1] is force coefficient that group-i feels from group-j.
+dt scales the force impulse for tunable time step.
 """
-function apply_forces!(ps::Vector{Particle}, rules::Matrix{Float64}, cutoff::Float64 = DEFAULT_CUTOFF)
+function apply_forces!(ps::Vector{Particle}, rules::Matrix{Float64}, cutoff::Float64 = DEFAULT_CUTOFF, dt::Float64 = DEFAULT_DT)
     n = length(ps)
     # zero temp accums? we add to existing v later in integrate
     for i in 1:n
@@ -80,8 +83,8 @@ function apply_forces!(ps::Vector{Particle}, rules::Matrix{Float64}, cutoff::Flo
             if d > 0 && d < cutoff
                 g = rules[gi, b.group + 1]
                 F = g / d
-                fx += F * dx
-                fy += F * dy
+                fx += F * dx * dt
+                fy += F * dy * dt
             end
         end
         # accumulate into v (will be damped in integrate)
@@ -93,17 +96,17 @@ function apply_forces!(ps::Vector{Particle}, rules::Matrix{Float64}, cutoff::Flo
 end
 
 """
-    integrate!(ps, viscosity=DEFAULT_VISC)
+    integrate!(ps, viscosity=DEFAULT_VISC, dt=DEFAULT_DT)
 
-v = (v + F)*visc ; x += v   (F already added to v by apply)
+v = (v + F)*visc ; x += v*dt   (F already added scaled by dt in apply)
 """
-function integrate!(ps::Vector{Particle}, viscosity::Float64 = DEFAULT_VISC)
+function integrate!(ps::Vector{Particle}, viscosity::Float64 = DEFAULT_VISC, dt::Float64 = DEFAULT_DT)
     for i in eachindex(ps)
         p = ps[i]
         p.vx = (p.vx) * viscosity
         p.vy = (p.vy) * viscosity
-        p.x += p.vx
-        p.y += p.vy
+        p.x += p.vx * dt
+        p.y += p.vy * dt
         ps[i] = p
     end
     ps
@@ -137,6 +140,7 @@ end
 "Full sim step (more ref-faithful): per (target_group, source_group) pair: accumulate forces for targets then integrate+bound those targets immediately (interleaved visc/pos like original rule() calls)."
 function step_particles!(ps::Vector{Particle}, rules::Matrix{Float64};
                          cutoff::Float64=DEFAULT_CUTOFF, viscosity::Float64=DEFAULT_VISC,
+                         dt::Float64=DEFAULT_DT,
                          w::Float64=DEFAULT_WORLD_W, h::Float64=DEFAULT_WORLD_H)
     n = length(ps)
     for gi in 0:(NUM_GROUPS-1)
@@ -156,15 +160,15 @@ function step_particles!(ps::Vector{Particle}, rules::Matrix{Float64};
                     d = sqrt(dx*dx + dy*dy)
                     if d > 0 && d < cutoff
                         F = g / d
-                        fx += F * dx
-                        fy += F * dy
+                        fx += F * dx * dt
+                        fy += F * dy * dt
                     end
                 end
                 # per-pair integrate like ref rule()
                 a.vx = (a.vx + fx) * viscosity
                 a.vy = (a.vy + fy) * viscosity
-                a.x += a.vx
-                a.y += a.vy
+                a.x += a.vx * dt
+                a.y += a.vy * dt
                 # immediate bounds per particle (ref style)
                 if a.x <= 0; a.x=0; a.vx = -a.vx; end
                 if a.x >= w; a.x=w; a.vx = -a.vx; end
@@ -180,6 +184,7 @@ end
 "Fast in-place SoA version of the faithful per-pair step (used by model for CPU perf)."
 function step_soa!(xs::Vector{Float64}, ys::Vector{Float64}, vxs::Vector{Float64}, vys::Vector{Float64}, grps::Vector{Int},
                    rules::Matrix{Float64}; cutoff::Float64=DEFAULT_CUTOFF, viscosity::Float64=DEFAULT_VISC,
+                   dt::Float64=DEFAULT_DT,
                    w::Float64=DEFAULT_WORLD_W, h::Float64=DEFAULT_WORLD_H)
     n = length(xs)
     for gi in 0:(NUM_GROUPS-1)
@@ -195,14 +200,14 @@ function step_soa!(xs::Vector{Float64}, ys::Vector{Float64}, vxs::Vector{Float64
                     d = sqrt(dx*dx + dy*dy)
                     if d > 0 && d < cutoff
                         F = g / d
-                        fx += F * dx
-                        fy += F * dy
+                        fx += F * dx * dt
+                        fy += F * dy * dt
                     end
                 end
-                vxs[i] = (vxs[i] + fx) * viscosity
-                vys[i] = (vys[i] + fy) * viscosity
-                xs[i] += vxs[i]
-                ys[i] += vys[i]
+                vxs[i] = (vxs[i] + fx * dt) * viscosity
+                vys[i] = (vys[i] + fy * dt) * viscosity
+                xs[i] += vxs[i] * dt
+                ys[i] += vys[i] * dt
                 if xs[i] <= 0; xs[i] = 0; vxs[i] = -vxs[i]; end
                 if xs[i] >= w; xs[i] = w; vxs[i] = -vxs[i]; end
                 if ys[i] <= 0; ys[i] = 0; vys[i] = -vys[i]; end
@@ -263,6 +268,7 @@ end
     rules::Matrix{Float64} = default_rules()
     running::Bool = true
     viscosity::Float64 = DEFAULT_VISC
+    dt::Float64 = DEFAULT_DT
     cutoff::Float64 = DEFAULT_CUTOFF
     n_per_group::Int = DEFAULT_N_PER_GROUP
     world_w::Float64 = DEFAULT_WORLD_W
@@ -346,7 +352,7 @@ function advance_sim!(m::ParticleLifeModel; steps::Int=1, force::Bool=false)
     if (!m.running && !force) || isempty(m.xs); return m; end
     for _ in 1:steps
         step_soa!(m.xs, m.ys, m.vxs, m.vys, m.grps, m.rules;
-                  cutoff = m.cutoff, viscosity = m.viscosity,
+                  cutoff = m.cutoff, viscosity = m.viscosity, dt = m.dt,
                   w = m.world_w, h = m.world_h)
     end
     m.tick += 1
@@ -375,6 +381,57 @@ end
 function toggle_pause!(m::ParticleLifeModel)
     m.running = !m.running
     m.message = m.running ? "running" : "paused"
+    m
+end
+
+function set_dt!(m::ParticleLifeModel, v::Real)
+    m.dt = clamp(Float64(v), 0.05, 5.0)
+    m.message = "dt=$(round(m.dt, digits=2))"
+    m
+end
+
+function set_viscosity!(m::ParticleLifeModel, v::Real)
+    m.viscosity = clamp(Float64(v), 0.01, 0.99)
+    m.message = "visc=$(round(m.viscosity, digits=2))"
+    m
+end
+
+function adjust_n!(m::ParticleLifeModel, target_total::Int)
+    target_per = max(1, round(Int, target_total / NUM_GROUPS))
+    target_per = min(target_per, 1000)  # cap ~4000 particles
+    current_per = isempty(m.xs) ? 0 : length(m.xs) ÷ NUM_GROUPS
+    if target_per == current_per
+        m.n_per_group = target_per
+        return m
+    end
+    if target_per > current_per
+        delta = target_per - current_per
+        for g in 0:(NUM_GROUPS-1)
+            for _ in 1:delta
+                push!(m.xs, 10 + Random.rand() * (m.world_w - 20))
+                push!(m.ys, 10 + Random.rand() * (m.world_h - 20))
+                push!(m.vxs, 0.0)
+                push!(m.vys, 0.0)
+                push!(m.grps, g)
+            end
+        end
+    else
+        # trim keeping first target_per of each original group block (balanced)
+        new_xs = Float64[]; new_ys = Float64[]; new_vxs = Float64[]; new_vys = Float64[]; new_grps = Int[]
+        per_counts = zeros(Int, NUM_GROUPS)
+        for i in eachindex(m.xs)
+            g = m.grps[i]
+            gi = g + 1
+            if per_counts[gi] < target_per
+                push!(new_xs, m.xs[i]); push!(new_ys, m.ys[i])
+                push!(new_vxs, m.vxs[i]); push!(new_vys, m.vys[i]); push!(new_grps, g)
+                per_counts[gi] += 1
+            end
+        end
+        m.xs = new_xs; m.ys = new_ys; m.vxs = new_vxs; m.vys = new_vys; m.grps = new_grps
+    end
+    m.n_per_group = target_per
+    m.message = "N=$(target_per * NUM_GROUPS)"
     m
 end
 
@@ -407,6 +464,34 @@ function update!(m::ParticleLifeModel, evt::KeyEvent)
     end
     if evt.key == :char && evt.char == 'u'
         pulse!(m)
+        return
+    end
+    if evt.key == :char && evt.char == '['
+        set_dt!(m, m.dt - 0.1)
+        return
+    end
+    if evt.key == :char && evt.char == ']'
+        set_dt!(m, m.dt + 0.1)
+        return
+    end
+    if evt.key == :char && evt.char == '-'
+        set_viscosity!(m, m.viscosity - 0.05)
+        return
+    end
+    if evt.key == :char && (evt.char == '=' || evt.char == '+')
+        set_viscosity!(m, m.viscosity + 0.05)
+        return
+    end
+    if evt.key == :char && (evt.char == ',' || evt.char == '<')
+        cur = length(m.xs)
+        newt = max(NUM_GROUPS, cur - 40)
+        adjust_n!(m, newt)
+        return
+    end
+    if evt.key == :char && (evt.char == '.' || evt.char == '>')
+        cur = length(m.xs)
+        newt = min(4000, cur + 40)
+        adjust_n!(m, newt)
         return
     end
 
@@ -520,7 +605,7 @@ function view(m::ParticleLifeModel, f::Frame)
     if cy <= maxcy
         set_string!(buf, cx, cy, "CONTROLS", Style(; fg = ColorRGB(0x99,0x99,0xaa), bold=true)); cy += 1
     end
-    for h in ["r reset", "x rand", "s sym", "1/2 preset", "p pause/play", "u pulse", "q quit"]
+    for h in ["r reset", "x rand", "s sym", "1/2 preset", "p pause/play", "u pulse", "[ ] dt", "- = visc", ", . N", "q quit"]
         cy <= maxcy || break
         set_string!(buf, cx, cy, h, Style(; fg = ColorRGB(0x66,0x66,0x77), dim = !m.running ))
         cy += 1
@@ -534,12 +619,20 @@ function view(m::ParticleLifeModel, f::Frame)
         runsty = m.running ? Style(; fg=ColorRGB(0x5b,0xe2,0x5b), bold=true) : Style(; fg=ColorRGB(0xff,0x88,0x55), bold=true)
         set_string!(buf, cx, cy, m.running ? "RUNNING" : "PAUSED", runsty)
     end
+    cy += 1
+    if cy <= maxcy
+        set_string!(buf, cx, cy, "dt=$(round(m.dt,digits=2))", Style(; fg=ColorRGB(0x88,0x88,0x99)))
+    end
+    cy += 1
+    if cy <= maxcy
+        set_string!(buf, cx, cy, "visc=$(round(m.viscosity,digits=2))", Style(; fg=ColorRGB(0x88,0x88,0x99)))
+    end
 
     # Status bar artistic, modern
     if status_area.width >= 10
         left = [Span(" particle life ", Style(; fg=ColorRGB(0xaa,0xaa,0xcc), dim=true))]
         state = m.running ? "RUNNING" : "PAUSED"
-        right_str = "$(state)  $(m.message)  tick=$(m.tick)  visc=$(round(m.viscosity,digits=2))"
+        right_str = "$(state)  $(m.message)  tick=$(m.tick)  dt=$(round(m.dt,digits=2))  visc=$(round(m.viscosity,digits=2))"
         right = [Span(right_str, Style(; fg = ColorRGB(0x77,0x77,0x88), dim=true))]
         render(StatusBar(left=left, right=right), status_area, buf)
     end

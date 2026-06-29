@@ -21,9 +21,14 @@ Keys (in-app):
 - s : symmetrize rules
 - p : play/pause (steps continuously through the simulation when played)
 - u : pulse (inject energy)
+- [ ] : dt down / up
+- - = : viscosity down / up
+- , . : particle count down / up (live N)
 - q : quit
 
 'p' is the play/pause button. The simulation steps through continuously when played (via frame-driven pre_render! when running). No step button.
+
+Live tuning: dt, viscosity and particle count (N) are adjustable on the fly via keys (or direct API). N up to ~2000 supported (NUM_GROUPS* n_per balanced); at high counts (N² force loops) CPU sim may run slower than real-time in terminal (no GPU/spatial accel). Default keeps responsive.
 
 ## Architecture notes
 

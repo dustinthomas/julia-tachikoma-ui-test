@@ -124,6 +124,63 @@ end
     end
 end
 
+# ── Tuners: dt, viscosity, live N via direct shipped API from create_model ──
+
+@testset "ParticleLife: dt / visc / live N tuners (direct from create_model, real paths)" begin
+    @testset "dt is on model default 1.0 and set_dt! reflects" begin
+        m = PL.create_model(n_per_group=2)
+        @test m.dt == 1.0
+        PL.set_dt!(m, 0.7)
+        @test m.dt == 0.7
+        @test occursin("0.7", m.message)
+    end
+
+    @testset "set_viscosity! and adjust_n! are direct callable and preserve state" begin
+        m = PL.create_model(n_per_group=5)
+        old_rules = copy(m.rules)
+        old_run = m.running
+        PL.set_viscosity!(m, 0.2)
+        @test m.viscosity ≈ 0.2
+        PL.adjust_n!(m, 80)
+        @test PL.length_particles(m) == 80
+        @test m.rules == old_rules
+        @test m.running == old_run
+        @test m.n_per_group == 20
+        # groups balanced
+        gs = zeros(Int, 4); for g in m.grps; gs[g+1] += 1; end
+        @test all(==(20), gs)
+    end
+
+    @testset "dt and visc affect simulation deltas (shipped step_soa + advance)" begin
+        mbase = PL.create_model(n_per_group=4)
+        # use copies of SoA + step_soa directly (real func)
+        function step_delta(dtval)
+            xs=copy(mbase.xs); ys=copy(mbase.ys); vxs=copy(mbase.vxs); vys=copy(mbase.vys); gs=copy(mbase.grps)
+            for _ in 1:3
+                PL.step_soa!(xs,ys,vxs,vys,gs, mbase.rules; cutoff=mbase.cutoff, viscosity=0.5, dt=dtval)
+            end
+            xs[1] - mbase.xs[1]
+        end
+        d1 = step_delta(1.0)
+        d025 = step_delta(0.25)
+        @test d1 != d025   # dt produces observably different deltas
+        @test abs(d1) > abs(d025)  # larger dt -> larger motion in this regime
+    end
+
+    @testset "advance_sim! + adjust_n! + setters use model fields, N changes used" begin
+        m = PL.create_model(n_per_group=3)
+        init_n = PL.length_particles(m)
+        PL.set_dt!(m, 0.8); PL.set_viscosity!(m, 0.4)
+        PL.adjust_n!(m, 200)
+        @test PL.length_particles(m) == 200
+        t0 = m.tick; x0 = copy(m.xs)
+        PL.advance_sim!(m; steps=2, force=true)
+        @test m.tick == t0 + 1   # advance_sim! counts as 1 tick (frame), even with internal steps>1 (consistent w/ pre_render usage)
+        @test any(m.xs[i] != x0[i] for i in 1:length(m.xs))
+        @test m.dt == 0.8 && m.viscosity == 0.4
+    end
+end
+
 println("Physics + model unit tests loaded (visuals next).")
 
 # ── Direct TestBackend visual tests (mandatory per Tachikoma/AGENTS) ──────
@@ -285,6 +342,50 @@ end
         @test any(occursin("PAUSED", r) for r in rows3 if r!==nothing)
     end
 
+    @testset "tuning keys via update! + pre_render! + render show dt/visc/N + glyphs (TestBackend from create_model)" begin
+        # start from documented create_model() initial state, drive only via shipped update! keys + pre_render + view
+        m = PL.create_model(n_per_group=6)
+        init_n = PL.length_particles(m)
+        @test m.dt == 1.0 && m.viscosity == 0.5
+
+        # dt up via key
+        T.update!(m, T.KeyEvent(']'))
+        T.update!(m, T.KeyEvent(']'))
+        @test m.dt > 1.0
+
+        # visc down
+        T.update!(m, T.KeyEvent('-'))
+        @test m.viscosity < 0.5
+
+        # N up via .
+        T.update!(m, T.KeyEvent('.'))
+        @test PL.length_particles(m) > init_n
+
+        # drive sim
+        if isdefined(PL, :pre_render!); for _ in 1:2; PL.pre_render!(m); end; end
+
+        tb, rows = pl_render_tb(m; w=80, h=20)
+
+        # confirm glyphs still present
+        stamps = 0
+        for r in 3:16, c in 3:55
+            ch = T.char_at(tb, c, r)
+            if ch !== nothing && ch in ('●','◆','▲','■'); stamps +=1; end
+        end
+        @test stamps > 0
+
+        # confirm live values visible in render (status or ctrl)
+        has_dt = T.find_text(tb, "dt=") !== nothing || any(occursin("dt=", lowercase(r)) for r in rows if r!==nothing)
+        has_visc = T.find_text(tb, "visc=") !== nothing || any(occursin("visc=", lowercase(r)) for r in rows if r!==nothing)
+        has_n = any(occursin("N=", r) for r in rows if r!==nothing) || T.find_text(tb, string(PL.length_particles(m))) !== nothing
+        @test has_dt
+        @test has_visc
+        @test has_n
+
+        # status also shows values post keys
+        @test any(occursin("dt=", r) for r in rows if r!==nothing)
+    end
+
     @testset "ParticleLife: continuous headless rendering via pre_render! (visual change evidence)" begin
         # Directly exercise shipped create_model + pre_render! + view from fresh documented initial state.
         # Drives multiple frames of pre_render (as Tachikoma app loop will after the import fix).
@@ -294,7 +395,7 @@ end
         @test m.running == true  # default per create
         @test m.tick == 0
 
-        scratch_dir = "/tmp/grok-goal-fea68319488e/implementer"
+        scratch_dir = "/tmp/grok-goal-26116530ca84/implementer"
         mkpath(scratch_dir)
         evidence_path = joinpath(scratch_dir, "particle-life-continuous-render-evidence.txt")
         evidence = String[]
