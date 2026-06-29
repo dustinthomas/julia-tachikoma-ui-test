@@ -1,0 +1,21 @@
+name = "ParticleLife"
+uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+version = "0.1.0"
+authors = ["Grok Agentic Experiments"]
+description = "Self-contained CPU-only Particle Life simulator TUI in Julia + Tachikoma.jl. Beautiful fluid animations, artistic modern UI, TDD with direct TestBackend visual tests. No GPU."
+
+[deps]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
+
+[compat]
+Random = "1.11.0"
+Tachikoma = "2"
+julia = "1.10"
+
+[extras]
+Supposition = "5a0628fe-1738-4658-9b6d-0b7605a9755b"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "Supposition"]
