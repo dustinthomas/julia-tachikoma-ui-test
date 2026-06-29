@@ -415,10 +415,8 @@ function update!(m::ParticleLifeModel, evt::KeyEvent)
     end
 
     # Input only here; continuous substeps for fluid animation driven by pre_render! (called per frame by app).
-    # pre_render! handles advance when running, even with no keys (idle renders advance state).
-    if !m.running
-        m.tick += 1  # subtle visual update when paused
-    end
+    # pre_render! handles advance ONLY when running. Unhandled keys when paused do NOTHING (no tick, no state change).
+    # (Fixes idle key tick advance when paused.)
 end
 
 # pre_render! drives fixed-timestep substeps every frame for fluid idle animation (even with no KeyEvents).

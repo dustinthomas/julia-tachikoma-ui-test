@@ -254,6 +254,11 @@ end
         T.update!(m, T.KeyEvent(' '))
         @test m.tick == t1 + 1
         @test any(m.xs[i] != x1[i] for i in 1:length(m.xs))
+        # unhandled/idle key (e.g. 'l') when paused must NOT advance tick (fix for skeptic gap)
+        t_pre = m.tick
+        T.update!(m, T.KeyEvent('l'))
+        @test m.tick == t_pre  # no advance on idle key when paused
+        @test !m.running  # still paused
         # re-toggle to running, drive should advance
         T.update!(m, T.KeyEvent('p'))
         @test m.running == true
