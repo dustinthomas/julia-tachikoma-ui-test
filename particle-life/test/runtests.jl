@@ -131,6 +131,9 @@ println("Physics + model unit tests loaded (visuals next).")
 function pl_render_rows(m; w::Int=72, h::Int=22)
     tb = T.TestBackend(w, h)
     T.reset!(tb.buf)
+    if isdefined(PL, :pre_render!)
+        PL.pre_render!(m)
+    end
     fr = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
     T.view(m, fr)
     [T.row_text(tb, i) for i in 1:h]
@@ -139,6 +142,10 @@ end
 function pl_render_tb(m; w::Int=72, h::Int=22)
     tb = T.TestBackend(w, h)
     T.reset!(tb.buf)
+    # Call pre_render! before view to drive per-frame substeps (exercises autonomous fluid animation path)
+    if isdefined(PL, :pre_render!)
+        PL.pre_render!(m)
+    end
     fr = T.Frame(tb.buf, T.Rect(1, 1, tb.width, tb.height), T.GraphicsRegion[], T.PixelSnapshot[])
     T.view(m, fr)
     (tb, [T.row_text(tb, i) for i in 1:h])
@@ -157,18 +164,16 @@ end
     @testset "update! + re-render shows running state + sim area has non-space particle glyphs" begin
         m = PL.create_model(n_per_group=12)
         tb, rows = pl_render_tb(m; w=72, h=18)
-        # STRICT: require particle evidence in sim pane interior (cols ~3-45, rows ~3-14), independent of borders/title/controls
-        # Sample with char_at in the left/sim zone (avoids right "CONTROLS" and │ borders)
-        sim_glyphs = 0
+        # STRICT: require the colored set_char! particle stamps ('●','◆','▲','■') in sim pane interior.
+        # Must come from the per-group colored glyph path, not field canvas braille (!isascii).
+        sim_stamps = 0
         for row in 3:14, col in 3:42
             ch = T.char_at(tb, col, row)
-            if ch !== nothing && ch != ' ' && ch != '│' && ch != '╭' && ch != '╮' && ch != '╰' && ch != '╯'
-                if !isascii(ch) || ch == '●' || ch == '•' || ch == '◆' || ch == '◦'
-                    sim_glyphs += 1
-                end
+            if ch !== nothing && ch in ('●','◆','▲','■')
+                sim_stamps += 1
             end
         end
-        @test sim_glyphs > 0   # must have real particle drawing in sim area (would fail without canvas/set_point or colored set_char)
+        @test sim_stamps > 0   # proves the shipped colored set_char! stamps are rendered (specific glyphs)
 
         T.update!(m, T.KeyEvent('p'))  # pause
         tb2, rows2 = pl_render_tb(m; w=72, h=18)
@@ -180,17 +185,15 @@ end
         T.update!(m, T.KeyEvent('r'))
         tb, rows = pl_render_tb(m; w=72, h=16)
         @test T.find_text(tb, "PARTICLE") !== nothing || T.find_text(tb, "CONTROLS") !== nothing
-        # STRICT density in sim interior (no reliance on title)
-        sim_glyphs = 0
+        # STRICT: require specific colored particle stamps in interior (not field braille)
+        sim_stamps = 0
         for row in 4:12, col in 4:40
             ch = T.char_at(tb, col, row)
-            if ch !== nothing && ch != ' ' && ch != '│'
-                if !isascii(ch) || ch in ('●','•','◆')
-                    sim_glyphs += 1
-                end
+            if ch !== nothing && ch in ('●','◆','▲','■')
+                sim_stamps += 1
             end
         end
-        @test sim_glyphs > 0
+        @test sim_stamps > 0
     end
 
     @testset "pulse (u) and random rules (x) + re-render update message/status" begin

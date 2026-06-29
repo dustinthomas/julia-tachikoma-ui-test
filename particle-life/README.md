@@ -30,7 +30,7 @@ Keys (in-app):
 - Ref mechanics: dx = a.x-b.x ; if d<cutoff F=g/d ; vx +=F*dx ; v*=visc ; pos+=v ; bounce.
 - Tachikoma Elm: `mutable struct <: Model`, `update!(m, KeyEvent)`, `view(m, Frame)`, `@tachikoma_app`.
 - Rendering: multi-style `create_canvas` + `set_point!` + `render_canvas` (braille high-res) layered for vibrant groups + Block/StatusBar chrome.
-- Continuous sim advance inside `view` (substeps) for fluid 60fps-class feel (double-buffer diff prevents flicker).
+- Continuous sim advance in `pre_render!` (per-frame substeps when running) for fluid animation even idle/no keys (double-buffer diff safe; view is pure render). pre_render! or equivalent allowed by plan for fluidity.
 - All logic + visuals exercised from initial state by real tests.
 
 ## Test

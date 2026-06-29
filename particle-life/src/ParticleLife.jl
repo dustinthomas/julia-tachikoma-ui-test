@@ -34,7 +34,7 @@ const DEFAULT_WORLD_W = 300.0
 const DEFAULT_WORLD_H = 300.0
 const DEFAULT_CUTOFF = 80.0
 const DEFAULT_VISC = 0.5
-const DEFAULT_N_PER_GROUP = 60   # tuned for fluid CPU N^2 ~ 4*60^2 ~14k ops/frame ok
+const DEFAULT_N_PER_GROUP = 40   # limited for fluid CPU (total ~160); N^2 ~ 4*40^2 ~6.4k ops/frame + substeps ok
 const NUM_GROUPS = 4
 
 "Create initial particles randomly placed, zero vel, balanced groups."
@@ -414,12 +414,24 @@ function update!(m::ParticleLifeModel, evt::KeyEvent)
         return
     end
 
-    # Pump sim for fluidity on input when running (mutations only via pure helper from update!)
-    if m.running
-        advance_sim!(m; steps = max(1, m.substeps), force=false)
-    else
-        # visual tick only when paused (no physics)
+    # Input only here; continuous substeps for fluid animation driven by pre_render! (called per frame by app).
+    # pre_render! handles advance when running, even with no keys (idle renders advance state).
+    if !m.running
+        m.tick += 1  # subtle visual update when paused
+    end
+end
+
+# pre_render! drives fixed-timestep substeps every frame for fluid idle animation (even with no KeyEvents).
+# Called by Tachikoma app loop before view (per plan + architecture). View remains pure render.
+function pre_render!(m::ParticleLifeModel)
+    if m.running && !isempty(m.xs)
+        for _ in 1:max(1, m.substeps)
+            step_soa!(m.xs, m.ys, m.vxs, m.vys, m.grps, m.rules;
+                      cutoff = m.cutoff, viscosity = m.viscosity,
+                      w = m.world_w, h = m.world_h)
+        end
         m.tick += 1
+        if m.pulse > 0; m.pulse = max(0, m.pulse - 1); end
     end
 end
 
