@@ -219,10 +219,13 @@ end
     @testset "pre_render! drives autonomous substeps (idle fluid, no KeyEvent)" begin
         m = PL.create_model(n_per_group=6)
         t0 = m.tick
-        # direct pre_render + view (simulates per-frame drive without update keys)
-        if isdefined(PL, :pre_render!); PL.pre_render!(m); end
+        x0 = copy(m.xs); y0 = copy(m.ys)
+        # direct pre_render + view (simulates per-frame drive without update keys) - from fresh create_model
+        if isdefined(PL, :pre_render!); for _ in 1:3; PL.pre_render!(m); end; end
         tb = T.TestBackend(60,12); T.reset!(tb.buf); T.view(m, T.Frame(tb.buf, T.Rect(1,1,60,12),[],[]))
-        @test m.tick > t0   # tick advanced by pre_render
+        @test m.tick >= t0 + 3   # tick advanced by repeated pre_render
+        # particle state deltas when running
+        @test any(m.xs[i] != x0[i] || m.ys[i] != y0[i] for i in 1:length(m.xs))
         # require exact colored stamps from set_char path
         stamps = 0
         for r in 3:9, c in 3:35
@@ -230,5 +233,49 @@ end
             if ch !== nothing && ch in ('●','◆','▲','■'); stamps += 1; end
         end
         @test stamps > 0
+    end
+
+    @testset "pause toggle + manual step (space advances exactly once when paused)" begin
+        m = PL.create_model(n_per_group=5)
+        # start running, drive some
+        t0 = m.tick
+        x0 = copy(m.xs)
+        if isdefined(PL, :pre_render!); for _ in 1:2; PL.pre_render!(m); end; end
+        @test m.tick > t0
+        # now toggle pause via 'p' key (or direct toggle_pause!)
+        T.update!(m, T.KeyEvent('p'))
+        @test m.running == false
+        t1 = m.tick; x1 = copy(m.xs)
+        # repeated drives when paused: no change
+        if isdefined(PL, :pre_render!); for _ in 1:3; PL.pre_render!(m); end; end
+        @test m.tick == t1
+        @test all(m.xs[i] == x1[i] for i in 1:length(m.xs))
+        # manual step (space) advances exactly once
+        T.update!(m, T.KeyEvent(' '))
+        @test m.tick == t1 + 1
+        @test any(m.xs[i] != x1[i] for i in 1:length(m.xs))
+        # re-toggle to running, drive should advance
+        T.update!(m, T.KeyEvent('p'))
+        @test m.running == true
+        t2 = m.tick
+        if isdefined(PL, :pre_render!); for _ in 1:2; PL.pre_render!(m); end; end
+        @test m.tick >= t2 + 2
+    end
+
+    @testset "running/paused state visible in render (TB find/row after drive+toggle)" begin
+        m = PL.create_model(n_per_group=4)
+        # drive while running
+        if isdefined(PL, :pre_render!); for _ in 1:2; PL.pre_render!(m); end; end
+        tb, rows = pl_render_tb(m; w=70, h=14)
+        @test T.find_text(tb, "RUNNING") !== nothing || any(occursin("RUNNING", r) for r in rows if r!==nothing)
+        # toggle pause
+        T.update!(m, T.KeyEvent('p'))
+        tb2, rows2 = pl_render_tb(m; w=70, h=14)
+        @test T.find_text(tb2, "PAUSED") !== nothing || any(occursin("PAUSED", r) for r in rows2 if r!==nothing)
+        @test T.find_text(tb2, "RUNNING") === nothing || !any(occursin("RUNNING", r) for r in rows2 if r!==nothing)
+        # manual step while paused still renders paused
+        T.update!(m, T.KeyEvent(' '))
+        tb3, rows3 = pl_render_tb(m; w=70, h=14)
+        @test any(occursin("PAUSED", r) for r in rows3 if r!==nothing)
     end
 end

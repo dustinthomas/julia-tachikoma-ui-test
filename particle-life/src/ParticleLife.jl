@@ -540,7 +540,8 @@ function view(m::ParticleLifeModel, f::Frame)
     # Status bar artistic, modern
     if status_area.width >= 10
         left = [Span(" particle life ", Style(; fg=ColorRGB(0xaa,0xaa,0xcc), dim=true))]
-        right_str = "$(m.message)  tick=$(m.tick)  visc=$(round(m.viscosity,digits=2))"
+        state = m.running ? "RUNNING" : "PAUSED"
+        right_str = "$(state)  $(m.message)  tick=$(m.tick)  visc=$(round(m.viscosity,digits=2))"
         right = [Span(right_str, Style(; fg = ColorRGB(0x77,0x77,0x88), dim=true))]
         render(StatusBar(left=left, right=right), status_area, buf)
     end
