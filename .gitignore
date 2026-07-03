@@ -33,3 +33,16 @@ package-lock.json
 # Project specific
 # Add your generated data, large models, etc.
 
+
+# Agentic / Grok session artifacts (do not commit)
+agent_logs/
+implementer/
+*.tach
+LocalPreferences.toml
+qci-kanban/agent_logs/
+qci-kanban/implementer/
+qci-kanban/scripts/
+qci-kanban/LocalPreferences.toml
+
+# Julia coverage and build noise
+*.cov
