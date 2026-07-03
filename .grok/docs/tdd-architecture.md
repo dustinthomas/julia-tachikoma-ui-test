@@ -34,7 +34,7 @@ Swarm/parallel: only for independent reviewers or when orchestrator explicitly l
 ## Coverage & TDD Enforcement
 - 100% coverage target on changed logic/UI (non-negotiable except with explicit justification).
 - Validator must actually run coverage and block until met.
-- UI work: **always** exercise Tachikoma.TestBackend (render + char_at/find_text/row_text after update!/handle_key! + re-render).
+- UI work: **always** follow the Tachikoma UI Testing Methodology (`.grok/docs/tachikoma-ui-testing.md`): TestBackend render + char_at/find_text/row_text + visual_rows + re-render after update!/handle_key!. Gate tests start from raw model + explicit create flow.
 - Strict loop: tests first (failing) → minimal code → refactor only after green.
 
 ## agent_logs convention

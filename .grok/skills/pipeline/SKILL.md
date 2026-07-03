@@ -128,6 +128,7 @@ spawn_subagent with:
     1. Run typecheck if TS/JS changed.
     2. Run targeted tests for the changed files/behavior.
     3. Add or update tests that cover the new behavior.
+       For UI: follow `.grok/docs/tachikoma-ui-testing.md` (TestBackend + visual inspection after update! + re-render).
     4. For each command report: exact command, exit_code, and **concise evidence** (last 5-8 lines or the lines with errors/warnings).
        - Use full tail only for failures or when claiming "all pass".
     "No test needed" requires explicit written justification.

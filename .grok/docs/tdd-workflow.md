@@ -19,7 +19,7 @@ Use `todo_write` with clear phase ids.
 ## Step-by-Step
 
 ### 1. Setup Phase
-- Read AGENTS.md, relevant plan/design if present, and Julia/Tachikoma rules.
+- Read AGENTS.md, `.grok/docs/tachikoma-ui-testing.md` (for UI work), relevant plan/design, and Julia/Tachikoma rules.
 - Decide on feature slug for logs: e.g. `2026-06-27-move-lane-tdd`
 - `mkdir -p agent_logs/<slug>`
 - Write initial plan (scoped phases) → `agent_logs/<slug>/plan.md` or `tdd-plan.json`

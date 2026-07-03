@@ -58,3 +58,8 @@ julia --project=qci-kanban -e 'using Pkg; Pkg.test()'
 ## Branding
 
 Uses QCI navy + cyan from `branding/bg-light-top-right.png` in parent.
+
+Logo adapted from `branding/QCI Terminal.jpg` (chunky retro terminal pixel style):
+- In-app: `QCI_LOGO_ART` (and variants in `branding/qci-terminal-logos.jl`)
+- Graphic assets: `qci-logo-terminal-kanban.jpg`, `qci-logo-terminal-mark.jpg`
+- Rendered at top of every screen + login gate with cyan + white cursor accent.

@@ -8,6 +8,12 @@ It includes the full `.grok/` native personas, skills (pipeline, prime, review, 
 
 Use this for developing and testing Julia + UI/agentic coding experiments with the structured Grok multi-agent workflow (Plan → Scout → Implement/Validate → Review).
 
+**MANDATORY RULE (see .grok/rules/always-run-the-app-after-changes.md):**
+After ANY change to src/, db seeding, login gate, KanbanModel, update!/view, or tests that affect startup:
+- Always run a real app verification (julia expr exercising default DB load + gate render + create-account 'c' flow via update! + TestBackend).
+- Run the live app: `julia --project=. -e 'using QciKanban; QciKanban.kanban()'` in a terminal and confirm first-time "No users — press [c] to create account" with ZERO pre-seeded users on the LOGIN screen.
+- Use record_demo for headless runs. Save evidence. Never finish without starting/verifying the app.
+
 ## Current Quick-Win Setup
 
 - Grok automatically loads permissions and some hooks from `~/.claude/settings.local.json` and Claude plugins (compat layer is active).
@@ -98,13 +104,24 @@ Use `/tdd` for feature slices where you want ironclad red-first TDD + coverage e
 
 ## Julia + Tachikoma Specific Rules
 
+**Before any Tachikoma UI work** (implementing, reviewing, testing, or planning changes), you **must** read:
+- `.grok/docs/tachikoma-core.md`
+- `.grok/docs/tachikoma-ui-testing.md`
+- `.grok/docs/kanban-beauty-plan.md` (when the task involves Kanban board features or the Jira-inspired plan)
+
 - Always invoke Julia with `julia --project=.`.
 - Tachikoma apps follow Elm: `mutable struct X <: Model`, `should_quit`, `update!(m, KeyEvent)`, `view(m, Frame)`. Use `@tachikoma_app`.
-- **UI changes require TestBackend coverage** (see https://kahliburke.github.io/Tachikoma.jl/dev/testing). Validator will execute render + char_at / find_text / row_text / handle_key! + re-render checks.
+- **UI visual verification follows the dedicated methodology**: see `.grok/docs/tachikoma-ui-testing.md`.
+  - Always use `Tachikoma.TestBackend` + `find_text` / `row_text` / `char_at` + re-render after `update!`.
+  - Prefer the project `visual_rows(m; w, h)` helper for full-app checks.
+  - Login gate tests must start from raw `KanbanModel()` + `:memory:` + `load_users!` and verify the exact first-time "No users — press [c] to create account" screen.
+  - Modals and overlays require "no bleed" assertions.
+  - **Mandatory**: run the live app after src/, gate, or startup changes (see `.grok/rules/always-run-the-app-after-changes.md`).
+- **UI changes require TestBackend coverage** (see https://kahliburke.github.io/Tachikoma.jl/dev/testing and the methodology doc). Validator must execute render + char_at / find_text / row_text / handle_key! + re-render checks.
 - Use widgets + layouts (Block, render, split_layout, constraints) heavily.
 - Test logic directly with `update!` on models; render widgets headless.
 - Property-based tests with Supposition.jl are encouraged for layouts/unicode/edge cases.
-- Recording (`record_app`, `record_widget`) useful for demos and visual verification outside strict tests.
+- Recording (`record_app`, `record_widget`, `record_demo`) useful for demos and visual verification outside strict tests.
 - Run `julia --project=. -e 'using Pkg; Pkg.test()'` or `julia --project=. test/runtests.jl` for validation.
 - The TestBackend + scripted injection is the killer feature that makes agentic TUI development reliable and repeatable.
 

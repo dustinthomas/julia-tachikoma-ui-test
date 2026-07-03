@@ -23,7 +23,8 @@ Strict Test-Driven Development orchestrator. The lead owns the TDD state machine
 - **Coverage gate**: 100% coverage on changed logic/UI (Julia coverage + Tachikoma.TestBackend assertions). Validator emits strict gate JSON.
 - **Checkpoints & state**: After every major phase the lead writes concise checkpoint + updates state in `agent_logs/`.
 - **Evidence only**: Validator and lead only claim green after real `julia --project=.` runs + re-auditable output.
-- **UI rule**: Every interactive or view change **must** use `Tachikoma.TestBackend`, `render_*`, `char_at`/`find_text`/`row_text`, `update!`/`handle_key!`, and re-render assertions.
+- **UI rule**: Every interactive or view change **must** follow the full Tachikoma UI Testing Methodology in `.grok/docs/tachikoma-ui-testing.md`:
+  Use `TestBackend` + `find_text`/`row_text`/`char_at` + `visual_rows` + re-render after `update!`. Gate tests start from raw model. No-bleed checks required for modals.
 
 ## Roles (use these personas)
 - `tdd-orchestrator` (grok-build): You. Owns goal, TDD loop (Red → Green → gate), `todo_write`, checkpoint writing, final summary. Delegates only.

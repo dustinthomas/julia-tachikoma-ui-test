@@ -17,7 +17,7 @@ The `tdd-orchestrator` delegates work using three core actions. These are the on
 
 **Rules**:
 - Never any production code.
-- UI behavior → mandatory `Tachikoma.TestBackend` + inspection + event simulation.
+- UI behavior → mandatory `Tachikoma.TestBackend` + inspection (`find_text`/`row_text`/`char_at`) + `update!` + re-render. Follow full details in `.grok/docs/tachikoma-ui-testing.md` (raw model for gates, no-bleed checks, visual_rows, etc.).
 - Tests must be the first to go green when the minimal correct change lands.
 - Orchestrator will apply, run to confirm red, and checkpoint.
 

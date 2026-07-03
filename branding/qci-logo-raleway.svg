@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="160" viewBox="0 0 400 160" fill="none">
+  <title>QCI — Raleway Style</title>
+  <desc>Stylized QCI logo in the elegant geometric sans-serif style of Raleway font. Clean letterforms with proper Q tail.</desc>
+
+  <!-- Background subtle (optional, remove for transparent) -->
+  <!-- <rect width="400" height="160" fill="#F0F4F8"/> -->
+
+  <g id="qci-raleway">
+    <!-- Q -->
+    <!-- Bowl (circle/oval) -->
+    <circle cx="85" cy="80" r="52" stroke="#1E204B" stroke-width="18" stroke-linecap="round"/>
+    <!-- Inner for weight -->
+    <circle cx="85" cy="80" r="38" stroke="#1E204B" stroke-width="8" stroke-linecap="round"/>
+    <!-- Classic Raleway diagonal tail -->
+    <line x1="120" y1="105" x2="155" y2="145" stroke="#1E204B" stroke-width="16" stroke-linecap="round"/>
+    <!-- Tail accent / thickness -->
+    <line x1="123" y1="108" x2="158" y2="148" stroke="#1E204B" stroke-width="7" stroke-linecap="round"/>
+
+    <!-- C -->
+    <path d="M 175 38
+             A 52 52 0 1 0 175 122" 
+          stroke="#1E204B" stroke-width="18" stroke-linecap="butt"/>
+    <path d="M 182 50
+             A 38 38 0 1 0 182 110" 
+          stroke="#1E204B" stroke-width="8" stroke-linecap="butt"/>
+
+    <!-- I -->
+    <line x1="265" y1="28" x2="265" y2="132" stroke="#1E204B" stroke-width="18" stroke-linecap="round"/>
+    <!-- Subtle weight -->
+    <line x1="272" y1="28" x2="272" y2="132" stroke="#1E204B" stroke-width="8" stroke-linecap="round"/>
+    <!-- Small top and bottom presence (Raleway display feel) -->
+    <line x1="255" y1="28" x2="275" y2="28" stroke="#1E204B" stroke-width="6" stroke-linecap="round"/>
+    <line x1="255" y1="132" x2="275" y2="132" stroke="#1E204B" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <!-- Alternative cyan variant (uncomment or duplicate group) -->
+  <!--
+  <g id="qci-raleway-cyan" transform="translate(0,0)">
+    ... same paths but stroke="#00BCD4" and on dark bg
+  </g>
+  -->
+</svg>

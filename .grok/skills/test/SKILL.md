@@ -13,9 +13,10 @@ Execute tests and static checks with full evidence.
 ## Process
 1. Detect changed areas (use `git diff --name-only` or context).
 2. For Julia: run `julia --project=. -e 'using Pkg; Pkg.test()' ` (or targeted).
-3. Identify and run **targeted** tests for the modified code. Prefer tests that use Tachikoma.TestBackend.
-4. If no targeted tests exist or change is new (especially UI/view/update!), write or update tests that cover the behavior using TestBackend + handle_key! + direct update!.
-5. Run full relevant suite only when requested.
+3. **Always run the app** (see .grok/rules/always-run-the-app-after-changes.md) for startup/login/UI changes: use a julia expr exercising the real kanban() path or default DB + gate + create flow (or QciKanban.record_demo). When possible run the live `julia --project=. -e 'using QciKanban; QciKanban.kanban()'` in a terminal to see the screen.
+4. Identify and run **targeted** tests for the modified code. Prefer tests that use Tachikoma.TestBackend.
+5. If no targeted tests exist or change is new (especially UI/view/update!), write or update tests that cover the behavior using TestBackend + handle_key! + direct update!.
+6. Run full relevant suite only when requested.
 6. For every command executed, report:
    - The exact command
    - exit_code
@@ -34,15 +35,33 @@ Execute tests and static checks with full evidence.
 - With specific testset filter (Julia 1.10+): `julia --project=. -e 'using Pkg; Pkg.test(; test_args=["--testset=TextInput"])' `
 - Check package quality (add Aqua.jl later): `julia --project=. -e 'using Aqua, TachikomaUITest; Aqua.test_all(TachikomaUITest)'`
 
-## Tachikoma Testing Patterns (MANDATORY for UI work)
-Use the excellent headless support:
-- `tb = Tachikoma.TestBackend(w, h); render_widget!(tb, widget)`
-- Inspect: `char_at(tb, x, y)`, `row_text(tb, y)`, `find_text(tb, "label")`, `style_at(...)`
-- Simulate: `handle_key!(widget, KeyEvent(:down))` then re-render and assert
-- App logic: direct `update!(model, KeyEvent(...))` then check fields + view
-- Property tests with Supposition.jl for robustness (layouts, unicode, empty cases)
+## Tachikoma UI Testing Methodology (MANDATORY for all UI work)
 
-See test/test_tachikoma_basics.jl for patterns and the official docs: https://kahliburke.github.io/Tachikoma.jl/dev/testing
+Follow the full methodology in `.grok/docs/tachikoma-ui-testing.md`.
+
+Core rules:
+- **Primary verification**: `TestBackend(w, h)` + render (via `view` or `render_widget!`) + re-render **after every** `update!` / `handle_key!`.
+- Inspection: `find_text(tb, "text")`, `row_text(tb, n)`, `char_at(tb, x, y)`.
+- Full-app models: use (or replicate) the `visual_rows(m; w=80, h=20)` helper that renders the model and returns all row strings.
+- Login/first-time gate: always drive from raw `KanbanModel() + :memory: + load_users!`. Assert the exact "No users — press [c] to create account" prompt with zero users.
+- Overlays/modals: require "no bleed" checks (board content absent while modal labels are present).
+- Always run live app verification for gate/startup changes (see always-run-the-app-after-changes.md).
+- Supplement with `record_demo` / `record_app` for human visual evidence when appropriate.
+
+Minimal example pattern:
+```julia
+tb = T.TestBackend(80, 18)
+T.reset!(tb.buf)
+T.view(m, T.Frame(...))
+@test T.find_text(tb, "EXPECTED") !== nothing
+T.update!(m, T.KeyEvent('j'))
+T.reset!(tb.buf); T.view(m, ...)
+@test ...
+```
+
+See also:
+- qci-kanban tests (runtests.jl for `visual_rows` + gate suites, test_board_render.jl, test_modal_move.jl)
+- Official docs: https://kahliburke.github.io/Tachikoma.jl/dev/testing
 
 ## Report Structure
 ## Validation Report
