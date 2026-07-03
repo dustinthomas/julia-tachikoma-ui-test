@@ -70,8 +70,8 @@ const DB = QciKanban.DB
     @testset "seed_demo creates sample data only once" begin
         db = DB.open_db(":memory:")
         DB.seed_demo!(db)
-        users = DB.list_users(db)
-        @test length(users) >= 2
+        # users no longer seeded (first-time create-account); issues are
+        @test length(DB.list_users(db)) == 0
         all_iss = DB.list_issues(db)
         @test length(all_iss) >= 5
 
@@ -92,7 +92,10 @@ const DB = QciKanban.DB
 
     @testset "pure unit: wipe_test_users! removes only seeds" begin
         db = DB.open_db(":memory:")
-        DB.seed_demo!(db)
+        # explicitly create the test seed names (no longer from seed_demo) to exercise wipe
+        DB.create_user!(db, "Alex Rivera")
+        DB.create_user!(db, "Sam Chen")
+        DB.create_user!(db, "You")
         pre = [u["name"] for u in DB.list_users(db)]
         @test "Alex Rivera" in pre
         DB.wipe_test_users!(db)

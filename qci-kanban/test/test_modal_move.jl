@@ -12,7 +12,9 @@ const BOARD_COLUMNS = QciKanban.BOARD_COLUMNS
         m = KanbanModel()
         m.db_path = ":memory:"
         QciKanban.load_users!(m)
-        T.update!(m, T.KeyEvent(:enter))  # real login gate path
+        T.update!(m, T.KeyEvent('c'))
+        for ch in collect("ModalTestUser"); T.update!(m, T.KeyEvent(ch)); end
+        T.update!(m, T.KeyEvent(:enter))  # real create+login gate path
         m
     end
 

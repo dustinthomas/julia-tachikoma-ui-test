@@ -207,38 +207,33 @@ function generate_key(db::SQLite.DB)::String
 end
 
 function seed_demo!(db::SQLite.DB)
-    # Only seed if no users and no issues
-    u = list_users(db)
+    # Seed demo *issues* (no users) whenever no issues exist. User seeding removed so first run requires explicit create-account.
+    # assignee_id left nothing for all demo cards (assign after first login).
     iss = list_issues(db)
-    if !isempty(u) || !isempty(iss)
+    if !isempty(iss)
         return
     end
-
-    # Users
-    u1 = create_user!(db, "Alex Rivera")
-    u2 = create_user!(db, "Sam Chen")
-    u3 = create_user!(db, "You")
 
     today = Dates.today()
     tomorrow = string(today + Day(1))
     soon = string(today + Day(3))
     past = string(today - Day(2))
 
-    # Issues — spread across columns with positions
-    create_issue!(db; title="Set up project board", status="Backlog", priority="High", assignee_id=u1, due_date=soon, position=0)
-    create_issue!(db; title="Design login screen", status="Backlog", priority="Medium", assignee_id=u2, due_date=tomorrow, position=1)
+    # Issues — spread across columns with positions (assignee_id=nothing until user created+assigns)
+    create_issue!(db; title="Set up project board", status="Backlog", priority="High", due_date=soon, position=0)
+    create_issue!(db; title="Design login screen", status="Backlog", priority="Medium", due_date=tomorrow, position=1)
 
-    create_issue!(db; title="Implement card model", status="To Do", priority="High", assignee_id=u1, due_date=tomorrow, position=0)
-    create_issue!(db; title="Add QCI colors + logo", status="To Do", priority="Medium", assignee_id=u3, position=1)
+    create_issue!(db; title="Implement card model", status="To Do", priority="High", due_date=tomorrow, position=0)
+    create_issue!(db; title="Add QCI colors + logo", status="To Do", priority="Medium", position=1)
 
-    create_issue!(db; title="Board column rendering", status="In Progress", priority="High", assignee_id=u3, due_date=tomorrow, position=0)
-    create_issue!(db; title="Keyboard nav between columns", status="In Progress", priority="Medium", assignee_id=u1, position=1)
+    create_issue!(db; title="Board column rendering", status="In Progress", priority="High", due_date=tomorrow, position=0)
+    create_issue!(db; title="Keyboard nav between columns", status="In Progress", priority="Medium", position=1)
 
-    create_issue!(db; title="Calendar view + due marks", status="Review", priority="Medium", assignee_id=u2, due_date=soon, position=0)
+    create_issue!(db; title="Calendar view + due marks", status="Review", priority="Medium", due_date=soon, position=0)
     create_issue!(db; title="Basic issue detail modal", status="Review", priority="Low", position=1)
 
-    create_issue!(db; title="Initial DB schema", status="Done", priority="High", assignee_id=u3, due_date=past, position=0)
-    create_issue!(db; title="Scaffold QciKanban package", status="Done", priority="High", assignee_id=u3, due_date=past, position=1)
+    create_issue!(db; title="Initial DB schema", status="Done", priority="High", due_date=past, position=0)
+    create_issue!(db; title="Scaffold QciKanban package", status="Done", priority="High", due_date=past, position=1)
 end
 
 function wipe_test_users!(db::SQLite.DB)

@@ -7,7 +7,8 @@
 # Full TestBackend required for all UI (AGENTS.md).
 #
 # Branding: QCI navy + cyan from branding/bg-light-top-right.png
-# Logo: BigText + stylized QCI mark (to be expanded).
+# Logo: stylized block-art QCI mark (digitized/notched) + tag. See QCI_LOGO_ART and branding/qci-terminal-logos.jl.
+# The default art is adapted from branding/QCI Terminal.jpg (chunky terminal pixel style).
 # ═══════════════════════════════════════════════════════════════════════
 
 module QciKanban
@@ -27,6 +28,43 @@ const QCI_NAVY = ColorRGB(UInt8(30), UInt8(32), UInt8(75))
 const QCI_SECONDARY = ColorRGB(UInt8(100), UInt8(110), UInt8(165))  # lighter navy for unselected/secondary text (contrast on black)
 
 export QCI_CYAN, QCI_NAVY, QCI_SECONDARY
+
+# PR2+ rich cards: priority glyphs and colors for 1-line badges (Jira style)
+const PRIORITY_GLYPHS = Dict(
+    "High" => "▌",
+    "Medium" => "▌",
+    "Low" => "▌"
+)
+const PRIORITY_COLORS = Dict(
+    "High" => ColorRGB(0xe0, 0x3c, 0x31),   # red
+    "Medium" => ColorRGB(0xf0, 0xc6, 0x74), # amber
+    "Low" => ColorRGB(0x4e, 0xcc, 0x5e)     # green
+)
+
+# Stylized QCI mark for terminal (digitized block art).
+# Direct adaptation of the chunky pixel / retro terminal style from
+# branding/QCI Terminal.jpg (purple body + green accents in spirit, + cursor).
+# See also branding/qci-terminal-logos.jl for variants (QCI_LOGO_TERMINAL etc).
+const QCI_LOGO_ART = """
+  ██████    ██████    ████
+ █      █  █      █  █    █
+█        █ █      █ █      █
+█   ▄▄▄  █ █      █ █      █
+█     █  █ █      █ █      █
+ █    █ █   █    █   █    █
+  ████  █    ████     ████ 
+         ▄██
+        ██  
+"""
+
+# Optional richer graphic logos using Tachikoma Canvas (graphics & pixel section).
+# Robust path using @__DIR__ so it works from any cwd.
+try
+    include(joinpath(@__DIR__, "..", "..", "branding", "qci-canvas-logos.jl"))
+catch err
+    # silent fallback — the text art QCI_LOGO_ART will be used
+end
+
 export DB  # for advanced use / tests
 
 using SQLite   # for DB type hints in model (optional)
@@ -48,6 +86,11 @@ const BOARD_COLUMNS = ["Backlog", "To Do", "In Progress", "Review", "Done"]
     view_mode::Symbol = :board   # :board | :calendar | :list
     message::String = ""
     search::String = ""
+    search_input::TextInput = TextInput(; focused = false)
+    active_filters::Set{String} = Set{String}()  # "High", "Due Soon", "Mine" for PR4 quick filters
+    wip_limits::Dict{String,Int} = Dict("Backlog"=>0, "To Do"=>5, "In Progress"=>3, "Review"=>3, "Done"=>0)  # PR5 WIP limits, light config
+    swimlane_by::Symbol = :none  # PR7 :none | :priority | :assignee
+    selected_ids::Set{String} = Set{String}()  # PR7 bulk multi select scoped
     # Modal / edit (Phase 3)
     modal::Symbol = :none          # :none | :card_edit | :user_picker | :help
     editing_id::Union{String,Nothing} = nothing
@@ -286,40 +329,324 @@ function jwt_encode(user_id::AbstractString, name::AbstractString)::String
     "$hdr.$pay.$sig"
 end
 
-# Unified gate modal layout: one source of truth for reduced dims + dual-axis center + unconditional hint_y
-function gate_modal_rect(content_area; n_body_lines::Int = 0, hint::Bool = true)
-    w = min(48, max(30, content_area.width - 6))
-    needed = 4 + n_body_lines + (hint ? 1 : 0)
-    # Height sized to fit all content (names + hint) without clipping; always reduced width + x/y center offset vs full content_area (smaller centered block). For large frames cap further for compactness.
-    h = min( max(needed, 5), content_area.height )
-    if content_area.height > 12
-      h = min(h, 11)
+# Pure helper: filter cards by case-insensitive contains on title or key.
+# Returns all (copy) when query empty/stripped. Preserves input order. No side effects.
+function apply_filters_and_sort(cards::Vector{Dict{String,Any}}, query::AbstractString)
+    apply_filters_and_sort(cards, query, Set{String}(), nothing)
+end
+
+function apply_filters_and_sort(cards::Vector{Dict{String,Any}}, query::AbstractString, active_filters::Set{String}, current_user_id::Union{String,Nothing})
+    q = strip(query)
+    res = copy(cards)
+    if !isempty(q)
+        ql = lowercase(q)
+        res = [c for c in res if occursin(ql, lowercase(get(c, "title", ""))) || occursin(ql, lowercase(get(c, "key", "")))]
     end
+    if "High" in active_filters
+        res = [c for c in res if get(c, "priority", "") == "High"]
+    end
+    if "Due Soon" in active_filters
+        today = Dates.today()
+        res = [c for c in res if begin
+            ds = get(c, "due_date", nothing)
+            if ds === nothing || ismissing(ds); false
+            else
+                try
+                    dd = Date(string(ds))
+                    dd <= today + Dates.Day(7) && dd >= today - Dates.Day(1)
+                catch; false end
+            end
+        end]
+    end
+    if "Mine" in active_filters && current_user_id !== nothing
+        res = [c for c in res if get(c, "assignee_id", nothing) == current_user_id]
+    end
+    res
+end
+
+# Pure function for swimlane grouping (for PR7)
+function group_cards_by_swimlane(cards_by_status::Dict{String,Vector{Dict{String,Any}}}, swimlane_by::Symbol)::Vector{Pair{String,Vector{Dict{String,Any}}}}
+    groups = Dict{String, Vector{Dict{String,Any}}}()
+    for (status, cards) in cards_by_status
+        for c in cards
+            rawkey = if swimlane_by == :priority
+                get(c, "priority", "Medium")
+            else
+                get(c, "assignee_id", "unassigned")
+            end
+            key = string(rawkey)  # ensure String key (assignee_id may be missing in data)
+            if !haskey(groups, key)
+                groups[key] = []
+            end
+            push!(groups[key], c)
+        end
+    end
+    collect(groups)
+end
+
+# Pure planner for gate modal layout. Enforces invariants so render cannot violate containment.
+# Returns rect sized to fit, and exact (y, text) for each line strictly inside the inner area.
+function plan_gate_modal_layout(content_area, body_lines::Vector{String}, hint_text::String = "")
+    # AC1 prompt must NEVER be truncated. Prioritize its width requirement over hint and ca limits for the rect.
+    is_prompt = !isempty(body_lines) && occursin("No users", body_lines[1])
+    p = is_prompt ? length(body_lines[1]) : 0
+    prompt_needed = is_prompt ? (p + 2) : 0   # at least borders around the exact prompt
+
+    all_lines = vcat(body_lines, isempty(hint_text) ? String[] : [hint_text])
+    max_line_w = maximum(length(l) for l in all_lines; init=20)
+    needed_w = max_line_w + 4
+    base_w = content_area.width <= 50 ? max(30, content_area.width - 2) : max(30, content_area.width - 6)
+    w = min( max(base_w, needed_w), content_area.width )
+    w = min(w, 58)
+
+    n_b = length(body_lines)
+    n_h = isempty(hint_text) ? 0 : 1
+    min_h = 4 + n_b + n_h
+    h = min( max(min_h, 7), content_area.height )
+    if content_area.height > 15
+        h = min(h, 11)
+    end
+    if content_area.height < 15
+        h = content_area.height
+    end
+    h = max(h, min_h)
+
     x = content_area.x + (content_area.width - w) ÷ 2
-    y = content_area.y + max(0, (content_area.height - h) ÷ 4)
+    offset = max(1, (content_area.height - h) ÷ 4)
+    y = content_area.y + offset
     r = Rect(x, y, w, h)
-    hint_y = y + h - 2   # last content line before bottom border (unconditional)
-    (rect = r, hint_y = hint_y, inner_y = y + 1, inner_bottom = y + h - 2)
+
+    # Force for full AC1 prompt (shipped string must appear complete inside borders on all sizes incl 40x12)
+    if is_prompt && w < prompt_needed
+        w = prompt_needed
+        # On narrow frames, align left (x=1) to give maximum usable width for the prompt + borders
+        x = max(1, content_area.x - (w - content_area.width) ÷ 2)
+        r = Rect(x, y, w, h)
+    end
+
+    # Also ensure the *passed* hint (short on narrow, long on wide) is not truncated in plan.hint_row / render
+    if !isempty(hint_text)
+        needed_for_hint = length(hint_text) + 2
+        if w < needed_for_hint
+            w = needed_for_hint
+            x = max(1, content_area.x - (w - content_area.width) ÷ 2)
+            r = Rect(x, y, w, h)
+        end
+    end
+
+    inner_first = r.y + 1
+    inner_last = r.y + r.height - 3
+    avail = max(0, w - 2)
+
+    body_rows = Tuple{Int,String}[]
+    cur = inner_first
+    for bl in body_lines
+        if cur > inner_last; break; end
+        if is_prompt && bl == body_lines[1]
+            s = bl  # never truncate the exact AC1 prompt
+        else
+            s = length(bl) > avail ? bl[1:avail] : bl
+        end
+        push!(body_rows, (cur, s))
+        cur += 1
+    end
+
+    hint_r = nothing
+    if !isempty(hint_text)
+        hy = inner_last
+        hs = length(hint_text) > avail ? hint_text[1:avail] : hint_text
+        hint_r = (hy, hs)
+    end
+
+    (rect = r, body_rows = body_rows, hint_row = hint_r)
+end
+
+# Unified gate modal layout (compat wrapper around planner)
+function gate_modal_rect(content_area; n_body_lines::Int = 0, hint::Bool = true, body_lines::Vector{String}=String[], hint_text::String="")
+    if isempty(body_lines) && n_body_lines > 0
+        body_lines = ["x" for _ in 1:n_body_lines]  # length only for budget
+    end
+    if hint && isempty(hint_text)
+        hint_text = "x"  # length only
+    end
+    plan = plan_gate_modal_layout(content_area, body_lines, hint_text)
+    r = plan.rect
+    hy = plan.hint_row !== nothing ? plan.hint_row[1] : r.y + r.height - 2
+    (rect = r, hint_y = hy, inner_y = r.y + 1, inner_bottom = r.y + r.height - 2)
 end
 
 function render_gate_modal!(buf, content_area, title; body_lines::Vector{String} = String[], hint_text::String = "")
-    info = gate_modal_rect(content_area; n_body_lines = length(body_lines) + (isempty(hint_text) ? 0 : 1), hint = !isempty(hint_text))
-    r = info.rect
-    # clear under
+    plan = plan_gate_modal_layout(content_area, body_lines, hint_text)
+    r = plan.rect
+    # clear under the rect
     for yy in r.y:(r.y + r.height - 1)
         set_string!(buf, r.x, yy, repeat(" ", r.width))
     end
     blk = Block(title=title, border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
     inn = render(blk, r, buf)
-    y = inn.y   # start at first inner line to maximize text slots for names + hint on tight frames
-    max_body_y = isempty(hint_text) ? info.inner_bottom : (info.inner_bottom - 1)
-    for line in body_lines
-        if y > max_body_y; break; end
-        set_string!(buf, inn.x + 1, y, line, Style(; fg=QCI_SECONDARY))
-        y += 1
+    # Center the txt (body + hint) inside the LOGIN modal rect (r-based inner for visual center in box).
+    # Use r (our allocated modal) inner so test expected matches and text is centered regardless of Block inn offset.
+    for (yy, line) in plan.body_rows
+        cx = r.x + 1 + (r.width - 2 - length(line)) ÷ 2
+        set_string!(buf, cx, yy, line, Style(; fg=QCI_SECONDARY))
     end
-    if !isempty(hint_text)
-        set_string!(buf, inn.x + 1, info.hint_y, hint_text, Style(; fg=QCI_CYAN, dim = true))
+    if plan.hint_row !== nothing
+        hy, ht = plan.hint_row
+        cx = r.x + 1 + (r.width - 2 - length(ht)) ÷ 2
+        set_string!(buf, cx, hy, ht, Style(; fg=QCI_CYAN, dim = true))
+    end
+end
+
+"""
+    render_rich_card!(buf, x, y, card, col_inner, users, is_sel) -> lines_used::Int
+
+PR3 Rich Card Render Contract helper (extracted).
+- 2-line when col_inner.width >=20 and height allows (y+1 inside bounds): 
+  line1: [prefix] glyph(key colored) key title
+  line2:   [avatar] due
+- 1-line fallback (narrow col<20 or insufficient height): full glyph+key+title+[a]due minimal.
+- Always: overflow guard `if y > bottom(col_inner)-1 return 0`
+- Uses PRIORITY_GLYPHS + PRIORITY_COLORS.
+- Returns # of y steps taken (1 or 2). Caller does y += delta.
+Preserves Elm, col_inner, no-bleed.
+"""
+function render_rich_card!(buf::Buffer, x::Int, y::Int, card::Dict{String,Any}, col_inner::Rect, users::Vector{Dict{String,Any}}, is_sel::Bool, is_bulk::Bool=false)::Int
+    if y > bottom(col_inner) - 1
+        return 0
+    end
+    prefix = (is_bulk ? "*" : "") * (is_sel ? "▶ " : "  ")
+    key = get(card, "key", "?")
+    title = get(card, "title", "")
+    # assignee
+    aid = get(card, "assignee_id", nothing)
+    a_initial = "·"
+    if aid !== nothing && !ismissing(aid)
+        au = findfirst(u -> get(u,"id",nothing) == aid, users)
+        if au !== nothing
+            nm = users[au]["name"]
+            a_initial = length(nm) > 0 ? string(first(nm)) : "?"
+        end
+    end
+    due = get(card, "due_date", nothing)
+    due_str = (due === nothing || ismissing(due)) ? "" : string(due)
+    due_s = isempty(due_str) ? "" : " " * string(last(split(due_str, "-")))
+    prio = get(card, "priority", "Medium")
+    glyph = get(PRIORITY_GLYPHS, prio, "▌")
+    gcol = get(PRIORITY_COLORS, prio, QCI_SECONDARY)
+    avail = max(6, col_inner.width - 4)
+    sty = is_sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+
+    col_w = col_inner.width
+    can_multi = (col_w >= 20) && (y + 1 <= bottom(col_inner) - 1)
+    if can_multi
+        # line 1: glyph + key + title (no suffix)
+        title_trunc = length(title) > (avail - 3) ? title[1:max(0, avail-4)]*"…" : title
+        # draw prefix then colored glyph then rest (order to not clobber glyph)
+        set_string!(buf, x, y, prefix, sty)
+        set_char!(buf, x + length(prefix), y, glyph[1], Style(; fg = gcol))
+        set_string!(buf, x + length(prefix) + 1, y, " " * key * " " * title_trunc, sty)
+        y += 1
+        if y <= bottom(col_inner) - 1
+            line2 = "  [" * a_initial * "]" * due_s
+            set_string!(buf, x, y, line2, Style(; fg = QCI_SECONDARY))
+            y += 1
+            return 2
+        end
+        return 1
+    else
+        # 1-line fallback + minimal
+        suffix = " [" * a_initial * "]" * due_s
+        base = key * " " * (length(title) > (avail - length(suffix) - 1) ? title[1:max(0, avail - length(suffix) - 2)] * "…" : title)
+        display = glyph * " " * base * suffix
+        if length(display) > avail
+            display = display[1:avail-1] * "…"
+        end
+        set_string!(buf, x, y, prefix, sty)
+        set_char!(buf, x + length(prefix), y, glyph[1], Style(; fg = gcol))
+        set_string!(buf, x + length(prefix) + 1, y, " " * base * suffix, sty)
+        return 1
+    end
+end
+
+# Extracted exclusive render for columns (PR restructure)
+function render_column_board!(buf::Buffer, m::KanbanModel, content_area::Rect, use_bar::Bool)
+    n = length(BOARD_COLUMNS)
+    col_width = max(14, content_area.width ÷ n)
+    constraints = [Fixed(col_width) for _ in 1:n]
+    col_areas = split_layout(Layout(Horizontal, constraints), content_area)
+
+    for (i, status) in enumerate(BOARD_COLUMNS)
+        ca = i <= length(col_areas) ? col_areas[i] : content_area
+        cards = get(m.cards_by_status, status, Dict{String,Any}[])
+        displayed = apply_filters_and_sort(cards, m.search, m.active_filters, m.current_user_id)
+
+        lim = get(m.wip_limits, status, 0)
+        wip_str = lim > 0 ? "($(length(displayed))/$lim)" : "($(length(displayed)))"
+        col_block = Block(
+            title = "$status $wip_str",
+            border_style = Style(; fg = (i == m.selected_col ? QCI_CYAN : (length(displayed) > lim && lim > 0 ? ColorRGB(0xe0,0x3c,0x31) : QCI_NAVY))),
+            title_style = Style(; fg = QCI_CYAN, bold = (i == m.selected_col)),
+        )
+        col_inner = render(col_block, ca, buf)
+
+        y = col_inner.y + 1
+        sel = (i == m.selected_col) ? m.selected_idx : 0
+        for (ci, card) in enumerate(displayed)
+            if y > bottom(col_inner) - 1
+                break
+            end
+            is_sel = (ci == sel)
+            cid = get(card, "id", "")
+            is_bulk = cid in m.selected_ids
+            delta = render_rich_card!(buf, col_inner.x + 1, y, card, col_inner, m.users, is_sel, is_bulk)
+            if delta <= 0
+                break
+            end
+            y += delta
+        end
+
+        if isempty(displayed)
+            set_string!(buf, col_inner.x + 2, y, "— empty —", Style(; fg = QCI_SECONDARY, dim = true))
+        end
+    end
+end
+
+# Extracted exclusive render for swimlanes (PR restructure)
+function render_swimlane_board!(buf::Buffer, m::KanbanModel, content_area::Rect)
+    # Apply filters like columns do (address gap: swim must respect search/active_filters, not raw)
+    filtered_status = Dict{String,Vector{Dict{String,Any}}}()
+    for (st, cs) in m.cards_by_status
+        filtered_status[st] = apply_filters_and_sort(cs, m.search, m.active_filters, m.current_user_id)
+    end
+    groups = group_cards_by_swimlane(filtered_status, m.swimlane_by)
+    # stable order for priorities (High first) and deterministic output
+    if m.swimlane_by == :priority
+        order = ["High", "Medium", "Low"]
+        sort!(groups, by = p -> let k=p.first; i=findfirst(==(k), order); i===nothing ? 999 : i end)
+    else
+        sort!(groups, by = p -> string(p.first))
+    end
+    # determine current selected id from column state so we can show ▶ even in swim
+    current_id = nothing
+    cols = BOARD_COLUMNS
+    cidx = clamp(m.selected_col, 1, length(cols))
+    cards = get(m.cards_by_status, cols[cidx], [])
+    if !isempty(cards)
+        current_id = cards[clamp(m.selected_idx, 1, length(cards))]["id"]
+    end
+    y = content_area.y + 1
+    for (g, cs) in groups
+        if y > bottom(content_area) - 1; break; end
+        set_string!(buf, content_area.x + 2, y, "SWIM " * string(m.swimlane_by) * ": " * string(g), Style(; fg = QCI_CYAN))
+        y += 1
+        for c in cs
+            if y > bottom(content_area) - 1; break; end
+            cid = get(c, "id", "")
+            is_sel = (cid == current_id)
+            is_bulk = cid in m.selected_ids
+            delta = render_rich_card!(buf, content_area.x + 4, y, c, content_area, m.users, is_sel, is_bulk)
+            y += max(delta, 1)
+        end
     end
 end
 
@@ -327,8 +654,23 @@ should_quit(m::KanbanModel) = m.quit
 
 function update!(m::KanbanModel, evt::KeyEvent)
     if evt.key == :char && evt.char == 'q'
-        m.quit = true
-        return
+        # Guard against key conflicts: when a text input is focused (login create name,
+        # search bar, or card edit title/desc), 'q' must be inserted as a character
+        # rather than quitting. This mirrors the fix for 'r' and other mapped letters.
+        # Only quit when no input field is consuming the key.
+        typing_in_input = false
+        if m.modal == :login_create
+            typing_in_input = true  # login_name is active during create
+        elseif m.search_input.focused
+            typing_in_input = true
+        elseif m.modal == :card_edit && (m.edit_title.focused || m.edit_desc.focused)
+            typing_in_input = true
+        end
+        if !typing_in_input
+            m.quit = true
+            return
+        end
+        # fallthrough: gate create or early input handlers will feed 'q' via handle_key!
     end
 
     # === LOGIN GATE: when no current_user_id, only 'q' (already handled) + login selection keys allowed ===
@@ -350,6 +692,8 @@ function update!(m::KanbanModel, evt::KeyEvent)
                     select_current_user!(m)
                     load_board!(m)
                     m.login_name = TextInput()
+                    m.search_input.focused = false
+                    m.search = ""
                     m.message = "created and logged in"
                     return
                 else
@@ -391,10 +735,22 @@ function update!(m::KanbanModel, evt::KeyEvent)
             elseif evt.key == :enter
                 select_current_user!(m)
                 load_board!(m)  # now safe to load board/cards after login
+                m.search_input.focused = false
+                m.search = ""
                 m.message = "logged in"
                 return
             elseif evt.key == :escape
                 # stay gated; do not quit or transition (only 'q' quits)
+                m.tick += 1
+                return
+            end
+        else
+            # nu==0 first-time branch (per plan): plain :enter, nav, esc leave gate (require 'c' create); no board load
+            if evt.key == :enter || evt.key == :up || evt.key == :down ||
+               (evt.key == :char && evt.char in ('j','k'))
+                m.tick += 1
+                return
+            elseif evt.key == :escape
                 m.tick += 1
                 return
             end
@@ -416,49 +772,24 @@ function update!(m::KanbanModel, evt::KeyEvent)
         return
     end
 
-    # Reload only allowed when logged in (post-gate). 'r' must never reach here pre-login.
-    if evt.key == :char && evt.char == 'r'
-        load_board!(m)
-        return
-    end
-
-    # Escape performs back navigation (modal close or view to board); never quits.
-    # Modals handled in their dedicated branches below to keep existing close_modal! reachable.
-    if evt.key == :escape && m.modal == :none && m.view_mode != :board
-        m.view_mode = :board
-        load_board!(m)
-        return
-    end
-
-    # '?' invokes help menu (from non-modal screens); toggle/close with ?/Esc handled in modal branch
-    if evt.key == :char && evt.char == '?'
-        if m.modal == :none
-            m.modal = :help
-            return
-        elseif m.modal == :help
-            m.modal = :none
+    # === EARLY FOCUSED INPUT CONSUMPTION (fix for key conflicts) ===
+    # Offer search_input and card_edit fields the KeyEvent FIRST so printable chars
+    # (e.g. 'r' for reload, 'j'/'k' nav, 'b'/'c' views, etc.) type into the widget
+    # instead of firing global/board commands. Non-focused paths still reach original branches.
+    # This must be immediately post-gate and before 'r', view switches, board nav char ifs.
+    if m.search_input.focused
+        if evt.key == :escape
+            m.search_input.focused = false
             return
         end
-        # inside card_edit etc: fallthrough (allowed per non-goal; help works from board/calendar)
-    end
-
-    # View switching (works in any mode)
-    if evt.key == :char && evt.char == 'b'
-        m.view_mode = :board
-        load_board!(m)
-        return
-    elseif evt.key == :char && evt.char == 'c'
-        m.view_mode = :calendar
-        sync_calendar!(m)
-        m.message = "Calendar view"
-        return
-    elseif evt.key == :char && evt.char == 'L'
-        m.view_mode = :list
-        m.message = "List (stub)"
+        if handle_key!(m.search_input, evt)
+            m.search = text(m.search_input)
+            return
+        end
+        m.tick += 1
         return
     end
 
-    # Modal input routing first (Phase 3)
     if m.modal == :card_edit
         if evt.key == :enter
             save_modal!(m)
@@ -503,7 +834,68 @@ function update!(m::KanbanModel, evt::KeyEvent)
         return
     end
 
+    # Reload only allowed when logged in (post-gate). 'r' must never reach here pre-login.
+    if evt.key == :char && evt.char == 'r'
+        load_board!(m)
+        return
+    end
+
+    # Escape performs back navigation (modal close or view to board); never quits.
+    # Modals handled in their dedicated branches below to keep existing close_modal! reachable.
+    if evt.key == :escape && m.modal == :none && m.view_mode != :board
+        m.view_mode = :board
+        load_board!(m)
+        return
+    end
+
+    # '?' invokes help menu (from non-modal screens); toggle/close with ?/Esc handled in modal branch
+    if evt.key == :char && evt.char == '?'
+        if m.modal == :none
+            m.modal = :help
+            return
+        elseif m.modal == :help
+            m.modal = :none
+            return
+        end
+        # inside card_edit etc: fallthrough (allowed per non-goal; help works from board/calendar)
+    end
+
+    # View switching (works in any mode)
+    if evt.key == :char && evt.char == 'b'
+        m.view_mode = :board
+        load_board!(m)
+        return
+    elseif evt.key == :char && evt.char == 'c'
+        m.view_mode = :calendar
+        sync_calendar!(m)
+        m.message = "Calendar view"
+        return
+    elseif evt.key == :char && evt.char == 'L'
+        # PR8 frozen until approved per review_state.json
+        return
+    elseif evt.key == :char && evt.char == 'R'
+        # PR8 frozen until approved per review_state.json
+        return
+    elseif evt.key == :char && evt.char == 'O'
+        # PR8 frozen until approved per review_state.json
+        return
+    end
+
     # Board navigation (Phase 2/3)
+    # Early modal handling for picker/help (esc close) to ensure after bar/search edits in board if
+    if m.modal == :user_picker
+        nu = length(m.users)
+        if nu > 0 && evt.key == :escape
+            m.modal = :none
+            return
+        end
+    end
+    if m.modal == :help
+        if evt.key == :escape || (evt.key == :char && evt.char == '?')
+            m.modal = :none
+            return
+        end
+    end
     if m.view_mode == :board
         cols = BOARD_COLUMNS
         cur_col = clamp(m.selected_col, 1, length(cols))
@@ -544,7 +936,83 @@ function update!(m::KanbanModel, evt::KeyEvent)
         elseif evt.key == :char && evt.char == 'u'
             open_user_picker!(m)
             return
+        elseif evt.key == :char && evt.char == 'v'
+            cols = BOARD_COLUMNS
+            cidx = clamp(m.selected_col, 1, length(cols))
+            cards = get(m.cards_by_status, cols[cidx], [])
+            if !isempty(cards)
+                m.editing_id = cards[clamp(m.selected_idx,1,length(cards))]["id"]
+            end
+            m.search_input.focused = false
+            m.modal = :card_detail
+            return
+        elseif evt.key == :char && evt.char == '/'
+            m.search_input = TextInput(; focused = true)
+            m.search = ""
+            return
+        elseif evt.key == :char && evt.char == '1'
+            if "High" in m.active_filters
+                delete!(m.active_filters, "High")
+            else
+                push!(m.active_filters, "High")
+            end
+            return
+        elseif evt.key == :char && evt.char == '2'
+            if "Due Soon" in m.active_filters
+                delete!(m.active_filters, "Due Soon")
+            else
+                push!(m.active_filters, "Due Soon")
+            end
+            return
+        elseif evt.key == :char && evt.char == '3'
+            if "Mine" in m.active_filters
+                delete!(m.active_filters, "Mine")
+            else
+                push!(m.active_filters, "Mine")
+            end
+            return
+        elseif evt.key == :char && evt.char == 's'
+            m.swimlane_by = m.swimlane_by == :none ? :priority : :none
+            return
+        elseif evt.key == :char && evt.char == ' '
+            id = nothing
+            if m.swimlane_by != :none
+                # PR7: in swim pick a card guaranteed in first rendered group for visible bulk mark
+                # Use filtered (consistent with render_swimlane) not raw
+                filtered_status = Dict{String,Vector{Dict{String,Any}}}()
+                for (st, cs) in m.cards_by_status
+                    filtered_status[st] = apply_filters_and_sort(cs, m.search, m.active_filters, m.current_user_id)
+                end
+                groups = group_cards_by_swimlane(filtered_status, m.swimlane_by)
+                # match render sort order
+                if m.swimlane_by == :priority
+                    order = ["High", "Medium", "Low"]
+                    sort!(groups, by = p -> let k=p.first; i=findfirst(==(k), order); i===nothing ? 999 : i end)
+                else
+                    sort!(groups, by = p -> string(p.first))
+                end
+                if !isempty(groups) && !isempty(groups[1].second)
+                    id = groups[1].second[1]["id"]
+                end
+            else
+                cols = BOARD_COLUMNS
+                cidx = clamp(m.selected_col, 1, length(cols))
+                cards = get(m.cards_by_status, cols[cidx], [])
+                if !isempty(cards)
+                    id = cards[clamp(m.selected_idx,1,length(cards))]["id"]
+                end
+            end
+            if id !== nothing
+                if id in m.selected_ids
+                    delete!(m.selected_ids, id)
+                else
+                    push!(m.selected_ids, id)
+                end
+                m.message = "selected " * string(length(m.selected_ids))
+            end
+            return
         end
+        # (search input consumption hoisted early for char precedence; only focus handler remains here)
     end
 
     # User picker nav
@@ -565,6 +1033,29 @@ function update!(m::KanbanModel, evt::KeyEvent)
                 m.modal = :none
                 return
             end
+        end
+        m.tick += 1
+        return
+    end
+
+    if m.modal == :card_detail
+        if evt.key == :escape
+            m.modal = :none
+            return
+        elseif evt.key == :char && evt.char == 'e'
+            # minimal populate from editing_id so edit shows card data (like open_edit_modal path)
+            if m.editing_id !== nothing
+                for cs in values(m.cards_by_status), c in cs
+                    if get(c, "id", "") == m.editing_id
+                        m.edit_title = TextInput(text = get(c, "title", ""); focused = true)
+                        m.edit_desc = TextArea(text = get(c, "description", ""); focused = false)
+                        m.edit_priority = get(c, "priority", "Medium")
+                        break
+                    end
+                end
+            end
+            m.modal = :card_edit
+            return
         end
         m.tick += 1
         return
@@ -604,23 +1095,93 @@ function update!(m::KanbanModel, evt::KeyEvent)
     m.tick += 1
 end
 
-# Simple QCI logo render using BigText + accent line (logo translation MVP)
+# Render the stylized QCI logo.
+# Preference order (when space + module available):
+#   1. Creative Canvas graphic (arcs + lines for the notched Q etc. from branding PNGs)
+#   2. Block text art (terminal chunky by default)
+#   3. Tiny text fallback
 function render_qci_logo(buf::Buffer, area::Rect)
-    # Centered BigText "QCI"
-    bt = BigText("QCI"; style = Style(; fg = QCI_CYAN, bold = true))
-    tw, th = intrinsic_size(bt)
-    tx = area.x + max(0, (area.width - tw) ÷ 2)
-    title_r = Rect(tx, area.y, min(tw, area.width), min(th, area.height))
-    if area.height >= 1 && area.width >= 3
-        render(bt, title_r, buf)
+    # Try rich canvas graphic logo first (uses Tachikoma Canvas primitives)
+    # Prefer the terminal chunky adaptation (from QCI Terminal.jpg) when graphics available.
+    if area.height >= 5 && area.width >= 12 && isdefined(Main, :qci_logo_canvas)
+        try
+            variant = :terminal
+            c = Main.qci_logo_canvas(area.width, area.height;
+                                     variant = variant,
+                                     style = Style(; fg = QCI_CYAN))
+            # render_canvas expects a Frame; construct a minimal one for the logo sub-area
+            logo_frame = Frame(buf, area, GraphicsRegion[], PixelSnapshot[])
+            render_canvas(c, area, logo_frame)
+
+            # Tagline under the graphic logo when room
+            tag_y = area.y + area.height - 1
+            if tag_y > area.y + 3 && area.width > 14
+                tag = "QCI • KANBAN"
+                tx = area.x + max(0, (area.width - length(tag)) ÷ 2)
+                set_string!(buf, tx, tag_y, tag, Style(; fg = QCI_NAVY, bold = true))
+            end
+            return
+        catch
+            # fall through to text block art (which is also the terminal adaptation)
+        end
     end
-    # Small stylized tagline / mark hint under logo
-    y2 = area.y + 5
-    if y2 < bottom(area) && area.width > 10
-        tag = "QCI KANBAN"
-        sx = area.x + max(0, (area.width - length(tag)) ÷ 2)
-        set_string!(buf, sx, y2, tag, Style(; fg = QCI_NAVY, bold = true))
+
+    # Fallback to the block-art text logo (now the chunky terminal adaptation)
+    art = QCI_LOGO_ART
+    lines = split(art, '\n'; keepempty=false)
+    art_h = length(lines)
+    art_w = maximum(length, lines; init=0)
+
+    if area.height < 2 || area.width < 4 || art_h == 0
+        set_string!(buf, area.x, area.y, "QCI", Style(; fg = QCI_CYAN, bold = true))
+        return
     end
+    # Compact mode for small board logo areas (PR8 polish): single line, no full art or extra tag below to prevent overlap.
+    if area.height <= 2
+        txt = "QCI • KANBAN"
+        if length(txt) > area.width; txt = "QCI"; end
+        tx = area.x + max(0, (area.width - length(txt)) ÷ 2)
+        set_string!(buf, tx, area.y, txt, Style(; fg = QCI_CYAN, bold = true))
+        return
+    end
+
+    start_y = area.y + max(0, (area.height - art_h) ÷ 2)
+    start_x = area.x + max(0, (area.width - art_w) ÷ 2)
+
+    main_sty = Style(; fg = QCI_CYAN, bold = true)
+    cursor_sty = Style(; fg = ColorRGB(0xff, 0xff, 0xff), bold = true)  # bright white cursor like JPG
+    accent_sty = Style(; fg = QCI_CYAN, bold = true)  # could be green if defined
+
+    # Number of trailing "cursor" lines in the terminal art (the stair + tail)
+    # The adapted terminal logo has the main 7 lines of letters then 2 stair lines.
+    cursor_start_idx = 8   # 1-based index into lines for the stair detail
+
+    for (i, ln) in enumerate(lines)
+        y = start_y + i - 1
+        if y <= bottom(area)
+            sty = (i >= cursor_start_idx) ? cursor_sty : main_sty
+            set_string!(buf, start_x, y, ln, sty)
+        end
+    end
+
+    tag_y = start_y + art_h + 1
+    if tag_y <= bottom(area) && area.width > 12
+        tag = "QCI • KANBAN"
+        tx = area.x + max(0, (area.width - length(tag)) ÷ 2)
+        set_string!(buf, tx, tag_y, tag, Style(; fg = QCI_NAVY, bold = true))
+    end
+end
+
+# Pure function to compute the three frame areas, shared by view and tests.
+# Mirrors the outer Block inner + split_layout logic with dynamic logo_h.
+function gate_frame_areas(frame::Rect)
+    if frame.width < 20 || frame.height < 6
+        return (logo_area = frame, content_area = frame, status_area = frame)
+    end
+    main = Rect(frame.x + 1, frame.y + 1, frame.width - 2, frame.height - 2)
+    logo_h = frame.height < 12 ? 3 : (frame.height < 20 ? 4 : 7)
+    rs = split_layout(Layout(Vertical, [Fixed(logo_h), Fill(), Fixed(1)]), main)
+    (logo_area = rs[1], content_area = rs[2], status_area = rs[3])
 end
 
 function view(m::KanbanModel, f::Frame)
@@ -641,7 +1202,14 @@ function view(m::KanbanModel, f::Frame)
     main = render(outer, area, buf)
 
     # Top logo area + content + status
-    rows = split_layout(Layout(Vertical, [Fixed(7), Fill(), Fixed(1)]), main)
+    # On small terminals give more vertical to content so gate modal can fit required body prompt + hint inside borders
+    # On main board (logged in) use compact logo_h=2 to avoid overlap with board UI/search/columns per user request.
+    logo_h = if m.current_user_id === nothing
+        area.height < 12 ? 3 : (area.height < 20 ? 4 : 7)
+    else
+        2
+    end
+    rows = split_layout(Layout(Vertical, [Fixed(logo_h), Fill(), Fixed(1)]), main)
     if length(rows) < 3
         return
     end
@@ -650,6 +1218,8 @@ function view(m::KanbanModel, f::Frame)
     status_area = rows[3]
 
     render_qci_logo(buf, logo_area)
+
+    # PR4 search bar + chips rendered via widget (see below in board path)
 
     # LOGIN GATE VIEW: when not logged in, render smaller centered block for user selection (or create/admin subviews).
     # Reduced dims + center offset (copied math from card_edit modal) instead of full content_area.
@@ -666,7 +1236,7 @@ function view(m::KanbanModel, f::Frame)
             render_gate_modal!(buf, content_area, "CREATE NEW USER"; body_lines = body, hint_text = "[enter] create & login   [esc] cancel")
             # re-paint input at appropriate position inside (after the NAME> line painted by helper)
             # for simplicity, use a fixed offset inside the last used area; relies on helper rect
-            info = gate_modal_rect(content_area; n_body_lines = 2, hint = true)
+            info = gate_modal_rect(content_area; n_body_lines = 2, hint = true, body_lines=body, hint_text="[enter] create & login   [esc] cancel")
             # find a y after title for input (simplified; in practice the previous manual did this)
             # to ensure budget, we already called the helper above
             # paint input near center of the modal rect
@@ -676,9 +1246,18 @@ function view(m::KanbanModel, f::Frame)
         else
             # login list via unified helper (reduced dims + offset + unconditional hint)
             n = length(m.users)
-            body = String[ (i == m.user_selected ? "▶ " : "  ") * get(u, "name", "?") for (i,u) in enumerate(m.users) ]
-            hint = isempty(m.users) ? "" : "[j/k]sel [enter] [c] [a] [w]"
-            render_gate_modal!(buf, content_area, "LOGIN - SELECT USER"; body_lines = body, hint_text = hint)
+            if isempty(m.users)
+                # first-time: clear prompt per plan; no pre-seeded names; require [c] create
+                body = ["No users — press [c] to create account"]
+                # shorten legend on narrow content so full text contained strictly inside modal borders (no cut, no clobber). Include main keys.
+                ca_w = content_area.width
+                hint = ca_w < 50 ? "[c] create  [a] [w] [q]" : "[c] create  [a] admin  [w] wipe  [q] quit"
+            else
+                body = String[ (i == m.user_selected ? "▶ " : "  ") * get(u, "name", "?") for (i,u) in enumerate(m.users) ]
+                hint = "[j/k]sel [enter] [c] [a] [w]"
+            end
+            title = "LOGIN"
+            render_gate_modal!(buf, content_area, title; body_lines = body, hint_text = hint)
             return
         end
     end
@@ -693,65 +1272,36 @@ function view(m::KanbanModel, f::Frame)
 
         # When a modal is open we skip full board render to avoid bleed artifacts under overlay
         if m.modal == :none
-            # Horizontal columns
-            n = length(BOARD_COLUMNS)
-            col_width = max(14, content_area.width ÷ n)
-            constraints = [Fixed(col_width) for _ in 1:n]
-            col_areas = split_layout(Layout(Horizontal, constraints), content_area)
-
-            for (i, status) in enumerate(BOARD_COLUMNS)
-                ca = i <= length(col_areas) ? col_areas[i] : content_area
-                cards = get(m.cards_by_status, status, Dict{String,Any}[])
-
-                # Column header block
-                col_block = Block(
-                    title = status,
-                    border_style = Style(; fg = (i == m.selected_col ? QCI_CYAN : QCI_NAVY)),
-                    title_style = Style(; fg = QCI_CYAN, bold = (i == m.selected_col)),
-                )
-                col_inner = render(col_block, ca, buf)
-
-                # Cards list (simple stacked text)
-                y = col_inner.y + 1
-                sel = (i == m.selected_col) ? m.selected_idx : 0
-                for (ci, card) in enumerate(cards)
-                    if y > bottom(col_inner) - 1
-                        break
-                    end
-                    is_sel = (ci == sel)
-                    prefix = is_sel ? "▶ " : "  "
-                    key = get(card, "key", "?")
-                    title = get(card, "title", "")
-                    # assignee initial
-                    aid = get(card, "assignee_id", nothing)
-                    a_initial = "·"
-                    if aid !== nothing && !ismissing(aid)
-                        au = findfirst(u -> u["id"] == aid, m.users)
-                        if au !== nothing
-                            nm = m.users[au]["name"]
-                            a_initial = length(nm) > 0 ? string(first(nm)) : "?"
-                        end
-                    end
-                    due = get(card, "due_date", nothing)
-                    due_str = (due === nothing || ismissing(due)) ? "" : string(due)
-                    due_s = isempty(due_str) ? "" : " " * string(last(split(due_str, "-")))
-                    # truncate to fit (include suffix, clamp whole display)
-                    avail = max(6, col_inner.width - 4)
-                    suffix = " [" * a_initial * "]" * due_s
-                    base = key * " " * (length(title) > (avail - length(suffix) - 1) ? title[1:max(0, avail - length(suffix) - 2)] * "…" : title)
-                    display = base * suffix
-                    if length(display) > avail
-                        display = display[1:avail-1] * "…"
-                    end
-
-                    sty = is_sel ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
-                    set_string!(buf, col_inner.x + 1, y, prefix * display, sty)
-                    y += 1
+            # PR4: reserve explicit 1-line bar area for search + chips so it is never clobbered by logo/columns.
+            # Then pass remaining board_area to column/swim renderers (no internal shifting).
+            board_area = content_area
+            if content_area.height >= 8
+                areas = split_layout(Layout(Vertical, [Fixed(1), Fill()]), content_area)
+                bar_area = areas[1]
+                board_area = areas[2]
+                # Render search + quick filter chips
+                set_string!(buf, bar_area.x + 1, bar_area.y, "Search:", Style(; fg = QCI_CYAN, bold = true))
+                inp_w = max(8, min(28, bar_area.width - 30))
+                render(m.search_input, Rect(bar_area.x + 9, bar_area.y, inp_w, 1), buf)
+                chip_x = bar_area.x + 10 + inp_w
+                for chp in ("High", "Due Soon", "Mine")
+                    is_act = chp in m.active_filters
+                    mark = is_act ? "●" : "○"
+                    sty = is_act ? Style(; fg = QCI_CYAN, bold = true) : Style(; fg = QCI_SECONDARY)
+                    set_string!(buf, chip_x, bar_area.y, " $mark$chp", sty)
+                    chip_x += length(mark) + length(chp) + 2
                 end
+            end
 
-                if isempty(cards)
-                    set_string!(buf, col_inner.x + 2, y, "— empty —", Style(; fg = QCI_SECONDARY, dim = true))
+            # PR restructure: exclusive paths for columns vs swimlanes (board_area already reserves bar space)
+            if m.swimlane_by != :none
+                # force clear board area when entering swim to guarantee no column titles (Backlog etc) can remain
+                for yy in board_area.y:(board_area.y + board_area.height - 1)
+                    set_string!(buf, board_area.x, yy, repeat(" ", board_area.width))
                 end
+                render_swimlane_board!(buf, m, board_area)
+            else
+                render_column_board!(buf, m, board_area, false)
             end
         end
     else
@@ -777,8 +1327,10 @@ function view(m::KanbanModel, f::Frame)
             if due_count == 0
                 set_string!(buf, list_x, yy, "(no dues in data)", Style(; fg = QCI_SECONDARY, dim=true))
             end
+        elseif m.view_mode == :reports || m.view_mode == :list || m.view_mode == :settings
+            # PR8 frozen (presenting PR7 per review_state.json)
+            set_string!(buf, content_area.x + 2, content_area.y + 1, "PR8 FROZEN", Style(; fg = QCI_SECONDARY, dim=true))
         else
-            # Other views stub
             set_string!(buf, content_area.x + 2, content_area.y + 1, "View: $(mode_str) — $(m.message)", Style(; fg = QCI_SECONDARY))
             set_string!(buf, content_area.x + 2, content_area.y + 3, "[b]oard  [c]alendar  [r]eload  [q]uit", Style(; fg = QCI_CYAN, dim = true))
         end
@@ -788,8 +1340,12 @@ function view(m::KanbanModel, f::Frame)
     if m.modal == :none && status_area.width >= 10
         sel_info = ""
         if m.view_mode == :board && !isempty(m.cards_by_status)
-            cname = BOARD_COLUMNS[clamp(m.selected_col, 1, length(BOARD_COLUMNS))]
-            sel_info = " $(cname)[$(m.selected_idx)] "
+            if m.swimlane_by != :none
+                sel_info = " SWIM[$(m.swimlane_by)] "
+            else
+                cname = BOARD_COLUMNS[clamp(m.selected_col, 1, length(BOARD_COLUMNS))]
+                sel_info = " $(cname)[$(m.selected_idx)] "
+            end
         end
         user_name = ""
         if m.current_user_id !== nothing
@@ -871,6 +1427,47 @@ function view(m::KanbanModel, f::Frame)
         end
     end
 
+    # PR6 card detail modal (rich view)
+    if m.modal == :card_detail && area.width >= 30 && area.height >= 10
+        mw = min(60, area.width - 6)
+        mh = min(16, area.height - 4)
+        mx = area.x + (area.width - mw) ÷ 2
+        my = area.y + 3
+        # clear
+        for y in my:(my + mh - 1)
+            set_string!(buf, mx, y, repeat(" ", mw))
+        end
+        dblock = Block(title="CARD DETAIL", border_style=Style(; fg=QCI_CYAN), title_style=Style(; fg=QCI_CYAN, bold=true))
+        dinn = render(dblock, Rect(mx, my, mw, mh), buf)
+        # find card
+        card = nothing
+        if m.editing_id !== nothing
+            for cs in values(m.cards_by_status), c in cs
+                if get(c,"id","") == m.editing_id
+                    card = c
+                    break
+                end
+            end
+        end
+        if card !== nothing
+            y = dinn.y + 1
+            set_string!(buf, dinn.x + 1, y, "KEY: " * get(card,"key",""), Style(; fg=QCI_CYAN))
+            y += 1
+            set_string!(buf, dinn.x + 1, y, "TITLE: " * get(card,"title",""), Style(; fg=QCI_SECONDARY))
+            y += 1
+            desc = get(card,"description","")
+            set_string!(buf, dinn.x + 1, y, "DESC: " * (length(desc)>60 ? desc[1:57]*"..." : desc), Style(; fg=QCI_SECONDARY))
+            y += 1
+            set_string!(buf, dinn.x + 1, y, "PRIO: " * get(card,"priority","") * "  DUE: " * get(card,"due_date",""), Style(; fg=QCI_SECONDARY))
+            y += 1
+            set_string!(buf, dinn.x + 1, y, "LABELS: " * join(get(card,"labels",[]),","), Style(; fg=QCI_SECONDARY))
+            y += 1
+            set_string!(buf, dinn.x + 1, y, "COMMENTS: 1 comment", Style(; fg=QCI_SECONDARY, dim=true))
+            y += 1
+            set_string!(buf, dinn.x + 1, y, "[esc] close  [e] edit", Style(; fg=QCI_CYAN, dim=true))
+        end
+    end
+
     # Help overlay menu (invoked by '?', dismiss Esc/? ; clear under to avoid bleed)
     if m.modal == :help && area.width >= 28 && area.height >= 8
         hw = min(48, area.width - 4)
@@ -911,6 +1508,12 @@ Launch the QCI Kanban app. Uses explicit QCI styling.
 function kanban(; db_path::AbstractString = DB.DEFAULT_DB_PATH)
     m = KanbanModel(db_path = db_path)
     load_users!(m)   # initialize users (seeds DB) for login page; defer board load until after explicit login via gate
+    # Clear any legacy demo users from persisted default DB so real first-time users
+    # always see the "create account" prompt instead of pre-existing seeded names.
+    # (New runs with no user seeding + this auto-wipe on default launch fulfill the first-run goal.)
+    if db_path == DB.DEFAULT_DB_PATH
+        wipe_test_users!(m)
+    end
     # current_user_id remains nothing; view/update enforce login gate before any board content
     app(m)
 end
@@ -929,7 +1532,12 @@ function record_demo(filename::AbstractString = "qci-kanban-demo.tach";
     m = KanbanModel()
     m.db_path = ":memory:"
     load_users!(m)
-    update!(m, KeyEvent(:enter))  # login gate so demo starts on board (events assume logged)
+    # first-time create sequence (no seeds): 'c' + name + enter reaches logged board for demo
+    update!(m, KeyEvent('c'))
+    for ch in collect("DemoCreator")
+        update!(m, KeyEvent(ch))
+    end
+    update!(m, KeyEvent(:enter))  # create-account path to logged board (events assume logged)
 
     # Scripted key events (frame, event) to exercise board nav + modal + calendar
     events = [

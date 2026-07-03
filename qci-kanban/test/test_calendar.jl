@@ -10,7 +10,9 @@ const KanbanModel = QciKanban.KanbanModel
     m = KanbanModel()
     m.db_path = ":memory:"
     QciKanban.load_users!(m)
-    T.update!(m, T.KeyEvent(:enter))  # login gate first
+    T.update!(m, T.KeyEvent('c'))
+    for ch in collect("CalTestUser"); T.update!(m, T.KeyEvent(ch)); end
+    T.update!(m, T.KeyEvent(:enter))  # create-account login gate first
     T.update!(m, T.KeyEvent('c'))
     @test m.view_mode == :calendar
     @test m.cal !== nothing
@@ -26,7 +28,9 @@ end
     m = KanbanModel()
     m.db_path = ":memory:"
     QciKanban.load_users!(m)
-    T.update!(m, T.KeyEvent(:enter))  # login gate first
+    T.update!(m, T.KeyEvent('c'))
+    for ch in collect("CalDuesUser"); T.update!(m, T.KeyEvent(ch)); end
+    T.update!(m, T.KeyEvent(:enter))  # create-account login gate first
     T.update!(m, T.KeyEvent('c'))  # after update!
     @test m.view_mode == :calendar
     rows = visual_rows(m; w=80, h=18)
@@ -44,7 +48,9 @@ end
     m = KanbanModel()
     m.db_path = ":memory:"
     QciKanban.load_users!(m)
-    T.update!(m, T.KeyEvent(:enter))  # login gate first
+    T.update!(m, T.KeyEvent('c'))
+    for ch in collect("CalEscUser"); T.update!(m, T.KeyEvent(ch)); end
+    T.update!(m, T.KeyEvent(:enter))  # create-account login gate first
     T.update!(m, T.KeyEvent('c'))
     @test m.view_mode == :calendar
     T.update!(m, T.KeyEvent(:escape))
@@ -64,7 +70,9 @@ end
     m = KanbanModel()
     m.db_path = ":memory:"
     QciKanban.load_users!(m)
-    T.update!(m, T.KeyEvent(:enter))  # login gate first
+    T.update!(m, T.KeyEvent('c'))
+    for ch in collect("CalHelpUser"); T.update!(m, T.KeyEvent(ch)); end
+    T.update!(m, T.KeyEvent(:enter))  # create-account login gate first
     T.update!(m, T.KeyEvent('c'))
     T.update!(m, T.KeyEvent('?'))
     @test m.modal == :help
