@@ -102,4 +102,33 @@ u!(m, x) = T.update!(m, T.KeyEvent(x))
         @test !isempty(pend)
         @test any(row["event_kind"] == "assigned" for row in pend)
     end
+
+    @testset "Given a logged-in board When rendered Then lanes are framed panels and the selected card pops" begin
+        m = _login()
+        tb = T.TestBackend(100, 30)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 30), T.GraphicsRegion[], T.PixelSnapshot[]))
+        blob = join([T.row_text(tb, i) for i in 1:30], "\n")
+        # framed lanes + framed cards (many rounded corners beyond the app frame)
+        @test count("╭", blob) > 2
+        # the selected card is announced: arrow on its frame, raised background
+        bytecol(y, bx) = length(T.row_text(tb, y)[1:bx])       # byte index → column
+        kloc = T.find_text(tb, "QCI-100")
+        @test kloc !== nothing
+        kcol = bytecol(kloc.y, kloc.x)
+        @test T.char_at(tb, kcol - 1, kloc.y) == '▸'
+        @test T.style_at(tb, kcol, kloc.y).bg == Q3f.Theming.col_surface_hi()
+        @testset "When the user navigates right Then the arrow follows the new selection" begin
+            u!(m, 'l')                             # selection → To Do column
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 30), T.GraphicsRegion[], T.PixelSnapshot[]))
+            sel = Q3f.selected_issue(m)
+            @test sel !== nothing && sel.status == "To Do"
+            loc = T.find_text(tb, sel.key)
+            @test loc !== nothing
+            c = length(T.row_text(tb, loc.y)[1:loc.x])
+            @test T.char_at(tb, c - 1, loc.y) == '▸'
+            @test T.style_at(tb, c, loc.y).bg == Q3f.Theming.col_surface_hi()
+        end
+    end
 end

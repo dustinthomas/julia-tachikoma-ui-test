@@ -11,7 +11,7 @@ Work is tiered by size. Default to doing the work yourself in one context; the a
 **Tier 1 — normal feature/bugfix (the default):**
 1. *Scout* — if you need broad codebase context, dispatch a read-only Explore subagent and use its summary; don't paste file dumps into your context. For a change where you already know the files, just read them.
 2. *Plan inline* — a short written plan (in your response or a plan file for larger work). No separate planner agent.
-3. *Implement + test in the same context* — you write both the change and its TestBackend tests. Run the targeted tests from the test-impact map as you go, then the full suite.
+3. *Implement + test in the same context* — you write both the change and its TestBackend tests. For behavioral changes this is **red-first TDD**: failing test first, confirm it fails for the expected reason, record the red output, then implement to green. User-facing features also extend the Given/When/Then BDD acceptance specs in `test/features/`. Run the targeted tests from the test-impact map as you go, then the full suite. (Full policy: `qci-kanban/.claude/rules/tdd-bdd-coverage-gates.md`.)
 4. *Verify independently* — dispatch the `verifier` agent (`qci-kanban/.claude/agents/verifier.md`) with the task description and changed-file list. It re-runs the full suite + app gate and reviews the diff with explicit criteria. Fix its critical/warning findings and re-verify.
 
 **Tier 2 — large multi-part work:** write a short design doc with a PR plan (a DAG of small, independently reviewable slices), get user buy-in, then implement each slice as a Tier-1 unit — worktree isolation if slices run in parallel. Each slice's implementer owns its tests; each slice gets its own verifier pass.
@@ -21,6 +21,7 @@ Work is tiered by size. Default to doing the work yourself in one context; the a
 - Never claim green without running the commands yourself in this session; report exact command + exit code.
 - Full suite before done: `julia --project=. test/runtests.jl` (from the sub-project).
 - Run-the-app gate after `src/` changes (see `qci-kanban/.claude/rules/run-the-app-gate.md`).
+- Coverage gate after `src/` changes: `julia --project=. test/coverage_gate.jl` must PASS — 100% line coverage on gated v2 files, exclusions only via justified in-source `COV_EXCL` markers (see `qci-kanban/.claude/rules/tdd-bdd-coverage-gates.md`).
 - Reviewer/verifier findings must quote code verbatim from disk with `file:line`.
 - Escalate to adversarial re-verification (independent re-check of the evidence) only for critical findings, not every nit.
 

@@ -90,5 +90,8 @@ Rules that tests here enforce and new work must follow:
 - Login-gate tests must start from a raw `KanbanModel()` and verify the exact zero-users first-time screen.
 - Modals/overlays need "no bleed" assertions (assert absent text via `visual_rows`).
 - Property-based tests with Supposition.jl are encouraged for layout/unicode edge cases.
+- **Red-first TDD** for behavioral changes: failing test first (confirm it fails for the expected reason, keep the red output as evidence), then the minimal change to green. See `.claude/rules/tdd-bdd-coverage-gates.md`.
+- **BDD acceptance**: user-facing features extend the Given/When/Then specs in `test/features/` (new feature files wired into `runtests.jl` in the same change). Unit/view tests do not substitute.
+- **100% coverage**: gated v2 files must stay at 100% line coverage (`test/coverage_gate.jl`); exclusions only via justified in-source `COV_EXCL` markers documented in `COVERAGE.md`.
 
-**After any change to `src/`, DB seeding, the login gate, or `update!`/`view`**: run the full test suite AND a real app verification (live `kanban()` run, or `record_demo` headless) confirming the first-time login screen appears with zero pre-seeded users (see `../.grok/rules/always-run-the-app-after-changes.md`).
+**After any change to `src/`, DB seeding, the login gate, or `update!`/`view`**: run the full test suite, a real app verification (live `kanban()` run, or `record_demo` headless) confirming the first-time login screen appears with zero pre-seeded users (see `../.grok/rules/always-run-the-app-after-changes.md`), AND the coverage gate (`julia --project=. test/coverage_gate.jl` — must print `GATE PASSED`).

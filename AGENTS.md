@@ -18,8 +18,8 @@ Work is tiered by size. The lead does the work itself in one context; **the agen
 **Tier 1 — normal feature/bugfix (default):**
 1. *Scout (optional)*: if broad codebase context is needed, spawn ONE read-only explore subagent that returns a condensed summary (~1–2k tokens, file:line + short snippets). Don't fold file dumps into the lead context. If you already know the files, just read them.
 2. *Plan inline*: short written plan (plan.md for larger work). No separate planner agent.
-3. *Implement + test in the same context*: write the change AND its TestBackend tests yourself. Consult the test-impact map (`qci-kanban/.claude/rules/qci-kanban-test-map.md` — canonical for both tools) and run the targeted tests as you go, then the full suite.
-4. *Verify independently*: spawn ONE verifier subagent (validator persona, `capability_mode: execute`) with the task description + changed-file list and **explicit criteria**: run the complete test suite (`julia --project=. test/runtests.jl`), run the app gate if src/ changed, review the actual `git diff` from disk, quote findings verbatim with file:line, severity critical/warning/nit, exact command + exit code for every check. Verdict APPROVED only on full-suite green + app gate + zero critical/warning findings. Fix findings, re-verify (use `resume_from` so the verifier keeps its context).
+3. *Implement + test in the same context*: write the change AND its TestBackend tests yourself — red-first for behavioral changes, BDD acceptance specs in `test/features/` for user-facing features (see `qci-kanban/.claude/rules/tdd-bdd-coverage-gates.md`, canonical for both tools). Consult the test-impact map (`qci-kanban/.claude/rules/qci-kanban-test-map.md` — canonical for both tools) and run the targeted tests as you go, then the full suite.
+4. *Verify independently*: spawn ONE verifier subagent (validator persona, `capability_mode: execute`) with the task description + changed-file list and **explicit criteria**: run the complete test suite (`julia --project=. test/runtests.jl`), run the app gate AND the coverage gate (`julia --project=. test/coverage_gate.jl`) if src/ changed, review the actual `git diff` from disk, quote findings verbatim with file:line, severity critical/warning/nit, exact command + exit code for every check. Verdict APPROVED only on full-suite green + app gate + coverage gate + zero critical/warning findings. Fix findings, re-verify (use `resume_from` so the verifier keeps its context).
 
 **Tier 2 — large multi-part work:** `/design`-style short design doc with a PR plan (DAG of small, independently reviewable slices) → user buy-in → each slice implemented as a Tier-1 unit, `isolation: "worktree"` when slices run in parallel (bundled `/execute-plan` fits here). Each slice's implementer owns its tests; each slice gets its own verifier.
 
@@ -27,13 +27,14 @@ For medium tasks the bundled `/implement --effort 1..2` (implementer ↔ reviewe
 
 ## TDD (revised — see .grok/skills/tdd/SKILL.md)
 
-Red-first is a *discipline inside the single agent*, not a multi-agent ceremony: for behavioral changes, write the failing test first, watch it fail, make it pass minimally, refactor after green. What measurably reduces regressions is the **test-impact map** (know which tests cover what you're touching and run them first), not procedural TDD role-play. Coverage is a diagnostic, not a gate; the gate is full-suite green + the app runs.
+Red-first is a *discipline inside the single agent*, not a multi-agent ceremony: for behavioral changes, write the failing test first, watch it fail, make it pass minimally, refactor after green. What measurably reduces regressions is the **test-impact map** (know which tests cover what you're touching and run them first), not procedural TDD role-play. In `qci-kanban`, coverage IS a gate: `julia --project=. test/coverage_gate.jl` must pass (100% line coverage on gated v2 files, exclusions only via justified in-source `COV_EXCL` markers) alongside full-suite green + the app gate. User-facing features additionally require Given/When/Then BDD acceptance specs in `test/features/` (see `qci-kanban/.claude/rules/tdd-bdd-coverage-gates.md`).
 
 ## Verification culture (non-negotiable, any tier)
 
 - Never claim green without running the commands yourself in this session; exact command + exit_code, concise evidence (error lines or last 5–8 lines; full tail only on failure or "all pass" claims).
 - Re-audit "all pass" claims by re-running the exact commands.
 - Reviewer/verifier findings quote code verbatim from disk.
+- After `src/` changes, three gates before done: full suite + run-the-app + coverage gate (100% on gated v2 files).
 - Escalate to adversarial re-verification (independent refutation attempt, 2-of-3) only for critical findings.
 - "No test needed" requires explicit written justification.
 
