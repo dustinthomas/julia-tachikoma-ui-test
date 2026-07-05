@@ -1,28 +1,41 @@
 name = "QciKanban"
 uuid = "e4a2f8c0-7b3d-4c5a-9e1f-2d8b0c4a5e6f"
-authors = ["Grok Agentic Experiments"]
 version = "0.1.0"
+authors = ["Grok Agentic Experiments"]
 description = "QCI Kanban — Jira-inspired terminal Kanban board with board + calendar views, user login, and SQLite persistence. Built with Tachikoma.jl."
 
 [deps]
-Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
-SQLite = "0aa819cd-b072-5ff4-a722-6bc24af294d9"
-DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
-Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
-Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
-UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+JSONWebTokens = "9b8beb19-0777-58c6-920b-28f749fee4d3"
+LibPQ = "194296ae-ab2e-5f79-8cd4-7183a0a5a0d1"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+SMTPClient = "c35d69d1-b747-5018-a192-25bc5e63c83d"
+SQLite = "0aa819cd-b072-5ff4-a722-6bc24af294d9"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
+UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
-julia = "1.10"
-Tachikoma = "2"
-SQLite = "1"
 DBInterface = "2"
+JSONWebTokens = "1.1.2"
+LibPQ = "1.18.0"
+Random = "1.11.0"
+SHA = "0.7.0"
+SMTPClient = "0.6.5"
+SQLite = "1"
+TOML = "1.0.3"
 Tables = "1"
+Tachikoma = "2"
+julia = "1.10"
 
 [extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Coverage = "a2441757-f6aa-5fb2-8edb-039e3f45d037"
 Supposition = "5a0628fe-1738-4658-9b6d-0b7605a9755b"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Supposition"]
+test = ["Test", "Supposition", "Coverage"]

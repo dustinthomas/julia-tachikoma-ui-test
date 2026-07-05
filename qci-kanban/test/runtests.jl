@@ -43,6 +43,41 @@ include("test_modal_move.jl")
 include("test_users.jl")
 include("test_calendar.jl")
 
+# Phase 1 — core infrastructure (no UI): domain, config, stores, auth, notify.
+include("test_domain.jl")
+include("test_stores.jl")
+include("test_auth.jl")
+include("test_notify.jl")
+include("features/phase1_infra.jl")
+
+# Phase 2 — UI shell: theme, focus router, keymap, login gate, app frame.
+include("test_theme.jl")
+include("test_focus.jl")
+include("test_app_shell.jl")
+include("features/phase2_shell.jl")
+
+# Phase 3 — Jira board: swimlane grid, rich cards, ops, filters, backlog, sprints.
+include("test_widgets.jl")
+include("test_board_view.jl")
+include("test_card_modals.jl")
+include("test_backlog.jl")
+include("features/phase3_board.jl")
+
+# Phase 4 — Calendar + Gantt: month grid, due marks, drill-down; timeline bars.
+include("test_calendar_view.jl")
+include("test_gantt.jl")
+include("features/phase4_timeline.jl")
+
+# Phase 5 — graphics polish: layered logo, board stats strip, sprint burndown,
+# animation gating, scripted v2 demo tour.
+include("test_gfx.jl")
+
+# Phase 6 — UI fix-wave regressions (REVIEW-FINDINGS.md): unicode-safe render,
+# quit-from-modal, invalid-date guard, visible-only bulk ops, TextArea newline,
+# scroll-follow, narrow-board border, focus-aware hints, help overflow, and the
+# secure session-restore/logout API adoption.
+include("test_fixwave.jl")
+
 # === LOGIN GATE TESTS (TDD: drive exclusively from raw KanbanModel() + update! + TestBackend) ===
 # Acceptance: first-time (zero users after load) renders login UI with no pre-seeded names + create hint,
 # non-login keys (incl enter when empty) do not login or load board, 'c'+name+enter creates+logs+loads board+jwt,

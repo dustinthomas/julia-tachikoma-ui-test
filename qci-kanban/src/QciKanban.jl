@@ -22,6 +22,65 @@ using Base64
 include("db.jl")
 using .DB
 
+# ── QCI Kanban v2 core infrastructure (Phase 1; no UI) ───────────────────
+# Self-contained submodules; do not collide with the v1 DB module or the
+# existing update!/view code. See DESIGN.md / PHASES.md.
+module Domain
+    include("domain.jl")
+end
+
+module Config
+    include("config.jl")
+end
+
+module Passwords
+    include("auth/password.jl")
+end
+
+module Stores
+    using ..Domain, ..Config, ..Passwords
+    include("store/interface.jl")
+    include("store/sqlite_store.jl")
+    include("store/remote_store.jl")
+end
+
+module Auth
+    using ..Domain, ..Config, ..Passwords, ..Stores
+    include("auth/jwt.jl")
+    include("auth/session.jl")
+    # Auth is the single entry point for password primitives too.
+    using ..Passwords: PasswordHash, hash_password, verify_password, constant_time_eq
+    export PasswordHash, hash_password, verify_password, constant_time_eq
+end
+
+module Notify
+    using ..Domain, ..Config, ..Stores
+    include("notify/interface.jl")
+    include("notify/outbox.jl")
+    include("notify/smtp.jl")
+end
+
+# ── QCI Kanban v2 UI shell (Phase 2) ─────────────────────────────────────
+# Palette lives in its own submodule (named Theming to avoid clashing with
+# Tachikoma's exported `Theme` type). The focus router, keymap and app shell
+# are included at QciKanban top level so they share Tachikoma's widget names
+# and extend the same update!/view/should_quit generics as v1.
+module Theming
+    include("ui/theme.jl")
+end
+
+include("ui/focus.jl")     # FocusState + route_to_focus!
+include("ui/keymap.jl")    # Binding table + lookup_action/help/hints
+include("ui/widgets.jl")   # Selector / MultiSelect form widgets (before app: field-adjacent)
+include("ui/app.jl")       # AppModel, update!/view/should_quit, kanban2
+include("ui/board.jl")     # Phase 3: swimlane grid, rich cards, board ops, filters, WIP
+include("ui/backlog.jl")   # Phase 3: backlog list + sprint lifecycle
+include("ui/modals.jl")    # Phase 3: card detail / edit / confirm / search / new-sprint modals
+include("ui/calendar.jl")  # Phase 4: month calendar view (due marks, day drill-down)
+include("ui/gantt.jl")     # Phase 4: Gantt timeline (BlockCanvas bars, today marker, sprint bands)
+include("gfx/logo.jl")     # Phase 5: layered QCI logo (pixel/canvas/text)
+include("gfx/charts.jl")   # Phase 5: board stats strip + sprint burndown
+
 # QCI branding (copied from ai_metrics_dashboard patterns for consistency)
 const QCI_CYAN = ColorRGB(UInt8(0), UInt8(188), UInt8(212))
 const QCI_NAVY = ColorRGB(UInt8(30), UInt8(32), UInt8(75))

@@ -1,0 +1,628 @@
+# Unit tests for QciKanban.Config, QciKanban.Stores (SQLite + Remote/fake exec).
+using Test
+using Dates
+const S = QciKanban.Stores
+const C = QciKanban.Config
+const P = QciKanban.Passwords
+const Dm = QciKanban.Domain
+
+@testset "Config: AppConfig from TOML + ENV + jwt secret" begin
+    @testset "defaults" begin
+        cfg = C.load_config()
+        @test cfg.backend == :sqlite
+        @test cfg.smtp.enabled == false
+        @test cfg.token_ttl_seconds > 0
+        @test cfg.postgres.port == 5432
+    end
+
+    @testset "TOML file" begin
+        mktempdir() do dir
+            path = joinpath(dir, "cfg.toml")
+            write(path, """
+                backend = "remote"
+                users_db_path = "/tmp/u.db"
+                board_db_path = "/tmp/b.db"
+                jwt_secret = "filesecret-0123456789abcdef-0123456789"
+                jwt_secret_path = "/tmp/jwt.secret"
+                session_token_path = "/tmp/s.jwt"
+                token_ttl_seconds = 42
+                [smtp]
+                enabled = true
+                host = "mail.example.com"
+                port = 587
+                user = "u"
+                password = "p"
+                from = "from@example.com"
+                [postgres]
+                host = "pg"
+                port = 6000
+                dbname = "d"
+                user = "pu"
+                password = "pp"
+            """)
+            cfg = C.load_config(path; env = Dict{String,String}())
+            @test cfg.backend == :remote
+            @test cfg.users_db_path == "/tmp/u.db"
+            @test cfg.jwt_secret == "filesecret-0123456789abcdef-0123456789"
+            @test cfg.token_ttl_seconds == 42
+            @test cfg.smtp.enabled && cfg.smtp.port == 587 && cfg.smtp.from == "from@example.com"
+            @test cfg.postgres.host == "pg" && cfg.postgres.port == 6000 && cfg.postgres.password == "pp"
+        end
+    end
+
+    @testset "missing file → defaults; ENV overrides win" begin
+        cfg = C.load_config(joinpath(tempdir(), "does-not-exist-xyz.toml"))
+        @test cfg.backend == :sqlite
+        env = Dict("QCI_BACKEND" => "remote", "QCI_USERS_DB" => "/e/u.db", "QCI_BOARD_DB" => "/e/b.db",
+                   "QCI_JWT_SECRET" => "envsecret-0123456789abcdef-0123456789", "QCI_JWT_SECRET_PATH" => "/e/j", "QCI_SESSION_TOKEN_PATH" => "/e/s",
+                   "QCI_TOKEN_TTL" => "99", "QCI_SMTP_ENABLED" => "true", "QCI_SMTP_HOST" => "eh",
+                   "QCI_SMTP_PORT" => "2525", "QCI_SMTP_USER" => "eu", "QCI_SMTP_PASSWORD" => "ep",
+                   "QCI_SMTP_FROM" => "ef@x.co", "QCI_PG_HOST" => "eph", "QCI_PG_PORT" => "7000",
+                   "QCI_PG_DBNAME" => "epd", "QCI_PG_USER" => "epu", "QCI_PG_PASSWORD" => "epp")
+        cfg2 = C.load_config(nothing; env = env)
+        @test cfg2.backend == :remote && cfg2.users_db_path == "/e/u.db"
+        @test cfg2.jwt_secret == "envsecret-0123456789abcdef-0123456789" && cfg2.token_ttl_seconds == 99
+        @test cfg2.smtp.enabled && cfg2.smtp.port == 2525 && cfg2.smtp.from == "ef@x.co"
+        @test cfg2.postgres.host == "eph" && cfg2.postgres.port == 7000
+    end
+
+    @testset "bool coercion variants" begin
+        for (v, exp) in (("1", true), ("yes", true), ("on", true), ("0", false), ("no", false))
+            cfg = C.load_config(nothing; env = Dict("QCI_SMTP_ENABLED" => v))
+            @test cfg.smtp.enabled == exp
+        end
+    end
+
+    @testset "ensure_jwt_secret! generates + persists 0600, reads back" begin
+        mktempdir() do dir
+            spath = joinpath(dir, "sub", "jwt.secret")
+            cfg = C.AppConfig(; jwt_secret_path = spath)
+            @test cfg.jwt_secret === nothing
+            secret = C.ensure_jwt_secret!(cfg)
+            @test !isempty(secret) && cfg.jwt_secret == secret
+            @test isfile(spath)
+            @test (filemode(spath) & 0o777) == 0o600
+            # idempotent within config
+            @test C.ensure_jwt_secret!(cfg) == secret
+            # fresh config reads existing file rather than regenerating
+            cfg2 = C.AppConfig(; jwt_secret_path = spath)
+            @test C.ensure_jwt_secret!(cfg2) == secret
+        end
+    end
+end
+
+@testset "Stores: SQLite user store" begin
+    us = S.SQLiteUserStore(":memory:")
+    u = S.create_user!(us; email = "alex@qci.co", name = "Alex", password = "hunter2pw")
+    @test u isa Dm.User && u.name == "Alex"
+    @test S.authenticate(us, "alex@qci.co", "hunter2pw") !== nothing
+    @test S.authenticate(us, "alex@qci.co", "wrong") === nothing
+    @test S.authenticate(us, "nobody@qci.co", "x") === nothing
+    @test_throws ArgumentError S.create_user!(us; email = "alex@qci.co", name = "Dup", password = "pw123456")
+    @test_throws ArgumentError S.create_user!(us; email = "bad", name = "X", password = "pw123456")
+    @test S.get_user(us, u.id).email == "alex@qci.co"
+    @test S.get_user(us, "missing") === nothing
+    S.create_user!(us; email = "sam@qci.co", name = "Sam", password = "pw123456")
+    @test length(S.list_users(us)) == 2
+    @test S.deactivate_user!(us, u.id)
+    @test S.authenticate(us, "alex@qci.co", "hunter2pw") === nothing  # inactive can't auth
+    @test S.get_user(us, u.id).active == false
+end
+
+@testset "Stores: SQLite board store CRUD" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    @testset "issues" begin
+        i = S.create_issue!(bs; title = "First", status = "Backlog", priority = "High")
+        @test startswith(i.key, "QCI-") && i.position == 0
+        i2 = S.create_issue!(bs; title = "Second", status = "Backlog")
+        @test i2.position == 1  # dense append
+        @test i2.key != i.key
+        @test S.get_issue(bs, i.id).title == "First"
+        @test S.get_issue(bs, "nope") === nothing
+        @test length(S.list_issues(bs)) == 2
+        @test length(S.list_issues(bs; status = "Backlog")) == 2
+        @test isempty(S.list_issues(bs; status = "Done"))
+        upd = S.update_issue!(bs, i.id; title = "First!", priority = "Low", due_date = Date(2026, 5, 1), story_points = 8)
+        @test upd.title == "First!" && upd.priority == "Low" && upd.due_date == Date(2026, 5, 1) && upd.story_points == 8
+        @test S.update_issue!(bs, i.id).title == "First!"          # empty kwargs no-op
+        @test S.update_issue!(bs, i.id; bogus = 1).title == "First!"  # unknown field ignored
+        @test_throws ArgumentError S.update_issue!(bs, i.id; status = "Nope")
+        @test_throws ArgumentError S.update_issue!(bs, i.id; priority = "Nope")
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", status = "Nope")
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", priority = "Nope")
+    end
+
+    @testset "C4: update_issue! routes status/position through move (stays dense)" begin
+        bc = S.SQLiteBoardStore(":memory:")
+        x = S.create_issue!(bc; title = "X", status = "Backlog")
+        y = S.create_issue!(bc; title = "Y", status = "Backlog")
+        z = S.create_issue!(bc; title = "Z", status = "Backlog")
+        # valid status via update_issue! → moved + both columns reindexed dense
+        moved = S.update_issue!(bc, x.id; title = "X!", status = "To Do")
+        @test moved.status == "To Do" && moved.title == "X!"
+        @test [i.position for i in S.list_issues(bc; status = "Backlog")] == [0, 1]
+        @test [i.position for i in S.list_issues(bc; status = "To Do")] == [0]
+        # position via update_issue! → dense reorder
+        S.update_issue!(bc, z.id; position = 0)
+        bl = S.list_issues(bc; status = "Backlog")
+        @test bl[1].id == z.id && [i.position for i in bl] == [0, 1]
+    end
+
+    @testset "move / rank keep dense" begin
+        b2 = S.SQLiteBoardStore(":memory:")
+        a = S.create_issue!(b2; title = "A", status = "Backlog")
+        b = S.create_issue!(b2; title = "B", status = "Backlog")
+        c = S.create_issue!(b2; title = "C", status = "Backlog")
+        # move A to To Do
+        S.move_issue!(b2, a.id; status = "To Do")
+        bl = S.list_issues(b2; status = "Backlog")
+        @test [x.position for x in bl] == [0, 1]                 # reindexed dense
+        @test S.get_issue(b2, a.id).status == "To Do" && S.get_issue(b2, a.id).position == 0
+        # rank C to front of Backlog
+        S.rank_issue!(b2, c.id; position = 0)
+        bl = S.list_issues(b2; status = "Backlog")
+        @test bl[1].id == c.id && [x.position for x in bl] == [0, 1]
+        # clamp beyond end
+        S.rank_issue!(b2, c.id; position = 99)
+        @test S.list_issues(b2; status = "Backlog")[end].id == c.id
+        # default position appends
+        d = S.create_issue!(b2; title = "D", status = "To Do")
+        S.move_issue!(b2, d.id; status = "Backlog")
+        @test S.list_issues(b2; status = "Backlog")[end].id == d.id
+        # same-status no-op-ish still dense
+        @test S.move_issue!(b2, b.id; position = 0).id == b.id
+        @test S.move_issue!(b2, "missing") === nothing
+        @test_throws ArgumentError S.move_issue!(b2, b.id; status = "Nope")
+        # delete reindexes
+        @test S.delete_issue!(b2, b.id)
+        @test !S.delete_issue!(b2, "missing")
+        @test [x.position for x in S.list_issues(b2; status = "Backlog")] == collect(0:length(S.list_issues(b2; status = "Backlog")) - 1)
+    end
+
+    @testset "epics" begin
+        e = S.create_epic!(bs; name = "Onboarding", color = "teal")
+        @test startswith(e.key, "EPIC-")
+        @test S.get_epic(bs, e.id).name == "Onboarding"
+        @test S.get_epic(bs, "nope") === nothing
+        S.create_epic!(bs; name = "Core")
+        @test length(S.list_epics(bs)) == 2
+        @test S.update_epic!(bs, e.id; name = "Onboard", color = "violet").name == "Onboard"
+        @test S.update_epic!(bs, e.id).name == "Onboard"  # no-op
+        @test S.delete_epic!(bs, e.id)
+        @test S.get_epic(bs, e.id) === nothing
+    end
+
+    @testset "sprints + single active" begin
+        b3 = S.SQLiteBoardStore(":memory:")
+        s1 = S.create_sprint!(b3; name = "S1", goal = "g", start_date = Date(2026, 1, 1), end_date = Date(2026, 1, 14))
+        s2 = S.create_sprint!(b3; name = "S2")
+        @test s1.state == :future
+        @test S.get_sprint(b3, s1.id).goal == "g"
+        @test S.get_sprint(b3, "nope") === nothing
+        @test length(S.list_sprints(b3)) == 2
+        @test S.active_sprint(b3) === nothing
+        started = S.start_sprint!(b3, s1.id)
+        @test started.state == :active && S.active_sprint(b3).id == s1.id
+        @test_throws ArgumentError S.start_sprint!(b3, s2.id)  # single-active
+        @test_throws ArgumentError S.start_sprint!(b3, "nope")
+        @test_throws ArgumentError S.close_sprint!(b3, "nope")
+        closed = S.close_sprint!(b3, s1.id)
+        @test closed.state == :closed && S.active_sprint(b3) === nothing
+        upd = S.update_sprint!(b3, s2.id; name = "S2!", goal = "gg", start_date = Date(2026, 2, 1), end_date = Date(2026, 2, 14))
+        @test upd.name == "S2!" && upd.goal == "gg" && upd.start_date == Date(2026, 2, 1)
+        @test S.update_sprint!(b3, s2.id).name == "S2!"  # no-op
+    end
+
+    @testset "labels + comments + activity" begin
+        b4 = S.SQLiteBoardStore(":memory:")
+        i = S.create_issue!(b4; title = "Labeled")
+        l1 = S.create_label!(b4; name = "bug", color = "red")
+        l2 = S.create_label!(b4; name = "ui")
+        @test length(S.list_labels(b4)) == 2
+        S.set_labels!(b4, i.id, [l1.id, l2.id])
+        @test Set(S.labels_for_issue(b4, i.id)) == Set([l1.id, l2.id])
+        @test Set(S.get_issue(b4, i.id).labels) == Set([l1.id, l2.id])
+        S.set_labels!(b4, i.id, [l1.id])  # replace
+        @test S.labels_for_issue(b4, i.id) == [l1.id]
+
+        c = S.add_comment!(b4; issue_id = i.id, author_id = "u1", body = "looks good")
+        @test c.body == "looks good"
+        @test length(S.list_comments(b4, i.id)) == 1
+
+        a1 = S.log_activity!(b4; issue_id = i.id, kind = :created)
+        @test a1.actor_id === nothing
+        S.log_activity!(b4; issue_id = i.id, actor_id = "u1", kind = :moved, detail = "→ Done")
+        acts = S.list_activity(b4, i.id)
+        @test length(acts) == 2 && acts[end].detail == "→ Done"
+    end
+
+    @testset "sprint/backlog membership + outbox" begin
+        b5 = S.SQLiteBoardStore(":memory:")
+        sp = S.create_sprint!(b5; name = "Sp")
+        i_in = S.create_issue!(b5; title = "in-sprint", sprint_id = sp.id)
+        i_out = S.create_issue!(b5; title = "backlog")
+        @test [x.id for x in S.issues_for_sprint(b5, sp.id)] == [i_in.id]
+        @test i_out.id in [x.id for x in S.backlog_issues(b5)]
+        @test !(i_in.id in [x.id for x in S.backlog_issues(b5)])
+
+        oid = S.enqueue_outbox!(b5; event_kind = :assigned, recipient_email = "a@b.co", subject = "s", body = "b")
+        pend = S.pending_outbox(b5)
+        @test length(pend) == 1 && pend[1]["id"] == oid && pend[1]["subject"] == "s"
+        @test S.mark_sent!(b5, oid)
+        @test isempty(S.pending_outbox(b5))
+    end
+end
+
+@testset "Stores: parse helpers + file-backed store + missing mapping" begin
+    @test S.parse_date(Date(2026, 1, 1)) == Date(2026, 1, 1)
+    @test S.parse_date("not-a-date") === nothing
+    @test S.parse_dt(nothing) isa DateTime
+    @test S.parse_dt(missing) isa DateTime
+    @test S.parse_dt(DateTime(2026, 1, 1)) == DateTime(2026, 1, 1)
+    @test S.parse_dt("2026-01-01T12:00:00") == DateTime(2026, 1, 1, 12)
+    @test S.parse_dt("2026-01-01T12:00:00.999999") == DateTime(2026, 1, 1, 12)  # fractional fallback
+    @test S.parse_dt("garbage") isa DateTime                                     # total fallback
+    @test S.parse_points(nothing) === nothing
+    @test S.parse_points(missing) === nothing
+    @test S.parse_points(5) == 5
+    @test S.parse_points("7") == 7
+    @test S.parse_points("") === nothing
+
+    # file-backed SQLite stores (exercise non-":memory:" open path, creating dirs)
+    mktempdir() do dir
+        us = S.SQLiteUserStore(joinpath(dir, "sub", "users.db"))
+        bs = S.SQLiteBoardStore(joinpath(dir, "sub", "board.db"))
+        @test S.create_user!(us; email = "f@b.co", name = "F", password = "pw123456") isa Dm.User
+        @test S.create_issue!(bs; title = "file issue") isa Dm.Issue
+        S.close!(us); S.close!(bs)
+    end
+
+    # remote mapper handling missing values (NULL columns)
+    iss = S.remote_row_to_issue(Dict{String,Any}("id" => "i", "key" => "QCI-1", "title" => "T",
+        "status" => "Backlog", "priority" => "Low", "description" => missing, "assignee_id" => missing))
+    @test iss.description == "" && iss.assignee_id === nothing
+end
+
+@testset "Stores: seed_demo! (issues+epics+sprints+labels, ZERO users)" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    us = S.SQLiteUserStore(":memory:")
+    S.seed_demo!(bs)
+    @test !isempty(S.list_issues(bs))
+    @test !isempty(S.list_epics(bs))
+    @test !isempty(S.list_sprints(bs))
+    @test !isempty(S.list_labels(bs))
+    @test isempty(S.list_users(us))         # first-run gate contract
+    n = length(S.list_issues(bs))
+    S.seed_demo!(bs)                         # idempotent
+    @test length(S.list_issues(bs)) == n
+end
+
+@testset "Stores: open_sqlite_stores + close!" begin
+    cfg = C.AppConfig(; users_db_path = ":memory:", board_db_path = ":memory:")
+    us, bs = S.open_sqlite_stores(cfg)
+    @test us isa S.SQLiteUserStore && bs isa S.SQLiteBoardStore
+    S.close!(us); S.close!(bs)
+    @test true
+end
+
+@testset "Stores: Remote (Postgres) via FakeExec" begin
+    @testset "pg_placeholders + row mappers" begin
+        @test S.pg_placeholders(3) == "\$1, \$2, \$3"
+        @test S.pg_placeholders(1) == "\$1"
+        u = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A", "active" => 1, "created" => string(now(UTC))))
+        @test u.name == "A" && u.active
+        u2 = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A"))  # missing active/created
+        @test u2.active
+        iss = S.remote_row_to_issue(Dict("id" => "i", "key" => "QCI-1", "title" => "T", "status" => "Backlog",
+            "priority" => "Medium", "story_points" => 3, "epic_id" => "e", "sprint_id" => "s",
+            "assignee_id" => "a", "reporter_id" => "r", "start_date" => "2026-01-01",
+            "due_date" => "2026-01-02", "position" => 2, "description" => "d",
+            "created" => string(now(UTC)), "updated" => string(now(UTC))))
+        @test iss.story_points == 3 && iss.due_date == Date(2026, 1, 2) && iss.position == 2
+        iss2 = S.remote_row_to_issue(Dict("id" => "i", "key" => "k", "title" => "T", "status" => "Backlog", "priority" => "Low"))
+        @test iss2.description == "" && iss2.epic_id === nothing && iss2.story_points === nothing
+        ep = S.remote_row_to_epic(Dict("id" => "e", "key" => "EPIC-1", "name" => "N", "color" => "teal"))
+        @test ep.name == "N"
+        sp = S.remote_row_to_sprint(Dict("id" => "s", "name" => "S", "state" => "future"))
+        @test sp.state == :future && sp.goal == ""
+        cm = S.remote_row_to_comment(Dict("id" => "c", "issue_id" => "i", "author_id" => "u", "body" => "b"))
+        @test cm.body == "b"
+        lb = S.remote_row_to_label(Dict("id" => "l", "name" => "bug", "color" => "red"))
+        @test lb.color == "red"
+        ac = S.remote_row_to_activity(Dict("id" => "a", "issue_id" => "i", "kind" => "moved"))
+        @test ac.kind == :moved && ac.actor_id === nothing && ac.detail == ""
+    end
+
+    @testset "remote user store" begin
+        fx = S.FakeExec()
+        us = S.RemoteUserStore(fx)
+        u = S.create_user!(us; email = "a@b.co", name = "A", password = "pw123456")
+        @test u.email == "a@b.co"
+        @test occursin("INSERT INTO users", fx.calls[end][1])
+        @test_throws ArgumentError S.create_user!(us; email = "bad", name = "A", password = "pw123456")
+
+        ph = P.hash_password("pw123456")
+        row = Dict{String,Any}("id" => "u", "email" => "a@b.co", "name" => "A",
+            "password_hash" => ph.hash_hex, "salt" => ph.salt_hex, "iterations" => ph.iterations, "active" => 1)
+        fx_auth = S.FakeExec((sql, p) -> [row])
+        @test S.authenticate(S.RemoteUserStore(fx_auth), "a@b.co", "pw123456") !== nothing
+        @test S.authenticate(S.RemoteUserStore(fx_auth), "a@b.co", "wrong") === nothing
+        @test S.authenticate(S.RemoteUserStore(S.FakeExec()), "a@b.co", "pw") === nothing  # no rows
+        inactive = merge(row, Dict("active" => 0))
+        @test S.authenticate(S.RemoteUserStore(S.FakeExec((s, p) -> [inactive])), "a@b.co", "pw123456") === nothing
+
+        @test S.get_user(S.RemoteUserStore(S.FakeExec((s, p) -> [Dict("id" => "u", "email" => "a@b.co", "name" => "A", "active" => 1)])), "u").name == "A"
+        @test S.get_user(us, "missing") === nothing
+        @test length(S.list_users(S.RemoteUserStore(S.FakeExec((s, p) -> [Dict("id" => "u", "email" => "a@b.co", "name" => "A", "active" => 1)])))) == 1
+        @test S.deactivate_user!(us, "u")
+    end
+
+    @testset "remote board store" begin
+        issue_row(; id = "i", key = "QCI-1", status = "Backlog", pos = 0) = Dict{String,Any}(
+            "id" => id, "key" => key, "title" => "T", "status" => status, "priority" => "Medium",
+            "description" => "d", "position" => pos)
+        # create with explicit + default key
+        fx = S.FakeExec()
+        bs = S.RemoteBoardStore(fx)
+        i = S.create_issue!(bs; title = "T", key = "QCI-9", status = "To Do", priority = "High",
+                            story_points = 2, epic_id = "e", sprint_id = "s", assignee_id = "a",
+                            reporter_id = "r", start_date = Date(2026, 1, 1), due_date = Date(2026, 1, 2), position = 4)
+        @test i.key == "QCI-9" && i.position == 4 && i.story_points == 2
+        @test occursin("INSERT INTO issues", fx.calls[end][1])
+        idflt = S.create_issue!(bs; title = "T2")
+        @test startswith(idflt.key, "QCI-")
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", status = "Nope")
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", priority = "Nope")
+
+        @test S.get_issue(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()])), "i").title == "T"
+        @test S.get_issue(bs, "missing") === nothing
+        @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row(), issue_row(id = "i2")])))) == 2
+        @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()])); status = "Backlog")) == 1
+
+        fx_u = S.FakeExec((s, p) -> [issue_row()])
+        bs_u = S.RemoteBoardStore(fx_u)
+        @test S.update_issue!(bs_u, "i"; title = "New", status = "Done", due_date = Date(2026, 3, 3)).title == "T"
+        @test any(occursin("UPDATE issues SET", c[1]) for c in fx_u.calls)
+        @test S.update_issue!(bs_u, "i").title == "T"  # empty kwargs
+        @test S.delete_issue!(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()])), "i")
+        @test !S.delete_issue!(bs, "i")  # no row → false
+
+        fx_m = S.FakeExec((s, p) -> [issue_row(status = "To Do", pos = 1)])
+        bs_m = S.RemoteBoardStore(fx_m)
+        @test S.move_issue!(bs_m, "i"; status = "To Do", position = 1).status == "To Do"
+        @test S.move_issue!(bs_m, "i"; status = "Review").status == "To Do"
+        @test S.move_issue!(bs_m, "i"; position = 3) !== nothing
+        @test S.move_issue!(bs_m, "i") !== nothing  # neither → get_issue
+        @test_throws ArgumentError S.move_issue!(bs_m, "i"; status = "Nope")
+        @test S.rank_issue!(bs_m, "i"; position = 0) !== nothing
+
+        # epics
+        fx_e = S.FakeExec((s, p) -> [Dict("id" => "e", "key" => "EPIC-1", "name" => "N", "color" => "teal")])
+        bs_e = S.RemoteBoardStore(fx_e)
+        @test S.create_epic!(bs_e; name = "N", key = "EPIC-3").key == "EPIC-3"
+        @test startswith(S.create_epic!(bs_e; name = "N").key, "EPIC-")
+        @test S.get_epic(bs_e, "e").name == "N"
+        @test S.get_epic(bs, "missing") === nothing
+        @test length(S.list_epics(bs_e)) == 1
+        @test S.update_epic!(bs_e, "e"; name = "M", color = "red").name == "N"
+        @test S.update_epic!(bs_e, "e").name == "N"  # no-op
+        @test S.delete_epic!(bs_e, "e")
+
+        # sprints — stateful responder so start/close reflect UPDATEs
+        sprint_row(state) = [Dict{String,Any}("id" => "s", "name" => "S", "goal" => "g", "state" => state)]
+        sprint_state = Ref("future")
+        fx_s = S.FakeExec((sql, p) -> begin
+            if occursin("UPDATE sprints SET state", sql)
+                sprint_state[] = String(p[1]); Dict{String,Any}[]
+            elseif occursin("state = 'active'", sql)
+                sprint_state[] == "active" ? sprint_row("active") : Dict{String,Any}[]
+            else
+                sprint_row(sprint_state[])
+            end
+        end)
+        bs_s = S.RemoteBoardStore(fx_s)
+        @test S.create_sprint!(bs_s; name = "S", start_date = Date(2026, 1, 1), end_date = Date(2026, 1, 14)).state == :future
+        @test S.get_sprint(bs_s, "s").name == "S"
+        @test S.get_sprint(bs, "missing") === nothing
+        @test length(S.list_sprints(bs_s)) == 1
+        @test S.active_sprint(bs_s) === nothing
+        @test S.start_sprint!(bs_s, "s").state == :active
+        @test S.active_sprint(bs_s) !== nothing
+        @test_throws ArgumentError S.start_sprint!(bs, "missing")
+        @test_throws ArgumentError S.close_sprint!(bs, "missing")
+        @test S.close_sprint!(bs_s, "s").state == :closed
+        @test S.update_sprint!(bs_s, "s"; name = "S!", goal = "g2", start_date = Date(2026, 2, 1), end_date = Date(2026, 2, 2)).name == "S"
+        @test S.update_sprint!(bs_s, "s").name == "S"  # no-op
+        # single-active rejection when an active exists
+        fx_active = S.FakeExec((sql, p) -> sprint_row(occursin("state = 'active'", sql) ? "active" : "future"))
+        @test_throws ArgumentError S.start_sprint!(S.RemoteBoardStore(fx_active), "s")
+
+        # labels
+        fx_l = S.FakeExec((s, p) -> [Dict("id" => "l", "name" => "bug", "color" => "red")])
+        bs_l = S.RemoteBoardStore(fx_l)
+        @test S.create_label!(bs_l; name = "bug").name == "bug"
+        @test length(S.list_labels(bs_l)) == 1
+        @test S.set_labels!(bs_l, "i", ["l1", "l2"]) == ["l1", "l2"]
+        fx_lf = S.FakeExec((s, p) -> [Dict("label_id" => "l1"), Dict("label_id" => "l2")])
+        @test S.labels_for_issue(S.RemoteBoardStore(fx_lf), "i") == ["l1", "l2"]
+
+        # comments + activity
+        fx_c = S.FakeExec((s, p) -> [Dict("id" => "c", "issue_id" => "i", "author_id" => "u", "body" => "b", "created" => string(now(UTC)))])
+        bs_c = S.RemoteBoardStore(fx_c)
+        @test S.add_comment!(bs_c; issue_id = "i", author_id = "u", body = "b").body == "b"
+        @test length(S.list_comments(bs_c, "i")) == 1
+        fx_a = S.FakeExec((s, p) -> [Dict("id" => "a", "issue_id" => "i", "kind" => "moved", "detail" => "x")])
+        bs_a = S.RemoteBoardStore(fx_a)
+        @test S.log_activity!(bs_a; issue_id = "i", actor_id = "u", kind = :moved, detail = "x").kind == :moved
+        @test S.log_activity!(bs_a; issue_id = "i", kind = :created).actor_id === nothing
+        @test length(S.list_activity(bs_a, "i")) == 1
+
+        # membership queries
+        fx_mem = S.FakeExec((s, p) -> [issue_row()])
+        bs_mem = S.RemoteBoardStore(fx_mem)
+        @test length(S.issues_for_sprint(bs_mem, "s")) == 1
+        @test length(S.backlog_issues(bs_mem)) == 1
+
+        # outbox
+        obrow = [Dict{String,Any}("id" => "o", "event_kind" => "assigned", "recipient_email" => "a@b.co",
+            "subject" => "s", "body" => "b", "created" => string(now(UTC)))]
+        fx_o = S.FakeExec((s, p) -> obrow)
+        bs_o = S.RemoteBoardStore(fx_o)
+        @test !isempty(S.enqueue_outbox!(bs_o; event_kind = :assigned, recipient_email = "a@b.co", subject = "s", body = "b"))
+        @test S.pending_outbox(bs_o)[1]["id"] == "o"
+        @test S.mark_sent!(bs_o, "o")
+    end
+end
+
+@testset "S9: short configured JWT secret rejected (TOML + ENV); 32 chars ok" begin
+    @test_throws ArgumentError C.load_config(nothing; env = Dict("QCI_JWT_SECRET" => "tooshort"))
+    mktempdir() do dir
+        path = joinpath(dir, "c.toml"); write(path, "jwt_secret = \"short\"\n")
+        @test_throws ArgumentError C.load_config(path; env = Dict{String,String}())
+    end
+    ok = C.load_config(nothing; env = Dict("QCI_JWT_SECRET" => "a"^32))
+    @test ok.jwt_secret == "a"^32
+end
+
+@testset "S6: jwt secret written atomically 0600; symlinked path rejected" begin
+    mktempdir() do dir
+        spath = joinpath(dir, "jwt.secret")
+        cfg = C.AppConfig(; jwt_secret_path = spath)
+        s = C.ensure_jwt_secret!(cfg)
+        @test (filemode(spath) & 0o777) == 0o600 && length(s) == 64
+        link = joinpath(dir, "link.secret")
+        symlink(spath, link)
+        @test_throws ArgumentError C.ensure_jwt_secret!(C.AppConfig(; jwt_secret_path = link))
+    end
+end
+
+@testset "S10: pg_conninfo single-quotes + escapes every value" begin
+    pc = C.PostgresConfig(; host = "h", port = 5432, dbname = "d", user = "u",
+                          password = "p' OR '1'='1")
+    ci = S.pg_conninfo(pc)
+    @test occursin("host='h'", ci) && occursin("port='5432'", ci) && occursin("dbname='d'", ci)
+    @test occursin("\\'", ci)                       # embedded quote is escaped
+    @test !occursin("password='p' OR", ci)          # not left unescaped
+    @test occursin("\\\\", S.pg_conninfo(C.PostgresConfig(; password = "a\\b")))  # backslash escaped
+end
+
+@testset "SQLite: C10 monotonic keys + token_version" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    a = S.create_issue!(bs; title = "A")
+    @test a.key == "QCI-100"
+    hi = S.create_issue!(bs; title = "B")
+    @test hi.key == "QCI-101"
+    S.delete_issue!(bs, hi.id)                       # delete the highest-numbered
+    nxt = S.create_issue!(bs; title = "C")
+    @test nxt.key == "QCI-102"                        # NOT recycled to 101
+
+    us = S.SQLiteUserStore(":memory:")
+    u = S.create_user!(us; email = "tv@b.co", name = "Tv", password = "pw123456")
+    @test S.get_token_version(us, u.id) == 0
+    @test S.bump_token_version!(us, u.id) == 1
+    S.deactivate_user!(us, u.id)                      # deactivate bumps too
+    @test S.get_token_version(us, u.id) == 2
+end
+
+@testset "Remote: token_version + deactivate bump (FakeExec)" begin
+    tv = Ref(0)
+    fx = S.FakeExec((sql, p) -> begin
+        if occursin("token_version = token_version + 1", sql)
+            tv[] += 1; Dict{String,Any}[]
+        elseif occursin("SELECT token_version", sql)
+            [Dict{String,Any}("token_version" => tv[])]
+        else
+            Dict{String,Any}[]
+        end
+    end)
+    us = S.RemoteUserStore(fx)
+    @test S.get_token_version(us, "u") == 0
+    @test S.bump_token_version!(us, "u") == 1
+    @test S.deactivate_user!(us, "u")
+    @test tv[] == 2
+end
+
+# ── Minimal in-memory Postgres model: interprets exactly the SQL the remote
+# board store emits, so C2/C3/C4/C10 semantics are verified (not string-matched).
+mutable struct InMemPG
+    issues::Vector{Dict{String,Any}}
+    seq::Dict{Any,Int}
+end
+InMemPG() = InMemPG(Dict{String,Any}[], Dict{Any,Int}())
+const _ISSUE_COLS = ["id","key","title","description","status","priority","story_points",
+    "epic_id","sprint_id","assignee_id","reporter_id","start_date","due_date","position","created","updated"]
+function (db::InMemPG)(sql::AbstractString, params::AbstractVector)
+    s = String(sql)
+    _sortkey(r) = (r["position"], r["key"])
+    if occursin("INSERT INTO issues", s)
+        push!(db.issues, Dict{String,Any}(_ISSUE_COLS[i] => params[i] for i in eachindex(_ISSUE_COLS)))
+        return Dict{String,Any}[]
+    elseif occursin("SELECT last FROM key_seq", s)
+        return haskey(db.seq, params[1]) ? [Dict{String,Any}("last" => db.seq[params[1]])] : Dict{String,Any}[]
+    elseif occursin("INSERT INTO key_seq", s)
+        db.seq[params[1]] = params[2]; return Dict{String,Any}[]
+    elseif occursin("MAX(CAST(substr(key, 5)", s)
+        nums = [parse(Int, r["key"][5:end]) for r in db.issues if startswith(r["key"], "QCI-")]
+        return [Dict{String,Any}("m" => isempty(nums) ? nothing : maximum(nums))]
+    elseif occursin("COUNT(*) AS c FROM issues", s)
+        return [Dict{String,Any}("c" => count(r -> r["status"] == params[1], db.issues))]
+    elseif occursin("SELECT * FROM issues WHERE id", s)
+        i = findfirst(r -> r["id"] == params[1], db.issues)
+        return i === nothing ? Dict{String,Any}[] : [copy(db.issues[i])]
+    elseif occursin("SELECT id FROM issues WHERE status", s) && occursin("AND id !=", s)
+        rows = sort([r for r in db.issues if r["status"] == params[1] && r["id"] != params[2]], by = _sortkey)
+        return [Dict{String,Any}("id" => r["id"]) for r in rows]
+    elseif occursin("SELECT id FROM issues WHERE status", s)
+        rows = sort([r for r in db.issues if r["status"] == params[1]], by = _sortkey)
+        return [Dict{String,Any}("id" => r["id"]) for r in rows]
+    elseif occursin("SELECT * FROM issues WHERE status", s)
+        rows = sort([r for r in db.issues if r["status"] == params[1]], by = _sortkey)
+        return [copy(r) for r in rows]
+    elseif occursin("SELECT * FROM issues ORDER BY", s)
+        return [copy(r) for r in sort(db.issues, by = r -> (r["status"], r["position"], r["key"]))]
+    elseif occursin("UPDATE issues SET status", s)
+        i = findfirst(r -> r["id"] == params[4], db.issues)
+        i === nothing || (db.issues[i]["status"] = params[1]; db.issues[i]["position"] = params[2])
+        return Dict{String,Any}[]
+    elseif occursin("UPDATE issues SET position", s)
+        i = findfirst(r -> r["id"] == params[2], db.issues)
+        i === nothing || (db.issues[i]["position"] = params[1])
+        return Dict{String,Any}[]
+    elseif occursin("DELETE FROM issues WHERE id", s)
+        filter!(r -> r["id"] != params[1], db.issues); return Dict{String,Any}[]
+    end
+    return Dict{String,Any}[]   # issue_labels deletes, generic field updates, etc.
+end
+
+@testset "Remote board semantics via in-memory PG (C2/C3/C4/C10)" begin
+    bs = S.RemoteBoardStore(InMemPG())
+    a = S.create_issue!(bs; title = "A", status = "Backlog")
+    b = S.create_issue!(bs; title = "B", status = "Backlog")
+    c = S.create_issue!(bs; title = "C", status = "Backlog")
+    # C2: sequential MAX+1 keys + append positions (not random / not constant 0)
+    @test [a.key, b.key, c.key] == ["QCI-100", "QCI-101", "QCI-102"]
+    @test [a.position, b.position, c.position] == [0, 1, 2]
+    # C3: move reindexes vacated column dense
+    S.move_issue!(bs, a.id; status = "To Do")
+    @test [x.position for x in S.list_issues(bs; status = "Backlog")] == [0, 1]
+    @test S.get_issue(bs, a.id).status == "To Do" && S.get_issue(bs, a.id).position == 0
+    S.rank_issue!(bs, c.id; position = 0)
+    bl = S.list_issues(bs; status = "Backlog")
+    @test bl[1].id == c.id && [x.position for x in bl] == [0, 1]
+    # C4: update_issue! validates + routes status through move (stays dense)
+    S.update_issue!(bs, b.id; status = "To Do")
+    @test [x.position for x in S.list_issues(bs; status = "To Do")] == [0, 1]
+    # position via update_issue! → routed through move (dense)
+    S.update_issue!(bs, b.id; position = 0)
+    @test S.list_issues(bs; status = "To Do")[1].id == b.id
+    @test_throws ArgumentError S.update_issue!(bs, b.id; status = "Nope")
+    @test_throws ArgumentError S.update_issue!(bs, b.id; priority = "Nope")
+    # C10: delete the highest key, then create → key never recycled
+    hi = S.create_issue!(bs; title = "D", status = "Backlog")
+    @test hi.key == "QCI-103"
+    S.delete_issue!(bs, hi.id)
+    nxt = S.create_issue!(bs; title = "E", status = "Backlog")
+    @test nxt.key == "QCI-104"
+    bkl = S.list_issues(bs; status = "Backlog")
+    @test [x.position for x in bkl] == collect(0:length(bkl) - 1)   # dense after delete
+end
