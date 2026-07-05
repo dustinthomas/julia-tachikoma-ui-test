@@ -16,4 +16,6 @@
 
 3. Capture evidence (stdout + any .tach recordings) in your scratch or session logs. Never claim "done" for UI/login/startup changes without this.
 
+4. **Coverage gate** (any `src/` change): `julia --project=qci-kanban qci-kanban/test/coverage_gate.jl` must print `GATE PASSED` — 100% line coverage on gated v2 files. Full TDD/BDD/coverage policy: `qci-kanban/.claude/rules/tdd-bdd-coverage-gates.md` (canonical for both tools).
+
 This ensures the "first time login / create account" experience and prevents regressions after seeding or gate changes.
