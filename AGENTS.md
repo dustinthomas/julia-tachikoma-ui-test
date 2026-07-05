@@ -1,140 +1,87 @@
 # AGENTS.md (Grok project rules)
 
-**This workspace replicates the agentic coding environment from `test-grok-cli`.**
+Project: **julia-tachikoma-ui-test** — Julia + Tachikoma.jl TUI experiments (main sub-project: `qci-kanban/`).
 
-Project: **julia-tachikoma-ui-test**
-
-It includes the full `.grok/` native personas, skills (pipeline, prime, review, test, commit, caveman, tdd), safety hooks, and model routing.
-
-Use this for developing and testing Julia + UI/agentic coding experiments with the structured Grok multi-agent workflow (Plan → Scout → Implement/Validate → Review).
+**Workflow policy (2026-07 revision):** see `.grok/docs/agentic-workflow-2026-07.md` for the full rationale and verified evidence. Summary: single agent by default, context-centric decomposition, one independent verifier, no role-play pipelines. The old `/pipeline` persona pipeline and 3-agent `/tdd` choreography are **deprecated** (kept on disk for reference).
 
 **MANDATORY RULE (see .grok/rules/always-run-the-app-after-changes.md):**
-After ANY change to src/, db seeding, login gate, KanbanModel, update!/view, or tests that affect startup:
-- Always run a real app verification (julia expr exercising default DB load + gate render + create-account 'c' flow via update! + TestBackend).
-- Run the live app: `julia --project=. -e 'using QciKanban; QciKanban.kanban()'` in a terminal and confirm first-time "No users — press [c] to create account" with ZERO pre-seeded users on the LOGIN screen.
-- Use record_demo for headless runs. Save evidence. Never finish without starting/verifying the app.
+After ANY change to src/, db seeding, login gate, KanbanModel/AppModel, update!/view, or tests that affect startup:
+- Run a real app verification (live `julia --project=. -e 'using QciKanban; QciKanban.kanban()'` or headless `record_demo`/`record_demo2`) and confirm the first-time "No users — press [c] to create account" screen with ZERO pre-seeded users.
+- Save evidence. Never finish without starting/verifying the app.
 
-## Current Quick-Win Setup
+## Tiered Workflow (the default process)
 
-- Grok automatically loads permissions and some hooks from `~/.claude/settings.local.json` and Claude plugins (compat layer is active).
-- We have a `.grok/` directory with:
-  - `config.toml` — subagent model routing between `grok-build` (lead/orchestrator) and `grok-composer-2.5-fast` (faster model for light roles).
-- Custom models (BYOM) are registered in the user `~/.grok/config.toml` using `[model.<name>]` sections. Mercury 2 (Inception Labs) has been added as an example fast reasoning model.
-  - `personas/`, `agents/`, `skills/`, `hooks/`, `rules/` — ready for native ports.
-- Use `/config-agents`, `/personas`, `/skills`, `grok inspect`, and `/plan` for management.
+Work is tiered by size. The lead does the work itself in one context; **the agent that implements a feature also writes its tests**. Never split plan/code/test across separate agents by role — every handoff loses context.
 
-## Model Assignment Strategy (mirroring the original team)
+**Tier 0 — trivial** (typo, label, one-line guard): direct edit + the targeted tests from the test-impact map. No subagents.
 
-- **Lead / Orchestrator**: `grok-build` — strong coding model.
-- **Scout / Explorer / Reviewer (lightweight)**: `grok-composer-2.5-fast` — fast model.
-- **Coder**: `grok-composer-2.5-fast` (Composer 2.5 Fast). Mercury-2 (BYOM) can be used but subagent calls to it are often unreliable (env inheritance, client overhead).
-- **Coder / Validator / Planner (heavy)**: `grok-build` or appropriate override.
+**Tier 1 — normal feature/bugfix (default):**
+1. *Scout (optional)*: if broad codebase context is needed, spawn ONE read-only explore subagent that returns a condensed summary (~1–2k tokens, file:line + short snippets). Don't fold file dumps into the lead context. If you already know the files, just read them.
+2. *Plan inline*: short written plan (plan.md for larger work). No separate planner agent.
+3. *Implement + test in the same context*: write the change AND its TestBackend tests yourself. Consult the test-impact map (`qci-kanban/.claude/rules/qci-kanban-test-map.md` — canonical for both tools) and run the targeted tests as you go, then the full suite.
+4. *Verify independently*: spawn ONE verifier subagent (validator persona, `capability_mode: execute`) with the task description + changed-file list and **explicit criteria**: run the complete test suite (`julia --project=. test/runtests.jl`), run the app gate if src/ changed, review the actual `git diff` from disk, quote findings verbatim with file:line, severity critical/warning/nit, exact command + exit code for every check. Verdict APPROVED only on full-suite green + app gate + zero critical/warning findings. Fix findings, re-verify (use `resume_from` so the verifier keeps its context).
 
-BYOM example: Mercury 2 (`mercury-2`) from Inception Labs is registered globally as a fast OpenAI-compatible diffusion model (see `~/.grok/config.toml` and `.grok/config.toml`).
+**Tier 2 — large multi-part work:** `/design`-style short design doc with a PR plan (DAG of small, independently reviewable slices) → user buy-in → each slice implemented as a Tier-1 unit, `isolation: "worktree"` when slices run in parallel (bundled `/execute-plan` fits here). Each slice's implementer owns its tests; each slice gets its own verifier.
 
-**Using the key via .env (preferred):**
-- Add `INCEPTION_API_KEY=...` to a `.env` file in the project (`.env` is gitignored).
-- Start Grok with `source .env && grok ...` (or use direnv).
-- Assign per persona: edit `model = "..."` in .grok/personas/NAME.toml. Or `-m` for lead.
+For medium tasks the bundled `/implement --effort 1..2` (implementer ↔ reviewer with `resume_from`) is an acceptable Tier-1 variant — prefer low effort; 3+ reviewers only for genuinely high-risk changes.
 
-Current persona models (edit `model =` line in .grok/personas/*.toml to switch):
-- coder    = grok-composer-2.5-fast
-- reviewer = grok-composer-2.5-fast
-- scout    = grok-composer-2.5-fast
-- planner/validator = grok-build
+## TDD (revised — see .grok/skills/tdd/SKILL.md)
 
-You can achieve this via:
-- `[subagents.models]` in config
-- Personas with a `model` field
-- Custom roles/agents in `.grok/agents/`
+Red-first is a *discipline inside the single agent*, not a multi-agent ceremony: for behavioral changes, write the failing test first, watch it fail, make it pass minimally, refactor after green. What measurably reduces regressions is the **test-impact map** (know which tests cover what you're touching and run them first), not procedural TDD role-play. Coverage is a diagnostic, not a gate; the gate is full-suite green + the app runs.
 
-## Pipeline Philosophy (from the original .claude setup)
+## Verification culture (non-negotiable, any tier)
 
-Every significant change should go through a structured process:
-1. Plan (or use `/plan`)
-2. Scout / research context
-3. Implement (with clear evidence of changes)
-4. Validate (run real commands + tests, provide high-signal evidence)
-5. Review (multiple lenses + verification of findings)
+- Never claim green without running the commands yourself in this session; exact command + exit_code, concise evidence (error lines or last 5–8 lines; full tail only on failure or "all pass" claims).
+- Re-audit "all pass" claims by re-running the exact commands.
+- Reviewer/verifier findings quote code verbatim from disk.
+- Escalate to adversarial re-verification (independent refutation attempt, 2-of-3) only for critical findings.
+- "No test needed" requires explicit written justification.
 
-See `.grok/docs/token-efficiency.md` for the current practices that reduce token usage (phase summaries, artifact files in the target dir, concise validator output, minimal context to subagents, diff-focused reviews) while preserving quality and the high reasoning effort on the coder persona.
+## Token discipline
 
-We will encode this as native Grok skills + personas + explicit use of `spawn_subagent`.
+- Artifact-first: durable state goes to disk (plan.md, `agent_logs/<slug>/`), subagents are told to read files from disk, not fed pastes.
+- Prefer `git diff` and targeted excerpts over whole-file dumps.
+- Subagents exist for context isolation (exploration, independent verification) — not role-play. Spawn flags for light roles: `--no-memory --no-leader --disable-web-search` where safe.
+- `todo_write` tracks phases; pass current todos only, not history.
 
-## TDD Orchestration Architecture & 2026 Best Practices (Hierarchical + Scoped)
+## Model Assignment
 
-This project supports a dedicated hierarchical TDD workflow in addition to the core pipeline.
-
-**Dedicated TDD Agent**
-- Use the `tdd-orchestrator` persona (strong model) when you want a lead whose entire job is to run the new workflow: it delegates to the three core actions, iterates strictly on validator/testing feedback, suggests next steps, and drives implementation until the coverage gate passes.
-- The invocable workflow is the `tdd` skill (`/tdd <task>`).
-
-See:
-- `.grok/personas/tdd-orchestrator.toml`
-- `.grok/skills/tdd/SKILL.md`
-- `.grok/docs/tdd-3-actions.md` (the three actions contract)
-- `.grok/docs/tdd-architecture.md`
-- `.grok/docs/tdd-workflow.md`
-
-**Core structure (Grok Build native)**
-- Orchestrator (lead on grok-build): owns the goal, TDD Red-Green-Refactor state machine, global state, checkpoints. Delegates **only scoped work**.
-- Specialized sub-agents (routed models):
-  - Test Writer (new persona, fast): given task + gaps → produces **failing tests only** (unified diff + JSON summary).
-  - Coder (grok-composer-2.5-fast native): receives **only** failing tests + relevant diff + plan excerpt. Writes the **minimal** code to pass.
-  - Validator (grok-build): executes real `julia --project=.` tests + coverage. Emits strict gate result. Loops until green **and** >=100% coverage on changed logic/UI.
-- UI work: **always** exercise Tachikoma.TestBackend (render + char_at/find_text/row_text after update!/handle_key! + re-render).
-- `todo_write` tracks TDD phase (Red / Green / Refactor + sub-tasks).
-- Persistent artifacts written to `agent_logs/<feature-slug>/` (checkpoints, diffs, validation-evidence, state.json, final-summary.md).
-
-**Mandatory rules**
-- 100% coverage target on changed logic/UI (non-negotiable except with explicit justification).
-- Strict loop order: tests first (failing) → minimal code → refactor only after green + gate.
-- Every handoff uses scoped context + instructs subagents to read plan/checkpoint artifacts from disk.
-- Checkpoints after every major phase.
-
-Use `/tdd` for feature slices where you want ironclad red-first TDD + coverage evidence. It pairs well with `/execute-plan` for PR stacks and `/pipeline` for broader flows.
-
-## Conventions
-
-- Keep skills focused and version-controllable.
-- Prefer explicit `spawn_subagent` with `capability_mode` and personas over vague delegation.
-- Document model choices and why.
-- Use `todo_write` for multi-step work.
-- Follow `.grok/docs/token-efficiency.md` for context hygiene (phase summaries, artifact files in target dir, concise validator output, minimal context to subagents, diff-focused reviews).
+- **Lead / verifier**: `grok-build` (strong model — the lead does the actual implementation now, so it gets the strong model).
+- **Scout / explore subagents**: `grok-composer-2.5-fast`.
+- Routing lives in `.grok/config.toml` (`[subagents.models]`) and persona `model =` lines. BYOM (mercury-2) is registered globally but unused.
+- Legacy personas (`planner`, `scout`, `coder`, `reviewer`, `test-writer`, `tdd-orchestrator`) remain for the deprecated skills; `validator` doubles as the Tier-1 verifier persona.
 
 ## Julia + Tachikoma Specific Rules
 
-**Before any Tachikoma UI work** (implementing, reviewing, testing, or planning changes), you **must** read:
+**Before substantial Tachikoma UI work** (new views, modals, focus/keymap changes), read:
 - `.grok/docs/tachikoma-core.md`
 - `.grok/docs/tachikoma-ui-testing.md`
-- `.grok/docs/kanban-beauty-plan.md` (when the task involves Kanban board features or the Jira-inspired plan)
+- `.grok/docs/kanban-beauty-plan.md` (Kanban feature work)
+Small tweaks to existing patterns don't require a full re-read — the distilled rules below suffice.
 
 - Always invoke Julia with `julia --project=.`.
 - Tachikoma apps follow Elm: `mutable struct X <: Model`, `should_quit`, `update!(m, KeyEvent)`, `view(m, Frame)`. Use `@tachikoma_app`.
-- **UI visual verification follows the dedicated methodology**: see `.grok/docs/tachikoma-ui-testing.md`.
-  - Always use `Tachikoma.TestBackend` + `find_text` / `row_text` / `char_at` + re-render after `update!`.
-  - Prefer the project `visual_rows(m; w, h)` helper for full-app checks.
-  - Login gate tests must start from raw `KanbanModel()` + `:memory:` + `load_users!` and verify the exact first-time "No users — press [c] to create account" screen.
-  - Modals and overlays require "no bleed" assertions.
-  - **Mandatory**: run the live app after src/, gate, or startup changes (see `.grok/rules/always-run-the-app-after-changes.md`).
-- **UI changes require TestBackend coverage** (see https://kahliburke.github.io/Tachikoma.jl/dev/testing and the methodology doc). Validator must execute render + char_at / find_text / row_text / handle_key! + re-render checks.
-- Use widgets + layouts (Block, render, split_layout, constraints) heavily.
-- Test logic directly with `update!` on models; render widgets headless.
-- Property-based tests with Supposition.jl are encouraged for layouts/unicode/edge cases.
-- Recording (`record_app`, `record_widget`, `record_demo`) useful for demos and visual verification outside strict tests.
-- Run `julia --project=. -e 'using Pkg; Pkg.test()'` or `julia --project=. test/runtests.jl` for validation.
-- The TestBackend + scripted injection is the killer feature that makes agentic TUI development reliable and repeatable.
+- UI verification is headless and deterministic: `Tachikoma.TestBackend` + `find_text`/`row_text`/`char_at` + **re-render after every `update!`** before asserting. Prefer the project `visual_rows(m; w, h)` helper.
+- Drive flows exclusively through `update!(m, KeyEvent(...))` — no direct mutation of fields the user couldn't reach.
+- Login-gate tests start from raw `KanbanModel()` + `:memory:` + `load_users!` and verify the exact first-time zero-users screen.
+- Modals and overlays require "no bleed" assertions.
+- UI changes require TestBackend coverage; the verifier must execute render + assertion + `update!` + re-render checks.
+- Property-based tests with Supposition.jl encouraged for layouts/unicode/edge cases.
+- `record_app`/`record_widget`/`record_demo` for demos and visual verification outside strict tests.
+- Full suite: `julia --project=. test/runtests.jl` (or `Pkg.test()`).
+- v1 (`src/QciKanban.jl` v1 sections, `src/db.jl`) is legacy — do not modify; new work targets v2. Raw `ColorRGB` only in `src/ui/theme.jl`.
 
-## Model routing + custom models (BYOM)
+## Skills
 
-See `.grok/config.toml` for the project-scoped routing.
+- `/tdd` — revised single-agent TDD discipline (red-first + impact map + verifier gate).
+- `/review` — strict single-verifier review of the working tree.
+- `/test`, `/commit`, `/prime`, `/caveman` — unchanged utilities.
+- `/pipeline` — **DEPRECATED**; kept for reference. Use the tiered workflow above.
+- Bundled: `/implement`, `/design`, `/execute-plan` (see `~/.grok/bundled/skills/`).
 
-Custom models (e.g. Mercury 2) are configured in your global `~/.grok/config.toml`.
+## Conventions
 
-**Loading keys via .env (preferred):**
-- Put `INCEPTION_API_KEY=...` in `.env`.
-- Launch reliably: `set -a; source .env; set +a; grok ...`
-- Verify models: `grok inspect` / `grok models`
-
-See `.grok/config.toml` and the personas for current defaults.
-The replicated environment includes the core skills (pipeline, prime, review, test, commit, caveman) plus the dedicated `/tdd` hierarchical TDD orchestration workflow with supporting personas (`tdd-orchestrator`, `test-writer`) and docs in `.grok/docs/tdd-*.md`. See AGENTS.md section on TDD Orchestration and `.grok/skills/tdd/SKILL.md`.
+- Keep skills focused and version-controllable; document model choices.
+- Prefer explicit `spawn_subagent` with `capability_mode` over vague delegation; depth limit = 1 (subagents don't spawn subagents).
+- Keep this file under 200 lines (always-loaded instruction files lose adherence past that).
+- When workflow policy changes, update `.claude/` (CLAUDE.md, rules, agents) and `.grok/` together — they encode the same process.

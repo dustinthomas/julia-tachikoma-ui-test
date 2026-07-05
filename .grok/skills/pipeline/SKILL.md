@@ -1,11 +1,17 @@
 ---
 name: pipeline
-description: Run the structured Plan → Scout → Implement/Validate loop → Review pipeline (Grok-native version of the original .claude/workflows/pipeline.js). Use for any non-trivial change.
-when-to-use: Any PR-bound or important change. Pass the task description after the slash. Supports trivial: true to skip plan/scout.
+description: DEPRECATED (2026-07-05) — persona pipeline superseded by the tiered single-agent workflow in AGENTS.md. Kept for reference only. Do not use for new work.
+when-to-use: Do not use. See AGENTS.md "Tiered Workflow" and .grok/docs/agentic-workflow-2026-07.md. For medium tasks use bundled /implement; for large work /design + /execute-plan.
 user-invocable: true
 ---
 
-# Pipeline Skill — Grok Native (Plan → Scout → Loop → Review)
+# ⚠️ DEPRECATED — Pipeline Skill (Plan → Scout → Loop → Review)
+
+> **This skill is deprecated as of 2026-07-05.** A single `/pipeline` run was measured at ~24.1M tokens (406k peak prompt); verified 2026 research (see `.grok/docs/agentic-workflow-2026-07.md`) shows role-split pipelines spend more tokens on coordination than on work and lose context at every handoff. Use the tiered workflow in `AGENTS.md` instead: single agent + test-impact map + one independent verifier. The evidence rules embedded below (exit codes, verbatim quotes, re-audits) live on in the new workflow.
+>
+> If invoked, do NOT run the phases below — apply the Tier-appropriate process from AGENTS.md to the given task and say you did so.
+
+# Pipeline Skill — Grok Native (Plan → Scout → Loop → Review) [historical reference]
 
 This skill encodes the deterministic quality pipeline from the fab-ui-2-0 Claude setup, adapted for Grok's `spawn_subagent`, personas, capability modes, and model routing.
 

@@ -1,128 +1,34 @@
 ---
 name: tdd
-description: Run the strict hierarchical TDD workflow (Test Writer → Coder → Validator gate) using the 2026 scoped agentic pattern. Loops on real test + coverage feedback until green + 100% coverage. Writes checkpoints to agent_logs/. Use when: Any non-trivial change where you want explicit Red-Green-Refactor with coverage gate. Supports "trivial: true" for very small things. Prefer this or bundled /implement for feature work requiring strong validation.
-when-to-use: For non-trivial work requiring strict TDD red-first, coverage gates, and detailed checkpointing (especially UI or logic with TestBackend requirements). Use /tdd <task description>.
+description: Single-agent red-first TDD with test-impact context and an independent verifier gate (2026-07 revision). You write the failing test, watch it fail, make it pass minimally, then hand to a verifier. Replaces the deprecated 3-agent test-writer/coder/validator choreography.
+when-to-use: Behavioral changes where a failing-test-first loop adds safety — bug fixes with a reproducible symptom, new update!/view behavior, contract changes. Use /tdd <task description>.
 user-invocable: true
 allowed-tools: run_terminal_command, read_file, grep, write, search_replace, todo_write, spawn_subagent
 ---
 
-# TDD Skill — Hierarchical Red-Green-Refactor with Coverage Gate (2026 Pattern)
+# TDD Skill — Single-Agent Red-First with Impact Context (2026-07)
 
-Strict Test-Driven Development orchestrator. The lead owns the TDD state machine and only delegates **scoped work** to specialized sub-agents. Never implement yourself as lead. Always produce artifacts in `agent_logs/<slug>/`.
+**What changed and why:** the old version of this skill split RED (test-writer agent), GREEN (coder agent), and the gate (validator agent) across three subagents. Verified research (TDAD, arXiv 2603.17973; see `.grok/docs/agentic-workflow-2026-07.md`) found that *procedural TDD instructions without targeted test context made regressions worse than no intervention*, while supplying a code→tests impact map cut regressions ~70%. So: **you do the whole loop yourself in one context**, the impact map supplies the targeted context, and the only subagent is the independent verifier at the end.
 
-**Primary invocation**
-```
-/tdd Add the ability for the user to move a task to any lane via picker (m key)
+## The loop (you, the lead, in one context)
 
- /tdd trivial: true Small guard tweak
-```
+1. **Orient** — consult the test-impact map (`qci-kanban/.claude/rules/qci-kanban-test-map.md`) for every file you expect to touch. Run those targeted tests BEFORE changing anything to confirm the baseline is green (`julia --project=. test/runtests.jl` for suites that need the runtests helpers). Record the baseline.
+2. **RED** — write the failing test(s) yourself, in the correct existing test file per the map. For UI: TestBackend, driven through `update!(m, KeyEvent(...))`, re-render before every assertion, no-bleed checks for modals, raw-model start for gate tests. Run them; **confirm they fail for the expected reason** (a test that fails for the wrong reason proves nothing). Record the failure output.
+3. **GREEN** — write the minimal production change to pass. Run the targeted tests; iterate until green. Resist scope creep: anything beyond the failing tests' scope goes in the plan, not this diff.
+4. **Refactor** — only after green. Keep the targeted tests green throughout.
+5. **Full suite + app gate** — `julia --project=. test/runtests.jl` in full; if `src/` changed, run the app gate (`record_demo2`/`record_demo` or scripted startup check, confirm the zero-users first-run login screen).
+6. **Independent verify** — spawn ONE verifier subagent (validator persona, `capability_mode: execute`) with: the task, changed files, your baseline/red/green evidence, and explicit criteria — re-run the complete suite, re-run the app gate, review the actual `git diff` from disk, verbatim quotes with file:line, exact command + exit code per check, verdict APPROVED only on full green + gate + zero critical/warning findings. Fix findings; re-verify with `resume_from`.
 
-## Core Principles (non-negotiable)
-- **Tests first (Red)**: Write failing tests that prove the gap before any production change.
-- **Minimal to Green**: Coder receives *only* the failing tests + scoped context and writes the smallest code to make them pass.
-- **Coverage gate**: 100% coverage on changed logic/UI (Julia coverage + Tachikoma.TestBackend assertions). Validator emits strict gate JSON.
-- **Checkpoints & state**: After every major phase the lead writes concise checkpoint + updates state in `agent_logs/`.
-- **Evidence only**: Validator and lead only claim green after real `julia --project=.` runs + re-auditable output.
-- **UI rule**: Every interactive or view change **must** follow the full Tachikoma UI Testing Methodology in `.grok/docs/tachikoma-ui-testing.md`:
-  Use `TestBackend` + `find_text`/`row_text`/`char_at` + `visual_rows` + re-render after `update!`. Gate tests start from raw model. No-bleed checks required for modals.
+## State & artifacts (lightweight)
 
-## Roles (use these personas)
-- `tdd-orchestrator` (grok-build): You. Owns goal, TDD loop (Red → Green → gate), `todo_write`, checkpoint writing, final summary. Delegates only.
-- `test-writer` (fast): Produces **failing tests only**.
-- `coder` (grok-composer-2.5-fast native, existing): Minimal code to pass the supplied red tests.
-- `validator` (grok-build, existing): Executes tests + coverage, returns strict gate result.
-- `reviewer` (fast): Lens reviews when orchestrator decides (selective).
+- `todo_write`: baseline / red / green / full-suite+gate / verify.
+- For multi-session work, write `agent_logs/<date-slug>/notes.md` with baseline evidence, red output, and decisions — enough to resume, not a checkpoint ceremony.
+- Every claim of red/green backed by a command you actually ran in this session: exact command + exit code + the relevant output lines.
 
-See:
-- `.grok/personas/tdd-orchestrator.toml`
-- `.grok/personas/test-writer.toml`
-- `.grok/docs/tdd-3-actions.md` (the three core action contracts)
-- `.grok/docs/tdd-workflow.md`
-- `.grok/docs/tdd-architecture.md`
+## Coverage
 
-## Loop Structure (lead orchestrates)
+Coverage is a **diagnostic, not a gate**: use it to find untested branches in code you touched (`julia --project=. --code-coverage=user test/runtests.jl`), and add tests where the gap is behavioral. The old 100% target on changed code is retired — the gate is full-suite green + the app runs + verifier approval.
 
-1. **Setup**
-   - Read AGENTS.md + relevant docs.
-   - Create `agent_logs/<feature-slug>/` (use date + short descriptive slug, e.g. `2026-06-27-move-lane-tdd`).
-   - Write `tdd-plan.json` or `plan.md` (scoped phases).
-   - `todo_write` with phases: Red, Green(s), Validate, Review, Final.
-   - Write initial `checkpoint-setup-plan.md`.
+## When NOT to use this skill
 
-2. **RED (Test Writer)**
-   - Spawn `test-writer` (read-only or limited) with task + current gaps + plan excerpt.
-   - Goal: only failing tests (new or extended). Must use TestBackend for UI.
-   - Receive unified diff or test file content + summary.
-   - Apply via search_replace/write.
-   - Run tests → expect **failure** (record evidence).
-   - Write `checkpoint-red.md` + `red-tests.diff`.
-   - Update todo.
-
-3. **GREEN (Coder + minimal iterations)**
-   - Pass *only* the failing tests + tiny relevant context + plan excerpt to coder.
-   - Coder must produce **minimal** diff to make tests pass.
-   - Apply changes.
-   - Immediately run validator or targeted test.
-   - If not green: feed validator output back to coder (loop limited).
-   - On green: write `coder-greenN.diff` + `checkpoint-greenN.md`.
-
-4. **VALIDATE GATE (strict)**
-   - Spawn validator (execute mode).
-   - Must run:
-     - `julia --project=. -e 'using Pkg; Pkg.test()'`
-     - Targeted test file
-     - Coverage (Pkg.test(coverage=true) or Coverage.jl)
-   - Require: all new/changed logic tests pass **and** coverage >= 100% on touched code (or explicit justified exception).
-   - Validator returns structured gate result.
-   - If gate fails → back to appropriate phase (usually more red or green).
-   - On success: write `checkpoint-validateN.md` + `validation-evidence.md` + coverage report.
-
-5. **Refactor / Polish (only after gate)**
-   - Only after green + gate. Keep all tests green.
-   - Selective reviewer lens review on significant diffs.
-
-6. **Final**
-   - Write `final-summary.md` (task, phases, commands run with evidence, coverage, files changed, next actions).
-   - Update `state.json`.
-   - Lead returns structured result with links to artifacts.
-
-## Checkpoint Convention
-`agent_logs/<slug>/` contains:
-- plan.md or tdd-plan.json
-- checkpoint-setup-plan.md
-- checkpoint-red.md + red-tests.diff
-- checkpoint-greenN.md + coder-greenN.diff
-- checkpoint-validateN.md + validation-evidence.md
-- coverage-report.json (if generated)
-- state.json (current phase, attempts, gate results)
-- final-summary.md
-
-Lead **always** writes a short phase summary after major steps (see token-efficiency.md).
-
-## Efficiency & Handoff Rules
-- Hand off **scoped context only**: failing tests summary + unified diff excerpts + latest checkpoint + plan phase.
-- Instruct subagents: "Read files from disk: plan.md, agent_logs/<slug>/checkpoint-*.md, relevant test files."
-- Prefer `isolation: "worktree"` for coder/validator runs when doing long TDD.
-- Use `todo_write` for Red/Green/Refactor/subtasks.
-- Background + `get_command_or_subagent_output` for parallel validators or reviewers.
-
-## Julia + Tachikoma Requirements
-- Always: `julia --project=.`
-- For UI: mandatory TestBackend in the red tests you (as orchestrator) drive.
-- Direct model tests + render + inspection after events.
-- Follow Elm Model/Update/View.
-
-## Example Full Run (lead thinking outline)
-```
-/tdd Move lane via modal picker
-
-Setup → RED (test-writer writes failing modal + navigation + move tests) → run (red) → checkpoint-red
-GREEN (coder given only red tests) → apply minimal → run (green) → checkpoint-green
-VALIDATE → full test + coverage gate → green + 100% → checkpoint-validate
-(If needed more GREEN or polish)
-Final summary + artifacts
-```
-
-Demand real execution at every gate. Never claim green without running the commands in this session and recording evidence.
-
-This skill is the dedicated TDD counterpart to `/pipeline` and `/test`.
+Pure refactors with existing coverage, doc/config changes, or visual polish with no behavioral contract — use the normal Tier 0/1 workflow from AGENTS.md. TDD earns its cost when there's a falsifiable behavior to pin down first.
