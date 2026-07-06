@@ -44,6 +44,12 @@ animation-gated glow/spinner, `column_counts`, `render_board_stats!`,
 `render_backlog!` wrappers, `record_demo2`, `_export_demo` svg+catch, and the
 `t → :toggle_stats` binding) is exercised by the test suite.
 
+## Startup-latency (TTFX) exclusion
+
+| File | Region | Why excluded |
+|------|--------|--------------|
+| `src/precompile.jl` | Entire file (`# COV_EXCL_START/STOP`) | PrecompileTools workload: the `@compile_workload` body executes only while `Pkg.precompile` generates the pkgimage, never at runtime, so no coverage run can observe it. It re-drives the same headless tour the covered `record_demo2` and the test suite already exercise; any breakage in it fails package precompilation (and therefore every test run) loudly. |
+
 ## Phase 6 — coverage gate + final review
 
 `test/coverage_gate.jl` is the machine-checked gate. It measures per-file line

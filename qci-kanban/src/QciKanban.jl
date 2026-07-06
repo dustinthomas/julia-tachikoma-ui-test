@@ -1620,5 +1620,7 @@ function record_demo(filename::AbstractString = "qci-kanban-demo.tach";
     filename
 end
 
+include("precompile.jl")  # PrecompileTools workload — caches update!/view native code (TTFX)
+
 end # module QciKanban
 

@@ -31,6 +31,7 @@ Run from `qci-kanban/`: `julia --project=. test/runtests.jl` (full suite). Most 
 | `src/ui/modals.jl` | `test_card_modals.jl` | `test_backlog.jl`, `test_board_view.jl` (no-bleed) |
 | `src/ui/widgets.jl` | `test_widgets.jl` | all view tests indirectly |
 | `src/gfx/*` (logo, charts) | `test_gfx.jl` | `test_app_shell.jl` (header logo) |
+| `src/precompile.jl` | none directly (precompile-time-only workload, coverage-excluded) — a broken workload fails `Pkg.precompile`, so any test run catches it | — |
 
 ## v1 app (legacy — `kanban()`, do not modify)
 
