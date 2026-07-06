@@ -382,6 +382,10 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     diamonds = Tuple{Int,Int,Any}[]
     sel_issue = _gantt_selected_issue(m)
 
+    # Track for PR4 selection bar accent (set during label/bar loop; used post-canvas)
+    selected_vis_i = nothing
+    selected_bar_ext = nothing
+
     # Scroll the row window so the selected issue is always drawn (U5): without
     # this a j-navigated selection below the fold is invisible yet actionable.
     row_start = 1
@@ -402,13 +406,18 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             iss = row.issue
             selected = sel_issue !== nothing && iss.id == sel_issue.id
             lstyle = selected ? sel_style() : Style(; fg = col_text())
-            set_string!(buf, area.x, rowy, _short((selected ? "▸ " : "  ") * row.label, left_w - 1), lstyle)
+            prefix = selected ? "▸ " : "├ "
+            set_string!(buf, area.x, rowy, _short(prefix * row.label, left_w - 1), lstyle)
             if iss.start_date !== nothing && iss.due_date !== nothing
                 ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, ncols)
                 if ext !== nothing
                     c0, c1 = ext
                     for dx in (2 * c0):(2 * c1 + 1), dy in (2 * (i - 1)):(2 * (i - 1) + 1)
                         set_point!(canvas, dx, dy)
+                    end
+                    if selected
+                        selected_vis_i = i
+                        selected_bar_ext = (c0, c1)
                     end
                 end
             else
@@ -444,6 +453,17 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     for (dx, dy, dcol) in diamonds
         set_char!(buf, dx, dy, '◆', Style(; fg = dcol))
+    end
+
+    # PR4: selection accent on bar (in addition to ▸ label). Brighter left ▌ segment using col_primary_hi().
+    # After canvas so it overwrites base █ (compatible with PR3-style post-overlays). Theming only; no y/layout shift.
+    if selected_vis_i !== nothing && selected_bar_ext !== nothing
+        c0, _ = selected_bar_ext
+        rowy = grid_y0 + (selected_vis_i - 1)
+        ax = chart_x + c0
+        if ax <= area.x + area.width - 1
+            set_char!(buf, ax, rowy, '▌', Style(; fg = col_primary_hi(), bold = true))
+        end
     end
 
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.

@@ -18,6 +18,21 @@ function maxrun(s::AbstractString, ch::Char)
     end
     best
 end
+
+# PR4: tolerant bar run length (█ base + ▌ sel-accent counts as consecutive bar material)
+# Allows geometry tests (max extent) to remain valid when sel accent replaces left █.
+function bar_run(s::AbstractString)
+    best = 0; cur = 0
+    for c in s
+        if c == '█' || c == '▌'
+            cur += 1
+            best = max(best, cur)
+        else
+            cur = 0
+        end
+    end
+    best
+end
 gantt_render(m; w = 120, h = 30) = begin
     tb = T.TestBackend(w, h); T.reset!(tb.buf)
     G4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, h))
@@ -132,8 +147,8 @@ end
         tb = gantt_render(m)
         @test T.find_text(tb, "Timeline") !== nothing   # epic header row
         ra = row_with(tb, a.key, 30); rb = row_with(tb, b.key, 30)
-        @test ra !== nothing && maxrun(ra, '█') == 5    # Mar12→16 inclusive @ dpc 1
-        @test rb !== nothing && maxrun(rb, '█') == 7    # Mar14→20 inclusive @ dpc 1
+        @test ra !== nothing && bar_run(ra) == 5    # Mar12→16 inclusive @ dpc 1 (tolerates PR4 sel ▌ accent)
+        @test rb !== nothing && bar_run(rb) == 7    # Mar14→20 inclusive @ dpc 1
     end
 
     @testset "zoom z toggles week↔month scale and rescales bars" begin
@@ -143,12 +158,12 @@ end
                                     start_date = Date(2026, 3, 12), due_date = Date(2026, 3, 16))
         g4!(m, 'G')
         @test m.gantt_scale == :week
-        tb = gantt_render(m); @test maxrun(row_with(tb, a.key, 30), '█') == 5
+        tb = gantt_render(m); @test bar_run(row_with(tb, a.key, 30)) == 5
         g4!(m, 'z')
         @test m.gantt_scale == :month
         tb2 = gantt_render(m)
         @test T.find_text(tb2, "[month]") !== nothing
-        @test maxrun(row_with(tb2, a.key, 30), '█') == 1   # 5 days collapse into one week-column
+        @test bar_run(row_with(tb2, a.key, 30)) == 1   # 5 days collapse into one week-column (tolerates sel accent)
         g4!(m, 'z'); @test m.gantt_scale == :week
     end
 
@@ -366,5 +381,41 @@ end
         g4!(m, 'z')
         tb2 = gantt_render(m; w=80, h=12)
         @test T.find_text(tb2, "GANTT") !== nothing
+    end
+
+    @testset "PR4: selection accent on bars (▌ + col_primary_hi) + epic hierarchy indents (├ ) — re-render + char asserts after j/k" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "Hier")
+        a = G4.Stores.create_issue!(m.boardstore; title = "UnderEpicA", epic_id = e.id,
+                                    start_date = Date(2026, 3, 12), due_date = Date(2026, 3, 16))
+        b = G4.Stores.create_issue!(m.boardstore; title = "UnderEpicB", epic_id = e.id,
+                                    start_date = Date(2026, 3, 18), due_date = Date(2026, 3, 22))
+        g4!(m, 'G')
+        @test m.gantt_sel == 1
+        @test G4._gantt_selected_issue(m).id == a.id
+        tb = gantt_render(m; w=120, h=20)
+        ra = row_with(tb, a.key, 30)
+        rb = row_with(tb, b.key, 30)
+        @test ra !== nothing && rb !== nothing
+        # current sel label uses ▸ ; non-selected issue rows use improved ├  tree indent
+        @test occursin("▸ ", ra)
+        @test occursin("├ ", rb)
+        # bar accent present on sel row (left ▌) ; uses theming col_primary_hi
+        @test occursin("▌", ra)
+        # full re-render discipline after update!
+        g4!(m, 'j')
+        @test m.gantt_sel == 2
+        @test G4._gantt_selected_issue(m).id == b.id
+        tb2 = gantt_render(m; w=120, h=20)
+        ra2 = row_with(tb2, a.key, 30)
+        rb2 = row_with(tb2, b.key, 30)
+        @test occursin("▸ ", rb2)
+        @test occursin("├ ", ra2)
+        @test occursin("▌", rb2)
+        @test !occursin("▌", ra2)  # accent only follows selection
+        @test T.find_text(tb2, "├ ") !== nothing
+        # also char_at on a row for the accent char (find bar start via known label prefix pos, but semantic occursin sufficient + explicit)
+        # verify sel row still contains its bar base from canvas too
+        @test bar_run(rb2) >= 1
     end
 end
