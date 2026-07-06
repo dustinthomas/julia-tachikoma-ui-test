@@ -392,6 +392,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
     # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
     # Theming only. Recompute rowy/selection here (same scroll logic as build pass; no y/layout change).
+    # NOTE (nit fix): row_start/ri/rowy/selected logic is intentionally duplicated from canvas pass (~338) for PR3 minimality;
+    # both copies must stay identical while layout unchanged (see PR2).
     for i in 1:nshow
         ri = row_start + i - 1
         ri > length(rows) && break
@@ -403,10 +405,17 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, ncols)
                 if ext !== nothing
                     c0, c1 = ext
+                    # explicit bounds guard (mirrors ruler/band: xx > ... continue); though gantt_bar_extent clamps
+                    if chart_x + c0 < chart_x || chart_x + c1 > area.x + area.width - 1
+                        continue  # COV_EXCL_LINE (defensive; extent always clamps c0/c1 valid for current render paths; see review fix)
+                    end
                     selected = sel_issue !== nothing && iss.id == sel_issue.id
                     bar_col = (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
                     bw = c1 - c0 + 1
                     # status density fill (partial ▓ or full █ for Done) first
+                    # NOTE (bichrome warning addressed by doc): canvas always uses col_primary() cyan for entire base █ track (per design "Keep base █ from canvas").
+                    # Only prefix (nfill) + ends get bar_col tint; suffix remains cyan unless overwritten by label/caps. This is intentional augmentation, not full recolor.
+                    # Uniform suffix tint would require additional sets over canvas result (not done for minimal + fidelity to "keep base").
                     p = status_progress(iss)
                     nfill = max(0, floor(Int, bw * p))
                     for k in 0:(nfill - 1)

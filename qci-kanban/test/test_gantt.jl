@@ -155,7 +155,7 @@ end
         tb = gantt_render(m)
         ra = row_with(tb, a.key, 30)
         @test occursin("▌", ra) && occursin("▐", ra)
-        @test (maxrun(ra, '█') + maxrun(ra, '▓') >= 0)  # small bw=5 + label eats fill; caps prove extent (PR3)
+        # (no numeric fill assert here; small bars + inside label intentionally eat █/▓ runs; caps + key presence verify)
         g4!(m, 'z')
         @test m.gantt_scale == :month
         tb2 = gantt_render(m)
