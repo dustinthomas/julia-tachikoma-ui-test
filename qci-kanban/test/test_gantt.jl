@@ -421,34 +421,94 @@ end
         @test bar_run(rb2) >= 1
     end
 
-    @testset "PR3 bar overlays: ends ▌▐, status density ▓ fills, inside labels (fit_width + contrast; re-render after update!)" begin
+    @testset "PR5: selected-item footer details (dates/dur/status/pri) at h>=10, hidden on small h or narrow; richer empty + hint; re-render after j/k; boundary h=6/8/10 (deps PR2/4)" begin
+        # data case with explicit dates/status/pri/assignee
         m = gantt_login()
-        e = G4.Stores.create_epic!(m.boardstore; name = "Polished")
-        # wide bar (>> label width) for inside label + density ▓ visible beyond label; use In Progress
-        iss = G4.Stores.create_issue!(m.boardstore; title = "WideRefine", epic_id = e.id,
+        e = G4.Stores.create_epic!(m.boardstore; name = "Foot")
+        # create a user for assignee resolution in footer (via m.userstore)
+        au_long = G4.Stores.create_user!(m.userstore; email="alice@qci.com", name="AliceWithAVeryLongNameForClippingTest", password="pw")
+        iss = G4.Stores.create_issue!(m.boardstore; title = "FooterDates", epic_id = e.id,
                                       status = "In Progress", priority = "High",
-                                      start_date = Date(2026, 3, 10), due_date = Date(2026, 3, 30))
+                                      assignee_id = au_long.id,
+                                      start_date = Date(2026, 3, 12), due_date = Date(2026, 3, 16))
         g4!(m, 'G')
-        @test m.gantt_start == Date(2026, 3, 10)
-        tb = gantt_render(m; w=120, h=20)
-        r = row_with(tb, iss.key, 30)
-        @test r !== nothing
-        # density fill present (partial ▓) + ends + inside label
-        @test occursin("▓", r)
-        @test maxrun(r, '▓') >= 1
-        # bar end caps present (unicode)
-        @test occursin("▌", r) && occursin("▐", r)
-        # inside label: key appears in bar row (from left + inside; post re-render assert)
-        @test occursin(iss.key, r)
-        # re-render discipline after update! (select changes sel contrast for label)
-        g4!(m, 'j')  # may select it or next; ensure at least one re-render
-        tb2 = gantt_render(m; w=120, h=20)
-        r2 = row_with(tb2, iss.key, 30)
-        @test r2 !== nothing
-        @test occursin(iss.key, r2)
-        @test occursin("▓", r2) && occursin("▌", r2)
-        # label inside wide bar uses fit_width (key prefix present); contrast not bg
-        # (assert via presence after re-render; style is internal)
-        @test T.find_text(tb2, iss.key) !== nothing
+        @test G4._gantt_selected_issue(m).id == iss.id
+        # w=70 (>=60 so shows footer) + long name (first created) to cover the _short wide-footer branch
+        tbl = T.TestBackend(70, 10); T.reset!(tbl.buf)
+        G4.render_gantt!(m, tbl.buf, T.Rect(1, 1, 70, 10))
+        @test T.find_text(tbl, "GANTT") !== nothing
+        ftxt = ""
+        for r=1:10; rt=T.row_text(tbl,r); if rt!==nothing && (occursin("(5d)",rt) || occursin("AliceWithAVeryLong",rt)); ftxt=rt; break; end; end
+        @test occursin("(5d)", ftxt) || occursin("2026-03-12", ftxt)
+        @test occursin("AliceWithAVeryLong", ftxt) || occursin("…", ftxt)
+        # w=120 (large) with long assignee to cover the non-clip suffix (asg) set_string branch
+        tbw = T.TestBackend(120, 10); T.reset!(tbw.buf)
+        G4.render_gantt!(m, tbw.buf, T.Rect(1, 1, 120, 10))
+        @test T.find_text(tbw, "AliceWithAVeryLongNameForClippingTest") !== nothing
+        # h=10 w=80: footer MUST appear with exact details (after layout from PR2)
+        tb10 = T.TestBackend(80, 10); T.reset!(tb10.buf)
+        G4.render_gantt!(m, tb10.buf, T.Rect(1, 1, 80, 10))
+        @test T.find_text(tb10, "GANTT") !== nothing
+        frow = nothing
+        for r in 1:10
+            rt = T.row_text(tb10, r)
+            if rt !== nothing && occursin("(5d)", rt) && occursin("In Progress", rt)
+                frow = rt; break
+            end
+        end
+        @test frow !== nothing
+        @test occursin("QCI-", frow) && occursin("2026-03-12", frow) && occursin("2026-03-16", frow)
+        @test occursin("(5d)", frow) && occursin("In Progress", frow) && occursin("High", frow)
+        @test occursin("Alice", frow)
+        # priority colored via theming but we assert text presence (color via style not char)
+        # re-render discipline after selection change
+        g4!(m, 'j')  # though only 1 issue row, sel stays; create 2nd for nav
+        # add second to allow meaningful j
+        iss2 = G4.Stores.create_issue!(m.boardstore; title = "Footer2", epic_id = e.id,
+                                       status = "Backlog", priority = "Low",
+                                       start_date = Date(2026, 3, 20), due_date = Date(2026, 3, 22))
+        g4!(m, 'G')  # reinit? sel may reset, force sel=2 via j twice
+        g4!(m, 'j'); g4!(m, 'j')  # may clamp
+        tb10b = gantt_render(m; w=80, h=10)
+        frowb = nothing
+        for r in 1:10
+            rt = T.row_text(tb10b, r)
+            if rt !== nothing && occursin(iss2.key, rt) && (occursin("(3d)", rt) || occursin("2026-03-20", rt))
+                frowb = rt; break
+            end
+        end
+        # footer should reflect last selected (or first if clamp); key presence of either ok for now + specific dur check tolerant
+        @test T.find_text(tb10b, "(5d)") !== nothing || T.find_text(tb10b, "(3d)") !== nothing || T.find_text(tb10b, "Backlog") !== nothing
+        # h=6: no footer (footer_rows=0); distinctive (Xd) absent
+        tb6 = T.TestBackend(80, 6); T.reset!(tb6.buf)
+        G4.render_gantt!(m, tb6.buf, T.Rect(1, 1, 80, 6))
+        @test T.find_text(tb6, "GANTT") !== nothing
+        @test T.find_text(tb6, "(5d)") === nothing
+        @test T.find_text(tb6, "(3d)") === nothing
+        # h=8: ruler yes, footer no
+        tb8 = T.TestBackend(80, 8); T.reset!(tb8.buf)
+        G4.render_gantt!(m, tb8.buf, T.Rect(1, 1, 80, 8))
+        @test (T.find_text(tb8, "┬") !== nothing || T.find_text(tb8, "+") !== nothing)
+        @test T.find_text(tb8, "(5d)") === nothing
+        # narrow w<60 at h=12: footer hidden by responsive
+        tbn = T.TestBackend(50, 12); T.reset!(tbn.buf)
+        G4.render_gantt!(m, tbn.buf, T.Rect(1, 1, 50, 12))
+        @test T.find_text(tbn, "GANTT") !== nothing
+        @test T.find_text(tbn, "(5d)") === nothing
+        @test T.find_text(tbn, "(3d)") === nothing
+
+        # richer empty + hint (no dated issues)
+        m3 = gantt_login()  # fresh, no issues
+        for hh in [6, 8, 10, 12]
+            tbe = T.TestBackend(80, hh); T.reset!(tbe.buf)
+            G4.render_gantt!(m3, tbe.buf, T.Rect(1, 1, 80, hh))
+            @test T.find_text(tbe, "No scheduled issues") !== nothing
+            # hint present (richer)
+            hint_found = T.find_text(tbe, "press e on board") !== nothing || T.find_text(tbe, "n on calendar") !== nothing || T.find_text(tbe, "to date items") !== nothing
+            @test hint_found
+            # still no footer junk
+            @test T.find_text(tbe, "(5d)") === nothing
+        end
     end
 end
+

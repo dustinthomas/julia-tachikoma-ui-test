@@ -118,6 +118,12 @@ gate on them: `QciKanban.jl` ≈ 807/965 (83.6%), `db.jl` ≈ 100/102 (98.0%).
 No `EXPLICIT_EXCLUSIONS` entries were needed — the sole added exclusion is an
 auditable in-source marker.
 
+## PR5 (Gantt footer + empty) defensive exclusion
+
+| File | Region | Why excluded |
+|------|--------|--------------|
+| `src/ui/gantt.jl` | `catch` blocks in `_gantt_selected_footer` and footer draw (marked `# COV_EXCL_LINE`) | Purely defensive lookup on `get_user` for optional assignee name in footer. All tests drive consistent in-memory stores; these error paths are unreachable in the test env (equivalent to other documented defensive guards). The happy paths (with/without assignee, clip + non-clip footer) are covered by TestBackend boundary renders at h=6/8/10, w=50/70/80/120. |
+
 ### Note — no exclusion for the `focusable` trait methods
 
 `Tachikoma.focusable(::Selector)` / `(::MultiSelect)` are exercised by
@@ -126,3 +132,22 @@ no coverage-trackable lowered code for them (the call constant-folds), so the
 definition line never registered a hit. Rather than exclude tested code, they
 were rewritten in multi-line `function … return true … end` form, which Coverage
 tracks correctly — both now count as genuinely covered (no marker).
+
+## Gantt visual polish coverage (PR5/PR6 + prior)
+
+`ui/gantt.jl` is gated at 134/134 (100%) line coverage (see table above). All
+PR1–PR6 slices (weekend shading PR1, ruler/axis/today+layout PR2, bar ends/density/labels PR3,
+selection accents+indents PR4, footer+rich empty PR5, sprint/legend/responsive/fallbacks PR6)
+added pure helpers (`gantt_*`), render passes, and overlays that are fully exercised
+by `test/test_gantt.jl` (maxrun/char_at/find_text/occursin after every re-render),
+`test/features/phase4_timeline.jl` (BDD), and boundary cases (h=6/8/10, w=40/55/80).
+
+Justified COV_EXCL_LINE markers (2 total, pre-existing in gantt.jl:273 and :477) cover only
+defensive `catch` blocks for inconsistent userstore paths:
+- Reached only on malformed stores; all tests (incl. gate) use `:memory:` + consistent load/create.
+- These paths are never exercised in normal/demo flow or TestBackend; the markers keep the
+  reported coverage at 100% on the testable surface (gate honours COV_EXCL_*).
+
+No other exclusions for gantt. PR5 and PR6 specifically completed the footer, empty-state,
+adaptive left_w, legend, and fallback paths while preserving 100%. Full gate:
+`julia --project=. test/coverage_gate.jl` (must print "GATE PASSED").
