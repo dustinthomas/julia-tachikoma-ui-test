@@ -16,6 +16,9 @@ p4login(; name = "Planner") = (m = fresh_app(; seed = false); app_login_new(m; n
 p4!(m, x) = T.update!(m, T.KeyEvent(x))
 p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; best = max(best, cur); end; best)
 
+# PR4 tolerant: bar run including sel accent ▌ so geometry BDDs pass when selected row uses accent
+p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▌'; cur += 1; best = max(best, cur); else; cur = 0; end; end; best)
+
 @testset "FEATURE: Phase 4 timeline (BDD acceptance)" begin
 
     @testset "Given a month with issues due on specific days" begin
@@ -56,7 +59,7 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
                 rt !== nothing && occursin(a.key, rt) && (rowtxt = rt; break)
             end
             @test rowtxt !== nothing
-            @test p4maxrun(rowtxt, '█') == 7               # May 4→10 inclusive @ 1 day/col
+            @test p4bar_run(rowtxt) == 7               # May 4→10 inclusive @ 1 day/col (tolerates PR4 ▌ on sel)
         end
         @testset "When zoomed to month Then the scale label + bar width change" begin
             p4!(m, 'z')
@@ -69,7 +72,7 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
                 rt = T.row_text(tb, i)
                 rt !== nothing && occursin(a.key, rt) && (rowtxt = rt; break)
             end
-            @test p4maxrun(rowtxt, '█') == 1               # 7 days collapse into one week-column
+            @test p4bar_run(rowtxt) == 1               # 7 days collapse into one week-column (tolerates PR4 sel accent)
         end
     end
 
