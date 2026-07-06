@@ -204,6 +204,20 @@ function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
     min(desired, area_w - 20)
 end
 
+# ── PR3: status density (pure) ──────────────────────────────────────────────
+"""
+    status_progress(iss::Domain.Issue) -> Float64
+
+Status → density ratio for bar fill overlay (predictable buckets, no date math).
+Done=1.0, Review=0.85, In Progress=0.55, else (Backlog/To Do/other)=0.25.
+"""
+function status_progress(iss::Domain.Issue)::Float64
+    iss.status == "Done"        && return 1.0
+    iss.status == "Review"      && return 0.85
+    iss.status == "In Progress" && return 0.55
+    0.25
+end
+
 # ── Initialisation + actions ────────────────────────────────────────────────
 "Set the window to start at the earliest dated issue (or today), week scale."
 function _gantt_init!(m::AppModel)
@@ -374,6 +388,48 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     render(canvas, Rect(chart_x, grid_y0, ncols, max(1, nshow)), buf)
+
+    # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
+    # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
+    # Theming only. Recompute rowy/selection here (same scroll logic as build pass; no y/layout change).
+    for i in 1:nshow
+        ri = row_start + i - 1
+        ri > length(rows) && break
+        row = rows[ri]
+        rowy = grid_y0 + (i - 1)
+        if row.kind === :issue
+            iss = row.issue
+            if iss !== nothing && iss.start_date !== nothing && iss.due_date !== nothing
+                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, ncols)
+                if ext !== nothing
+                    c0, c1 = ext
+                    selected = sel_issue !== nothing && iss.id == sel_issue.id
+                    bar_col = (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
+                    bw = c1 - c0 + 1
+                    # status density fill (partial ▓ or full █ for Done) first
+                    p = status_progress(iss)
+                    nfill = max(0, floor(Int, bw * p))
+                    for k in 0:(nfill - 1)
+                        cc = c0 + k
+                        ch = (p >= 0.999 ? '█' : '▓')
+                        set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
+                    end
+                    # inside label when bar wide enough (overwrites density if collides)
+                    if bw >= 5
+                        avail = max(1, bw - 2)
+                        lbl = fit_width(iss.key, avail)
+                        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
+                        set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
+                    end
+                    # bar end caps (unicode) LAST so they win over density/label at edge cells
+                    set_char!(buf, chart_x + c0, rowy, '▌', Style(; fg = bar_col))
+                    if bw >= 2
+                        set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                    end
+                end
+            end
+        end
+    end
 
     for (dx, dy, dcol) in diamonds
         set_char!(buf, dx, dy, '◆', Style(; fg = dcol))
