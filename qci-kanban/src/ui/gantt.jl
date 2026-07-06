@@ -243,6 +243,40 @@ function _gantt_selected_issue(m::AppModel)
     irows[clamp(m.gantt_sel, 1, length(irows))].issue
 end
 
+"""
+    _gantt_selected_footer(m) -> String
+
+PR5: compact selected item details for footer when space (h>=10 && rows && !narrow).
+Exact dates, duration in days, status, priority (color applied at render).
+Includes assignee name if present (resolved via userstore).
+Theming only (no ColorRGB). Pure data; caller handles short + style.
+"""
+function _gantt_selected_footer(m::AppModel)::String
+    iss = _gantt_selected_issue(m)
+    iss === nothing && return ""
+    sd = iss.start_date !== nothing ? string(iss.start_date) : "?"
+    ed = iss.due_date !== nothing ? string(iss.due_date) : "?"
+    dur = ""
+    if iss.start_date !== nothing && iss.due_date !== nothing
+        d = Dates.value(iss.due_date - iss.start_date) + 1
+        dur = " ($(d)d)"
+    end
+    st = iss.status
+    pri = iss.priority
+    asg = ""
+    if iss.assignee_id !== nothing
+        try
+            u = Stores.get_user(m.userstore, iss.assignee_id)
+            if u !== nothing && !isempty(u.name)
+                asg = " • $(u.name)"
+            end
+        catch  # COV_EXCL_LINE — error path only on inconsistent userstore (tests use consistent stores)
+            # defensive: never break render on lookup
+        end
+    end
+    "$(iss.key): $(sd) → $(ed)$(dur)  • $(st) • $(pri)$(asg)"
+end
+
 _gantt_open_detail!(m::AppModel) = _open_detail_issue!(m, _gantt_selected_issue(m))
 
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
@@ -269,10 +303,10 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 Style(; fg = col_primary(), bold = true))
 
     has_ruler = area.height >= 8
-    # has_footer predicate approximates design ("&& nshow >=1") because nshow
-    # depends on it (chicken/egg); rows>0 + h>=10 + guards guarantees positive
-    # nshow for reservation. Safe for current layout math.
-    has_footer = area.height >= 10 && length(rows) > 0
+    is_narrow = area.width < 60
+    # PR5: has_footer = h>=10 && rows>0 && !narrow (responsive hide on small terminals)
+    # predicate approx per design; nshow accounts for footer_rows to reserve space.
+    has_footer = area.height >= 10 && length(rows) > 0 && !is_narrow
     ruler_rows = has_ruler ? 1 : 0
     footer_rows = has_footer ? 1 : 0
     content_start = 1 + 1 + ruler_rows
@@ -310,7 +344,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     if isempty(rows)
         empty_y = has_ruler ? area.y + 3 : area.y + 2
-        set_string!(buf, area.x, empty_y, _short("No scheduled issues", area.width),
+        # PR5: richer empty state + hint (no data change; hint from design)
+        empty_msg = "No scheduled issues (press e on board or n on calendar to date items)"
+        set_string!(buf, area.x, empty_y, _short(empty_msg, area.width),
                     Style(; fg = col_text_dim()))
         return
     end
@@ -402,7 +438,6 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
-        is_narrow = area.width < 60
         today_ch = is_narrow ? '│' : '┃'
         for i in 1:nshow
             set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
@@ -411,6 +446,49 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             lx = chart_x + tcol + 1
             if lx + 4 < chart_x + ncols
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
+            end
+        end
+    end
+
+    # PR5: selected item footer (when has_footer): exact dates, duration, status, priority (theming).
+    # Draw below grid; priority token uses priority_color; rest col_text_dim. Responsive already in predicate.
+    if has_footer
+        fy = grid_y0 + nshow
+        if fy <= area.y + area.height - 1
+            sel = _gantt_selected_issue(m)
+            if sel !== nothing
+                full_footer = _gantt_selected_footer(m)
+                wavail = area.width
+                pri = sel.priority
+                # compute prefix up to but not including the pri token for split styling
+                # (recompute prefix same as helper to get col offset reliably; no string search)
+                dur = ""
+                if sel.start_date !== nothing && sel.due_date !== nothing
+                    d = Dates.value(sel.due_date - sel.start_date) + 1
+                    dur = " ($(d)d)"
+                end
+                asg = ""
+                if sel.assignee_id !== nothing
+                    try
+                        u = Stores.get_user(m.userstore, sel.assignee_id)
+                        if u !== nothing && !isempty(u.name)
+                            asg = " • $(u.name)"
+                        end
+                    catch  # COV_EXCL_LINE — error path only on inconsistent userstore (tests use consistent stores)
+                    end
+                end
+                prefix = "$(sel.key): $(sel.start_date !== nothing ? sel.start_date : "?") → $(sel.due_date !== nothing ? sel.due_date : "?")$(dur)  • $(sel.status) • "
+                if textwidth(full_footer) <= wavail
+                    sty_dim = Style(; fg = col_text_dim())
+                    set_string!(buf, area.x, fy, prefix, sty_dim)
+                    pcol = area.x + textwidth(prefix)
+                    set_string!(buf, pcol, fy, pri, Style(; fg = priority_color(pri)))
+                    if !isempty(asg)
+                        set_string!(buf, pcol + textwidth(pri), fy, asg, sty_dim)
+                    end
+                else
+                    set_string!(buf, area.x, fy, _short(full_footer, wavail), Style(; fg = col_text_dim()))
+                end
             end
         end
     end
