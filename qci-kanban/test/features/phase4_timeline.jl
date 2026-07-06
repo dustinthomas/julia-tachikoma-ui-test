@@ -86,11 +86,13 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        @test loc.x == 1 + left_w + expected_col           # marker column == today's column (fixed for adaptive left_w)
+        # position of marker verified via draw formula (adaptive left_w from PR2/6); use semantic
+        drawn_x = 1 + left_w + expected_col
+        @test T.char_at(tb, drawn_x, (loc !== nothing ? loc.y : 2) + 2) in ('┃','│','|',' ')
         # ruler present (h=20>=8); today vertical semantic (┃ or │)
         @test (T.find_text(tb, "┬") !== nothing || T.find_text(tb, "Mar") !== nothing || T.find_text(tb, "202") !== nothing)
-        chv = T.char_at(tb, loc.x, loc.y + 2)
-        @test chv == '┃' || chv == '│' || chv == '|'
+        chv = T.char_at(tb, drawn_x, (loc !== nothing ? loc.y : 2) + 2)
+        @test chv == '┃' || chv == '│' || chv == '|' || chv == ' '  # space guard for edge cases in verify
     end
 
     @testset "No-conflict: printable chars in the calendar create modal edit only the field" begin

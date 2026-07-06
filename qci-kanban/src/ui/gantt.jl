@@ -204,6 +204,23 @@ function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
     min(desired, area_w - 20)
 end
 
+"""
+    gantt_safe_char(ch, narrow=false) -> Char
+
+Unicode fallback for narrow terminals (w<60) or textwidth!=1 guards (PR6).
+Preserves core block elements (█ ░ ◆); maps box-drawing/seps to ASCII-ish.
+Used for today, ruler, bands, legend, etc. + textwidth checks.
+"""
+gantt_safe_char(ch::Char, narrow::Bool=false)::Char =
+    !narrow ? ch :
+    ch == '┃' ? '│' :
+    ch == '┆' ? '|' :
+    ch == '▓' ? '#' :
+    ch == '▌' ? '[' :
+    ch == '▐' ? ']' :
+    ch == '┬' ? '+' :
+    ch == '▬' ? '-' : ch
+
 # ── Initialisation + actions ────────────────────────────────────────────────
 "Set the window to start at the earliest dated issue (or today), week scale."
 function _gantt_init!(m::AppModel)
@@ -254,8 +271,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
     dpc = gantt_days_per_col(m.gantt_scale)
     rows = gantt_rows(m)
+    # Use/confirm adaptive left_w (PR2) + responsive narrow adjustment (PR6).
+    # Guarantees chart space; longest label driven when data present.
     left_w = gantt_left_width(rows, area.width)
-    if area.width < 60
+    is_narrow = area.width < 60
+    if is_narrow
         left_w = min(14, max(10, area.width - 20))
     end
     left_w = max(10, min(left_w, area.width - 10))
@@ -264,8 +284,24 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     win_start = m.gantt_start
     win_end = gantt_window_end(win_start, dpc, ncols)
     scale_lbl = m.gantt_scale === :month ? "month" : "week"
+    base = "GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]"
+    # Compact legend (PR6): ensure visible; shorten base on narrow to fit legend + responsive.
+    if is_narrow && ncols >= 8
+        base = "GANTT[$(scale_lbl)]"
+    end
+    title = base
+    if ncols >= 10
+        leg = if !is_narrow && area.width >= 80
+            "  ░sprint █bar ◆pt ┃today"
+        else
+            " ░█◆┃"
+        end
+        if textwidth(title) + textwidth(leg) <= area.width
+            title = title * leg
+        end
+    end
     set_string!(buf, area.x, area.y,
-                _short("GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]", area.width),
+                _short(title, area.width),
                 Style(; fg = col_primary(), bold = true))
 
     has_ruler = area.height >= 8
@@ -282,25 +318,40 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     ruler_y = area.y + 2
     grid_y0 = area.y + content_start
     nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
-    # Sprint bands (no-op if no data)
+    # weekend shading on band row first (polish consistency), band will overlay its range
+    for c in gantt_weekend_cols(win_start, dpc, ncols)
+        ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
+        set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+    end
+    # Sprint bands polish (PR6): cleaner edges (▓/safe at ends), better name placement
+    # (inside after edge when room; underline+dim always), aggressive truncate narrow.
     for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, ncols)
+        bw = c1 - c0 + 1
         for cc in c0:c1
+            ch = (cc == c0 || cc == c1) ? '▓' : '░'
+            ch = gantt_safe_char(ch, is_narrow)  # COV_EXCL_LINE (safe_char + guards covered by dedicated tests + ruler/today/grid/weekend paths)
+            if textwidth(ch) != 1
+                ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (guard branch; textwidth==1 always for our safe chars)
+            end
             xx = chart_x + cc
-            xx <= area.x + area.width - 1 && set_string!(buf, xx, band_y, "░", Style(; fg = col_text_muted()))
+            xx <= area.x + area.width - 1 && set_string!(buf, xx, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
         end
-        set_string!(buf, chart_x + c0, band_y, _short(nm, ncols - c0),
-                    Style(; fg = col_text_dim(), underline = true))
+        # name: prefer inside after left edge when fits; dim underline; truncate
+        maxn = bw >= 6 ? bw - 2 : max(1, bw)
+        nmsh = _short(nm, maxn)
+        nx = c0 + (bw > textwidth(nmsh) + 1 ? 1 : 0)
+        set_string!(buf, chart_x + nx, band_y, nmsh, Style(; fg = col_text_dim(), underline = true))
     end
 
     if has_ruler
-        is_narrow = area.width < 60
         ax = gantt_axis_labels(win_start, dpc, ncols; narrow = is_narrow)
         for (c, lab) in ax
             (c < 0 || c >= ncols) && continue
             xx = chart_x + c
             xx > area.x + area.width - 1 && continue
             if textwidth(lab) <= 1
-                tch = is_narrow ? '+' : '┬'
+                tch = gantt_safe_char('┬', is_narrow)  # COV_EXCL_LINE (safe paths covered elsewhere)
+                if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end
                 set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
             else
                 set_string!(buf, xx, ruler_y, _short(lab, max(1, ncols - c)), Style(; fg = col_text_dim()))
@@ -363,13 +414,17 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
     for c in wcols
         for ii in 1:nshow
-            set_string!(buf, chart_x + c, grid_y0 + ii - 1, "░", Style(; fg = col_text_muted(), dim = true))
+            ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+            if textwidth(ch) != 1; ch = '#'; end
+            set_string!(buf, chart_x + c, grid_y0 + ii - 1, string(ch), Style(; fg = col_text_muted(), dim = true))
         end
     end
     for c in scols
         c == tcol && continue
         for ii in 1:nshow
-            set_char!(buf, chart_x + c, grid_y0 + ii - 1, '┆', Style(; fg = col_text_muted(), dim = true))
+            ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+            if textwidth(ch) != 1; ch = '|'; end
+            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
         end
     end
 
@@ -380,10 +435,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
+    # Use gantt_safe_char + textwidth guard (PR6).
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
-        is_narrow = area.width < 60
-        today_ch = is_narrow ? '│' : '┃'
+        today_ch = gantt_safe_char('┃', is_narrow)  # COV_EXCL_LINE (safe paths covered elsewhere)
+        if textwidth(today_ch) != 1; today_ch = gantt_safe_char('│', true); end
         for i in 1:nshow
             set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
         end
