@@ -89,6 +89,35 @@ end
         @test Qm.Stores.get_issue(m.boardstore, iss.id).title == iss.title * "!"
         @test any(a.kind == :updated for a in Qm.Stores.list_activity(m.boardstore, iss.id))
     end
+
+    @testset "date fields show discoverability hint only when focused (update! + re-render)" begin
+        m = lbm()
+        k!(m, 'n')  # NEW CARD, title focused first
+        tb = app_tb(m; w = 90, h = 20)
+        @test T.find_text(tb, "NEW CARD") !== nothing
+        @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") === nothing
+        for _ in 1:7; k!(m, :tab); end  # title->desc->prio->pts->epic->sprint->assignee->start
+        tb = app_tb(m; w = 90, h = 20)  # MUST re-render after update!
+        @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") !== nothing
+        k!(m, :tab)  # -> due
+        tb = app_tb(m; w = 90, h = 20)
+        @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") !== nothing
+        k!(m, :tab)  # -> labels
+        tb = app_tb(m; w = 90, h = 20)
+        @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") === nothing
+        k!(m, :escape)
+        @test m.modal == :none
+
+        # edit path
+        k!(m, 'e')
+        tb = app_tb(m; w = 90, h = 20)
+        @test T.find_text(tb, "EDIT CARD") !== nothing
+        @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") === nothing
+        for _ in 1:7; k!(m, :tab); end  # to start date
+        tb = app_tb(m; w = 90, h = 20)
+        @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") !== nothing
+        k!(m, :escape)
+    end
 end
 
 @testset "Phase 3 — Card detail + comments + activity" begin

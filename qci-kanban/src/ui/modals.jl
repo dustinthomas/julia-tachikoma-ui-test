@@ -383,7 +383,11 @@ function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     set_string!(buf, x, y, "Start:", f.start_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
     render(f.start_input, Rect(x + 7, y, 12, 1), buf)
     set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
-    render(f.due_input, Rect(x + 27, y, 12, 1), buf); y += 1
+    render(f.due_input, Rect(x + 27, y, 12, 1), buf)
+    if f.start_input.focused || f.due_input.focused
+        set_string!(buf, x + 40, y, "(YYYY-MM-DD or blank to clear)", Style(; fg = col_text_muted()))
+    end
+    y += 1
     render(f.labels_ms, Rect(x, y, iw, 1), buf)
 end
 
