@@ -1,5 +1,7 @@
 # Pipeline Token Usage and Better Architectures for Robustly Tested + Reviewed Software
 
+> **Historical evidence doc** — cited by `agentic-workflow-2026-07.md`. The pipeline personas and `token-efficiency.md` it references were removed 2026-07-05 (git history); current policy lives in `AGENTS.md`.
+
 **Date:** 2026-06-26  
 **Project:** julia-tachikoma-ui-test  
 **Source:** Conversation with Grok in this workspace

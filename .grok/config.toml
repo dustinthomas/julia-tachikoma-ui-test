@@ -1,52 +1,30 @@
 # .grok/config.toml — Project-scoped config for julia-tachikoma-ui-test
-# Replicated agentic coding environment (personas + pipeline + skills) from test-grok-cli
 #
-# Quick win: This demonstrates Grok-native configuration on top of
-# your existing ~/.claude/ compat (permissions, hooks, etc. are already
-# loading from .claude/settings.local.json and claude plugins).
-#
-# BYOM mercury-2 registered but not used for any persona (coder locked to native composer-2.5-fast).
+# 2026-07 workflow (see docs/agentic-workflow-2026-07.md + AGENTS.md):
+# single lead agent + one independent verifier. The only project persona is
+# personas/validator.toml (the Tier-1 verifier, model = grok-build). The old
+# pipeline personas (planner/coder/reviewer/scout/test-writer/tdd-orchestrator)
+# were removed 2026-07-05 — recover from git history if ever needed.
 #
 # Key loading (no manual `export`):
 #   1. Edit .env and fill INCEPTION_API_KEY (or other keys)
 #   2. Launch with: set -a; source .env; set +a; grok ...
 #   .env is already gitignored.
 #
-# PERSONA MODEL SWITCH (easy)
-# Edit `model = "..."` line inside each .grok/personas/*.toml
-# Personas win over most [subagents.models] routes.
-#
-# Current (native grok build models only - locked):
-#   coder    = grok-composer-2.5-fast   (Composer 2.5 Fast - only for coder)
-#   reviewer = grok-composer-2.5-fast
-#   scout    = grok-composer-2.5-fast
-#   planner  = grok-build
-#   validator = grok-build
-#   tdd-orchestrator = grok-build (strong lead for hierarchical TDD red-green + coverage gate)
-#
-# Locked: only natively available grok models (grok-build + grok-composer-2.5-fast).
-# No BYOM mercury-2 routing for coder or others. Edit persona model= to change (but keep composer for coder).
-#
-# Subagent model routing lets the lead (grok-build) orchestrate
-# subagents on different models — exactly analogous to assigning
-# different models (inherit / haiku / sonnet) to your Claude agents.
+# Models (native grok build models only — locked):
+#   lead / validator persona = grok-build
+#   bundled explore/plan subagents = grok-composer-2.5-fast (routed below)
+# BYOM mercury-2 is registered globally but unused. Persona `model =` lines
+# win over [subagents.models] routes.
 
 [subagents]
 enabled = true
 
-# Route to native grok build models only.
-# grok-build = heavy (lead/validator/planner)
-# grok-composer-2.5-fast = fast native (coder/scout/reviewer)
+# Route bundled subagents to the fast native model; the lead and the
+# validator persona stay on grok-build.
 [subagents.models]
-# Native fast model for light roles and coder (via persona)
 explore = "grok-composer-2.5-fast"
 plan = "grok-composer-2.5-fast"
-# Coder locked to grok-composer-2.5-fast via persona (native only)
-
-# No custom mercury overrides. Coder locked to composer-2.5-fast via persona.
-
-# You can add more as we define custom roles:
-# validator = "grok-build"
 
 # Example of enabling/disabling built-ins (uncomment to experiment)
 # [subagents.toggle]
@@ -58,8 +36,10 @@ plan = "grok-composer-2.5-fast"
 # where supported (MCPs, plugins, certain permissions).
 
 [compat.claude]
-# We are deliberately using the Claude compat layer for your existing
-# hooks and settings while we build native .grok/ equivalents.
+# Claude compat layer: `hooks = true` loads user-global ~/.claude hooks (the
+# repo-root .claude/ holds none). The in-repo safety hook is native:
+# .grok/hooks/safety.json + safety.py (PreToolUse — rm -rf / .env guard); see
+# the "Hooks" section in AGENTS.md, incl. why workflow gates are NOT hooks.
 hooks = true
 rules = true
-skills = false   # we'll use native .grok/skills/ for translated commands
+skills = false   # native .grok/skills/ carries the project skills

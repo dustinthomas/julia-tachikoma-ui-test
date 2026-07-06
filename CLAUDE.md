@@ -31,6 +31,10 @@ Work is tiered by size. Default to doing the work yourself in one context; the a
 - Write durable state to disk (plan files, `agent_logs/`), not into conversation history.
 - Subagents are for context isolation (exploration, independent verification) — not for role-play. Every handoff loses context; minimize handoffs.
 
+## Hooks
+
+The only agent hook in this repo is Grok-side: `.grok/hooks/safety.py` (PreToolUse — blocks catastrophic `rm -rf` targets and `.env*` access; registration in `.grok/hooks/safety.json`). There are no Claude-side hooks; the repo-root `.claude/` holds none. The workflow gates (full suite, run-the-app, coverage) are **verifier-enforced by design, not hook-enforced**: they take minutes, so they run once per change in the verifier pass with exit-code evidence — don't wire them into PreToolUse/PostToolUse hooks. If mechanical enforcement is ever wanted, use a git pre-push hook (tool-agnostic — catches Grok, Claude, and manual pushes alike).
+
 ## Cross-tool note
 
 `.grok/` holds the Grok CLI setup for this repo (AGENTS.md is its entry point) — same tiered workflow, same gates. Keep the two in sync when changing workflow policy; the canonical test-impact map lives at `qci-kanban/.claude/rules/qci-kanban-test-map.md` and is referenced from both.

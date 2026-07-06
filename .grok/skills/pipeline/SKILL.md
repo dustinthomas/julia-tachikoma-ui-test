@@ -10,6 +10,8 @@ user-invocable: true
 > **This skill is deprecated as of 2026-07-05.** A single `/pipeline` run was measured at ~24.1M tokens (406k peak prompt); verified 2026 research (see `.grok/docs/agentic-workflow-2026-07.md`) shows role-split pipelines spend more tokens on coordination than on work and lose context at every handoff. Use the tiered workflow in `AGENTS.md` instead: single agent + test-impact map + one independent verifier. The evidence rules embedded below (exit codes, verbatim quotes, re-audits) live on in the new workflow.
 >
 > If invoked, do NOT run the phases below — apply the Tier-appropriate process from AGENTS.md to the given task and say you did so.
+>
+> The personas (`planner`, `coder`, `reviewer`, `scout`, `test-writer`, `tdd-orchestrator`) and docs (`token-efficiency.md`, `tdd-3-actions.md`, `tdd-workflow.md`, `tdd-architecture.md`) this file references were **removed 2026-07-05** — recover from git history if needed. References below are historical.
 
 # Pipeline Skill — Grok Native (Plan → Scout → Loop → Review) [historical reference]
 

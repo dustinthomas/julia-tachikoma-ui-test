@@ -2,7 +2,7 @@
 
 Project: **julia-tachikoma-ui-test** — Julia + Tachikoma.jl TUI experiments (main sub-project: `qci-kanban/`).
 
-**Workflow policy (2026-07 revision):** see `.grok/docs/agentic-workflow-2026-07.md` for the full rationale and verified evidence. Summary: single agent by default, context-centric decomposition, one independent verifier, no role-play pipelines. The old `/pipeline` persona pipeline and 3-agent `/tdd` choreography are **deprecated** (kept on disk for reference).
+**Workflow policy (2026-07 revision):** see `.grok/docs/agentic-workflow-2026-07.md` for the full rationale and verified evidence. Summary: single agent by default, context-centric decomposition, one independent verifier, no role-play pipelines. The old `/pipeline` persona pipeline and 3-agent `/tdd` choreography are **deprecated**; their personas and docs were removed 2026-07-05 (see git history), only the redirecting `/pipeline` tombstone remains.
 
 **MANDATORY RULE (see .grok/rules/always-run-the-app-after-changes.md):**
 After ANY change to src/, db seeding, login gate, KanbanModel/AppModel, update!/view, or tests that affect startup:
@@ -50,7 +50,7 @@ Red-first is a *discipline inside the single agent*, not a multi-agent ceremony:
 - **Lead / verifier**: `grok-build` (strong model — the lead does the actual implementation now, so it gets the strong model).
 - **Scout / explore subagents**: `grok-composer-2.5-fast`.
 - Routing lives in `.grok/config.toml` (`[subagents.models]`) and persona `model =` lines. BYOM (mercury-2) is registered globally but unused.
-- Legacy personas (`planner`, `scout`, `coder`, `reviewer`, `test-writer`, `tdd-orchestrator`) remain for the deprecated skills; `validator` doubles as the Tier-1 verifier persona.
+- `validator` is the only project persona (the Tier-1 verifier). The legacy pipeline personas were removed 2026-07-05 — recover from git history if ever needed.
 
 ## Julia + Tachikoma Specific Rules
 
@@ -77,8 +77,14 @@ Small tweaks to existing patterns don't require a full re-read — the distilled
 - `/tdd` — revised single-agent TDD discipline (red-first + impact map + verifier gate).
 - `/review` — strict single-verifier review of the working tree.
 - `/test`, `/commit`, `/prime`, `/caveman` — unchanged utilities.
-- `/pipeline` — **DEPRECATED**; kept for reference. Use the tiered workflow above.
+- `/pipeline` — **DEPRECATED** tombstone; if invoked it redirects to the tiered workflow above. Its personas/docs are removed (git history).
 - Bundled: `/implement`, `/design`, `/execute-plan` (see `~/.grok/bundled/skills/`).
+
+## Hooks
+
+- One agent hook ships in-repo: `.grok/hooks/safety.py` (PreToolUse, registration in `.grok/hooks/safety.json`) — blocks catastrophic `rm -rf` targets (`/`, `~`, `.`) and any access to `.env*` files. Deterministic safety guardrails only. Note `[compat.claude] hooks = true` in `.grok/config.toml` loads *user-global* `~/.claude` hooks, not this file — verify the native registration actually fires in your grok build before relying on it.
+- The workflow gates (full suite, run-the-app, coverage) are **verifier-enforced, not hook-enforced** — deliberate: they take minutes, so they run once per change in the Tier-1 verifier pass with exit-code evidence. Do not wire them into PreToolUse/PostToolUse hooks.
+- If mechanical gate enforcement is ever wanted, put it in a git pre-push hook (tool-agnostic — catches Grok, Claude, and manual pushes alike), not in agent hooks.
 
 ## Conventions
 

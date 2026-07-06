@@ -1,5 +1,7 @@
 # Detailed Benchmark Plan: Token Efficiency & Correctness Before vs After Optimizations
 
+> **Historical, never run** — kept because `agentic-workflow-2026-07.md` cites it. The personas and `token-efficiency.md` it references were removed 2026-07-05 (git history). Its successor idea (log per-run token totals) is noted in the 2026-07 doc's Measurement section.
+
 **Date**: 2026-06-22  
 **Goal**: Quantitatively measure the impact of the token-efficiency improvements on a realistic coding pipeline while keeping quality (correctness of delivered app) high.  
 **Key Constraint**: Use only grok-composer-2.5-fast (native) for coder persona. No mercury-2.

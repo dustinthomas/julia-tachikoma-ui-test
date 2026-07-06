@@ -31,7 +31,7 @@ Our own logs showed a single `/pipeline` run consuming ~24.1M tokens (166 turns,
 
 ## What we dropped, and why
 
-- **Persona pipeline as default** (`/pipeline`): role handoffs lose context; coordination cost exceeded work (findings 1–3). Kept on disk, marked deprecated.
+- **Persona pipeline as default** (`/pipeline`): role handoffs lose context; coordination cost exceeded work (findings 1–3). Removed from disk 2026-07-05 (personas `planner`/`coder`/`reviewer`/`scout`/`test-writer`/`tdd-orchestrator`, docs `tdd-3-actions.md`/`tdd-workflow.md`/`tdd-architecture.md`/`token-efficiency.md` — recover from git history); only the redirecting `/pipeline` skill tombstone remains.
 - **3-agent TDD choreography** (test-writer → coder → validator): procedural TDD prompting measurably increases regressions without targeted test context (finding 6). Replaced by red-first discipline *inside one agent* + the test-impact map (`qci-kanban/.claude/rules/qci-kanban-test-map.md`, canonical for both tools).
 - **100% coverage gate**: no evidence it pays; the validated gate is full-suite green + app runs. Coverage remains a diagnostic, not a gate.
   - **Superseded 2026-07-05 (owner decision)**: in `qci-kanban` the coverage gate is REINSTATED as mandatory — `julia --project=. test/coverage_gate.jl` must pass (100% line coverage on gated v2 files) alongside the full suite and the app gate, and user-facing features require BDD acceptance specs in `test/features/`. Policy: `qci-kanban/.claude/rules/tdd-bdd-coverage-gates.md` (canonical for both tools). The research point above stands as literature context; the repo policy overrides it.
