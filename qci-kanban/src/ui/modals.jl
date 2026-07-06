@@ -364,11 +364,9 @@ end
 
 function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     f = m.edit_form; f === nothing && return
-    creating = m.card_issue_id === nothing
     w = clamp(content_area.width - 4, 40, content_area.width)
     h = clamp(content_area.height - 2, 14, content_area.height)
-    title = creating ? "NEW CARD — Tab fields, ^S/Enter save, Esc cancel" : "EDIT CARD — Tab fields, ^S/Enter save"
-    inner = _modal_box(content_area, w, h, title, buf)
+    inner = _modal_box(content_area, w, h, (m.card_issue_id === nothing ? "NEW CARD — Tab fields, ^S/Enter save, Esc cancel" : "EDIT CARD — Tab fields, ^S/Enter save"), buf)
     x = inner.x + 1; y = inner.y + 1; iw = inner.width - 2
     set_string!(buf, x, y, "Title:", f.title_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
     render(f.title_input, Rect(x + 7, y, iw - 7, 1), buf); y += 1
@@ -385,7 +383,12 @@ function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
     render(f.due_input, Rect(x + 27, y, 12, 1), buf)
     if f.start_input.focused || f.due_input.focused
-        set_string!(buf, x + 40, y, "(YYYY-MM-DD or blank to clear)", Style(; fg = col_text_muted()))
+        hx = x + 27 + 12 + 1  # due rect end + 1 (relative, not hard x+40)
+        hint = "(YYYY-MM-DD or blank to clear)"
+        avail = (x + iw) - hx
+        if avail > 0
+            set_string!(buf, hx, y, _short(hint, avail), Style(; fg = col_text_muted()))
+        end
     end
     y += 1
     render(f.labels_ms, Rect(x, y, iw, 1), buf)

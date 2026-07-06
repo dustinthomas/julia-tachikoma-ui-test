@@ -96,8 +96,8 @@ end
         tb = app_tb(m; w = 90, h = 20)
         @test T.find_text(tb, "NEW CARD") !== nothing
         @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") === nothing
-        for _ in 1:7; k!(m, :tab); end  # title->desc->prio->pts->epic->sprint->assignee->start
-        tb = app_tb(m; w = 90, h = 20)  # MUST re-render after update!
+        Qm.focus_index!(m.focus, 8)  # start_input (index per edit_editors in modals.jl)
+        tb = app_tb(m; w = 90, h = 20)  # MUST re-render after update! (or focus set)
         @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") !== nothing
         k!(m, :tab)  # -> due
         tb = app_tb(m; w = 90, h = 20)
@@ -113,10 +113,31 @@ end
         tb = app_tb(m; w = 90, h = 20)
         @test T.find_text(tb, "EDIT CARD") !== nothing
         @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") === nothing
-        for _ in 1:7; k!(m, :tab); end  # to start date
+        Qm.focus_index!(m.focus, 8)  # start_input
         tb = app_tb(m; w = 90, h = 20)
         @test T.find_text(tb, "(YYYY-MM-DD or blank to clear)") !== nothing
         k!(m, :escape)
+
+        # narrow widths (45/50/60) per no-bleed patterns + relative placement: focused date state + inside (no board bleed); hint prefix when fits (w=60)
+        for ww in [45, 50, 60]
+            m2 = lbm(); k!(m2, 'n')
+            Qm.focus_index!(m2.focus, 8)
+            tb = app_tb(m2; w = ww, h = 20)
+            @test T.find_text(tb, "NEW CARD") !== nothing
+            @test T.find_text(tb, "QCI-100") === nothing
+            @test T.find_text(tb, "Set up project") === nothing
+            rows = [T.row_text(tb, i) for i in 1:20]
+            drow = findfirst(r -> occursin("Start:", r) || occursin("Due:", r), rows)
+            if drow !== nothing
+                @test occursin("Start:", rows[drow]) || occursin("Due:", rows[drow])
+            end
+            if ww >= 60
+                @test T.find_text(tb, "(YYYY") !== nothing  # prefix (clipped by _short/avail on narrow)
+                if drow !== nothing
+                    @test occursin("(YYYY", rows[drow])
+                end
+            end
+        end
     end
 end
 
