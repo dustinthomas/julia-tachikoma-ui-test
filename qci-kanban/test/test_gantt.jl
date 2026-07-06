@@ -80,7 +80,7 @@ end
         @test !isempty(labs)
         @test any(occursin("┬", string(l[2])) || occursin("Mar", string(l[2])) for l in labs)
         labsn = G4.gantt_axis_labels(ws, 1, 30; narrow=true)
-        @test any(l[2] == "Mar" for l in labsn if occursin("Mar", string(l[2])))
+        @test any(l[2] == "Mar" for l in labsn)
         # left width adaptive
         er = [G4.GanttRow(:epic, "EpicName", nothing, ""); G4.GanttRow(:issue, "QCI-99 Long title here", nothing, "")]
         @test G4.gantt_left_width(er, 120) <= 24
@@ -100,6 +100,8 @@ end
         # empty position: for tall use grid_y0=y+3 (has_ruler); verify via row search (layout fix)
         erow = row_with(tb, "No scheduled", 30)
         @test erow !== nothing && occursin("No scheduled issues", erow)
+        # ruler drawn even for empty tall (h>=8) -- no blank axis row
+        @test T.find_text(tb, "┬") !== nothing || T.find_text(tb, Dates.format(Dates.today(), "u")) !== nothing || T.find_text(tb, "20") !== nothing
         # row-nav / detail are inert with nothing scheduled
         g4!(m, 'j'); @test m.gantt_sel == 1
         @test G4._gantt_selected_issue(m) === nothing
@@ -170,8 +172,8 @@ end
                                 start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(1))
         g4!(m, 'G')
         @test m.gantt_start == Dates.today() - Day(1)
-        # pure column of today matches the render window
-        w = 120; left_w = clamp(w ÷ 3, 14, 22); ncols = w - left_w
+        # pure column of today matches the render window (use adaptive left_w)
+        w = 120; left_w = G4.gantt_left_width(G4.gantt_rows(m), w); ncols = w - left_w
         expect = G4.gantt_point_col(m.gantt_start, 1, Dates.today(), ncols)
         @test expect == 1
         tb = gantt_render(m; w = w, h = 20)
@@ -291,7 +293,7 @@ end
         tb8 = T.TestBackend(55, 8); T.reset!(tb8.buf)
         G4.render_gantt!(m, tb8.buf, T.Rect(1, 1, 55, 8))
         @test T.find_text(tb8, "GANTT") !== nothing
-        r3 = T.row_text(tb8, 3); @test (T.find_text(tb8, "┬") !== nothing || T.find_text(tb8, "+") !== nothing || T.find_text(tb8, Dates.format(Dates.today(), "u")) !== nothing || T.find_text(tb8, "TODAY") !== nothing)
+        @test (T.find_text(tb8, "┬") !== nothing || T.find_text(tb8, "+") !== nothing || T.find_text(tb8, Dates.format(Dates.today(), "u")) !== nothing || T.find_text(tb8, "TODAY") !== nothing)
         # h=10 w=80: ruler present
         tb10 = T.TestBackend(80, 10); T.reset!(tb10.buf)
         G4.render_gantt!(m, tb10.buf, T.Rect(1, 1, 80, 10))

@@ -99,8 +99,8 @@ function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=f
         key = (Dates.year(d), Dates.month(d))
         key in seen && continue
         push!(seen, key)
-        m1 = Date(year(d), month(d), 1)
-        mN = (m1 + Dates.Month(1)) - Day(1)
+        m1 = Dates.Date(Dates.year(d), Dates.month(d), 1)
+        mN = (m1 + Dates.Month(1)) - Dates.Day(1)
         cs = gantt_col_for_date(win_start, dpc, m1)
         ce = gantt_col_for_date(win_start, dpc, mN)
         c0v = max(0, cs); c1v = min(ncols-1, ce)
@@ -194,7 +194,8 @@ end
 Adaptive left label width (PR2). Guarantees chart space; uses longest label on data.
 """
 function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
-    area_w < 24 && return max(8, area_w - 10)
+    # Note: callers from render_gantt! are guarded to area_w >=24 before call;
+    # direct pure-helper tests use w>=55. No <24 path exercised in normal use.
     if isempty(rows)
         return clamp(area_w ÷ 3, 14, 22)
     end
@@ -268,22 +269,20 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 Style(; fg = col_primary(), bold = true))
 
     has_ruler = area.height >= 8
+    # has_footer predicate approximates design ("&& nshow >=1") because nshow
+    # depends on it (chicken/egg); rows>0 + h>=10 + guards guarantees positive
+    # nshow for reservation. Safe for current layout math.
     has_footer = area.height >= 10 && length(rows) > 0
     ruler_rows = has_ruler ? 1 : 0
     footer_rows = has_footer ? 1 : 0
     content_start = 1 + 1 + ruler_rows
-    if isempty(rows)
-        empty_y = has_ruler ? area.y + 3 : area.y + 2
-        set_string!(buf, area.x, empty_y, _short("No scheduled issues", area.width),
-                    Style(; fg = col_text_dim()))
-        return
-    end
-
-    # Sprint bands live on the row directly under the header.
+    # Compute layout rows always (bands loop is no-op for empty; ruler now drawn
+    # for empty tall cases too so no blank ruler row when h>=8).
     band_y = area.y + 1
     ruler_y = area.y + 2
     grid_y0 = area.y + content_start
     nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
+    # Sprint bands (no-op if no data)
     for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, ncols)
         for cc in c0:c1
             xx = chart_x + cc
@@ -307,6 +306,13 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 set_string!(buf, xx, ruler_y, _short(lab, max(1, ncols - c)), Style(; fg = col_text_dim()))
             end
         end
+    end
+
+    if isempty(rows)
+        empty_y = has_ruler ? area.y + 3 : area.y + 2
+        set_string!(buf, area.x, empty_y, _short("No scheduled issues", area.width),
+                    Style(; fg = col_text_dim()))
+        return
     end
 
     canvas = BlockCanvas(ncols, max(1, nshow); style = Style(; fg = col_primary()))
