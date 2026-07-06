@@ -254,6 +254,13 @@ end
         g4!(m, :enter)
         @test m.modal == :card_detail && m.card_issue_id == b.id
         g4!(m, :escape)                          # back to gantt
+        # 'e' → edit the selected gantt issue (model assert only, matching Enter pattern above;
+        # full re-render via app_tb avoided to prevent triggering pre-existing UndefVarError in
+        # render_gantt! (status_progress undefined at gantt.jl:520; see Issues 1/2 in review).
+        # Direct render_card_edit! + TestBackend would work for modal result as in manual verif.)
+        g4!(m, 'e')
+        @test m.modal == :card_edit && m.card_issue_id == b.id
+        g4!(m, :escape)                          # back to gantt
         # scroll right then left moves the window by a week
         st0 = m.gantt_start
         g4!(m, 'l'); @test m.gantt_start == st0 + Day(7)

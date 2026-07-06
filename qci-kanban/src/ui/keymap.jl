@@ -131,6 +131,7 @@ const KEYMAP = Binding[
     Binding(:calendar, :down,  :cal_day_next,   "↓",     "Next day",     false),
     Binding(:calendar, :up,    :cal_day_prev,   "↑",     "Prev day",     false),
     Binding(:calendar, 'n',    :cal_new,        "n",     "New (due=sel)", true),
+    Binding(:calendar, 'e',    :cal_edit_card,  "e",     "Edit",         true),
     Binding(:calendar, 'v',    :cal_view_card,  "v",     "Details",      true),
     Binding(:calendar, :enter, :cal_view_card,  "Enter", "Details",      false),
 
@@ -144,6 +145,7 @@ const KEYMAP = Binding[
     Binding(:gantt, :down,  :gantt_row_next,     "↓",     "Next row",   false),
     Binding(:gantt, :up,    :gantt_row_prev,     "↑",     "Prev row",   false),
     Binding(:gantt, 'z',    :gantt_zoom,         "z",     "Zoom wk/mo", true),
+    Binding(:gantt, 'e',    :gantt_edit_card,    "e",     "Edit",       true),
     Binding(:gantt, 'v',    :gantt_view_card,    "v",     "Details",    true),
     Binding(:gantt, :enter, :gantt_view_card,    "Enter", "Details",    false),
 
