@@ -112,6 +112,12 @@ gate on them: `QciKanban.jl` ≈ 807/965 (83.6%), `db.jl` ≈ 100/102 (98.0%).
 No `EXPLICIT_EXCLUSIONS` entries were needed — the sole added exclusion is an
 auditable in-source marker.
 
+## PR5 (Gantt footer + empty) defensive exclusion
+
+| File | Region | Why excluded |
+|------|--------|--------------|
+| `src/ui/gantt.jl` | `catch` blocks in `_gantt_selected_footer` and footer draw (marked `# COV_EXCL_LINE`) | Purely defensive lookup on `get_user` for optional assignee name in footer. All tests drive consistent in-memory stores; these error paths are unreachable in the test env (equivalent to other documented defensive guards). The happy paths (with/without assignee, clip + non-clip footer) are covered by TestBackend boundary renders at h=6/8/10, w=50/70/80/120. |
+
 ### Note — no exclusion for the `focusable` trait methods
 
 `Tachikoma.focusable(::Selector)` / `(::MultiSelect)` are exercised by
