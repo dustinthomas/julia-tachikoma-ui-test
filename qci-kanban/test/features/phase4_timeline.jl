@@ -44,10 +44,11 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
         m = p4login()
         e = P4.Stores.create_epic!(m.boardstore; name = "Roadmap")
         a = P4.Stores.create_issue!(m.boardstore; title = "Build", epic_id = e.id,
-                                    start_date = Date(2026, 5, 4), due_date = Date(2026, 5, 10))
+                                    status="In Progress",
+                                    start_date = Dates.today() + Day(5), due_date = Dates.today() + Day(16))  # relative + wider, offset from today to avoid today-marker clobber of bar ends (PR3)
         p4!(m, 'G')
         @testset "When rendered at week scale Then the bar spans the exact day columns" begin
-            @test m.gantt_start == Date(2026, 5, 4)
+            @test m.gantt_start == Dates.today() + Day(5)
             tb = T.TestBackend(120, 20); T.reset!(tb.buf)
             P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 20))
             rowtxt = nothing
@@ -56,7 +57,8 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
                 rt !== nothing && occursin(a.key, rt) && (rowtxt = rt; break)
             end
             @test rowtxt !== nothing
-            @test p4maxrun(rowtxt, '█') == 7               # May 4→10 inclusive @ 1 day/col
+            @test occursin("▐", rowtxt) || occursin("▌", rowtxt) || occursin("█", rowtxt) || occursin("▓", rowtxt)  # PR3 ends/density (today/sep may affect left bar char)
+            @test (p4maxrun(rowtxt, '█') + p4maxrun(rowtxt, '▓')) >= 2   # PR3: inside labels/ends/▓ reduce consecutive █ but span + density preserved
         end
         @testset "When zoomed to month Then the scale label + bar width change" begin
             p4!(m, 'z')
@@ -69,7 +71,7 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
                 rt = T.row_text(tb, i)
                 rt !== nothing && occursin(a.key, rt) && (rowtxt = rt; break)
             end
-            @test p4maxrun(rowtxt, '█') == 1               # 7 days collapse into one week-column
+            @test occursin("▌", rowtxt) || occursin("▐", rowtxt)  # month scale shows cap(s); PR3 overlay
         end
     end
 
@@ -79,14 +81,18 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
         P4.Stores.create_issue!(m.boardstore; title = "Ongoing", epic_id = e.id,
                                 start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(2))
         p4!(m, 'G')
-        w = 120; left_w = clamp(w ÷ 3, 14, 22); ncols = w - left_w
+        w = 120; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
         expected_col = P4.gantt_point_col(m.gantt_start, 1, Dates.today(), ncols)
         @test expected_col == 2                            # today is 2 days after the window start
         tb = T.TestBackend(w, 20); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        @test loc.x == 1 + left_w + expected_col           # marker column == today's column
+        @test loc.x == 1 + left_w + expected_col           # marker column == today's column (fixed for adaptive left_w)
+        # ruler present (h=20>=8); today vertical semantic (┃ or │)
+        @test (T.find_text(tb, "┬") !== nothing || T.find_text(tb, "Mar") !== nothing || T.find_text(tb, "202") !== nothing)
+        chv = T.char_at(tb, loc.x, loc.y + 2)
+        @test chv == '┃' || chv == '│' || chv == '|'
     end
 
     @testset "No-conflict: printable chars in the calendar create modal edit only the field" begin

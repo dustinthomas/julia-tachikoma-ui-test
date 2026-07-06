@@ -61,6 +61,68 @@ function gantt_point_col(win_start::Date, dpc::Int, d, ncols::Int)
     c
 end
 
+# ── PR1 weekend/week geometry (pure, added for shading + separators) ────────
+"True for Saturday/Sunday (Dates.dayofweek 6/7); locale-independent for TUI."
+gantt_is_weekend(d::Date)::Bool = Dates.dayofweek(d) ∈ (6, 7)
+
+"Date represented by 0-based column `col` (used for weekend + axis + shading)."
+gantt_date_for_col(win_start::Date, dpc::Int, col::Int)::Date = win_start + Day(col * dpc)
+
+"Columns that are weekends within the visible window (for shading pass)."
+gantt_weekend_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
+    [c for c in 0:(ncols-1) if gantt_is_weekend(gantt_date_for_col(win_start, dpc, c))]
+
+"Columns at Monday (dayofweek==1) week starts, for vertical `┆` grid separators."
+gantt_week_sep_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
+    [c for c in 0:(ncols-1) if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1]
+
+# ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
+"""
+    gantt_axis_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
+
+(col, label) for ruler row (y+2): "┬" (or +) at Mon week starts; month labels
+("Mar 2026" or abbr "Mar") centered when their visible span >=3 cols.
+"""
+function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
+    out = Tuple{Int,String}[]
+    ncols <= 0 && return out
+    # week ticks at Mondays
+    for c in 0:(ncols-1)
+        if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1
+            push!(out, (c, "┬"))
+        end
+    end
+    # month labels (one per month)
+    seen = Set{Tuple{Int,Int}}()
+    for c in 0:(ncols-1)
+        d = gantt_date_for_col(win_start, dpc, c)
+        key = (Dates.year(d), Dates.month(d))
+        key in seen && continue
+        push!(seen, key)
+        m1 = Dates.Date(Dates.year(d), Dates.month(d), 1)
+        mN = (m1 + Dates.Month(1)) - Dates.Day(1)
+        cs = gantt_col_for_date(win_start, dpc, m1)
+        ce = gantt_col_for_date(win_start, dpc, mN)
+        c0v = max(0, cs); c1v = min(ncols-1, ce)
+        span = c1v - c0v + 1
+        if span >= 3
+            lcol = c0v + (span - 1) ÷ 2
+            fmt = narrow ? "u" : "u yyyy"
+            push!(out, (lcol, Dates.format(d, fmt)))
+        end
+    end
+    sort!(out, by = t -> t[1])
+    dedup = Tuple{Int,String}[]
+    for t in out
+        if isempty(dedup) || dedup[end][1] != t[1]
+            push!(dedup, t)
+        elseif textwidth(t[2]) > 1
+            dedup[end] = t  # prefer label over tick on collision
+        end
+    end
+    filter!(t -> 0 <= t[1] < ncols, dedup)
+end
+
 # ── Rows (pure projection of the store) ─────────────────────────────────────
 struct GanttRow
     kind::Symbol                       # :epic | :issue
@@ -126,6 +188,36 @@ function gantt_sprint_bands(m::AppModel, win_start::Date, dpc::Int, ncols::Int)
     bands
 end
 
+"""
+    gantt_left_width(rows, area_w) -> Int
+
+Adaptive left label width (PR2). Guarantees chart space; uses longest label on data.
+"""
+function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
+    # Note: callers from render_gantt! are guarded to area_w >=24 before call;
+    # direct pure-helper tests use w>=55. No <24 path exercised in normal use.
+    if isempty(rows)
+        return clamp(area_w ÷ 3, 14, 22)
+    end
+    maxl = maximum((textwidth(r.label) for r in rows), init = 0)
+    desired = clamp(max(14, min(24, maxl + 3)), 14, area_w ÷ 3)
+    min(desired, area_w - 20)
+end
+
+# ── PR3: status density (pure) ──────────────────────────────────────────────
+"""
+    status_progress(iss::Domain.Issue) -> Float64
+
+Status → density ratio for bar fill overlay (predictable buckets, no date math).
+Done=1.0, Review=0.85, In Progress=0.55, else (Backlog/To Do/other)=0.25.
+"""
+function status_progress(iss::Domain.Issue)::Float64
+    iss.status == "Done"        && return 1.0
+    iss.status == "Review"      && return 0.85
+    iss.status == "In Progress" && return 0.55
+    0.25
+end
+
 # ── Initialisation + actions ────────────────────────────────────────────────
 "Set the window to start at the earliest dated issue (or today), week scale."
 function _gantt_init!(m::AppModel)
@@ -175,7 +267,12 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         return
     end
     dpc = gantt_days_per_col(m.gantt_scale)
-    left_w = clamp(area.width ÷ 3, 14, 22)
+    rows = gantt_rows(m)
+    left_w = gantt_left_width(rows, area.width)
+    if area.width < 60
+        left_w = min(14, max(10, area.width - 20))
+    end
+    left_w = max(10, min(left_w, area.width - 10))
     chart_x = area.x + left_w
     ncols = area.width - left_w
     win_start = m.gantt_start
@@ -185,15 +282,21 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 _short("GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]", area.width),
                 Style(; fg = col_primary(), bold = true))
 
-    rows = gantt_rows(m)
-    if isempty(rows)
-        set_string!(buf, area.x, area.y + 2, _short("No scheduled issues", area.width),
-                    Style(; fg = col_text_dim()))
-        return
-    end
-
-    # Sprint bands live on the row directly under the header.
+    has_ruler = area.height >= 8
+    # has_footer predicate approximates design ("&& nshow >=1") because nshow
+    # depends on it (chicken/egg); rows>0 + h>=10 + guards guarantees positive
+    # nshow for reservation. Safe for current layout math.
+    has_footer = area.height >= 10 && length(rows) > 0
+    ruler_rows = has_ruler ? 1 : 0
+    footer_rows = has_footer ? 1 : 0
+    content_start = 1 + 1 + ruler_rows
+    # Compute layout rows always (bands loop is no-op for empty; ruler now drawn
+    # for empty tall cases too so no blank ruler row when h>=8).
     band_y = area.y + 1
+    ruler_y = area.y + 2
+    grid_y0 = area.y + content_start
+    nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
+    # Sprint bands (no-op if no data)
     for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, ncols)
         for cc in c0:c1
             xx = chart_x + cc
@@ -203,8 +306,29 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     Style(; fg = col_text_dim(), underline = true))
     end
 
-    grid_y0 = area.y + 2
-    nshow = min(length(rows), area.height - 2)
+    if has_ruler
+        is_narrow = area.width < 60
+        ax = gantt_axis_labels(win_start, dpc, ncols; narrow = is_narrow)
+        for (c, lab) in ax
+            (c < 0 || c >= ncols) && continue
+            xx = chart_x + c
+            xx > area.x + area.width - 1 && continue
+            if textwidth(lab) <= 1
+                tch = is_narrow ? '+' : '┬'
+                set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
+            else
+                set_string!(buf, xx, ruler_y, _short(lab, max(1, ncols - c)), Style(; fg = col_text_dim()))
+            end
+        end
+    end
+
+    if isempty(rows)
+        empty_y = has_ruler ? area.y + 3 : area.y + 2
+        set_string!(buf, area.x, empty_y, _short("No scheduled issues", area.width),
+                    Style(; fg = col_text_dim()))
+        return
+    end
+
     canvas = BlockCanvas(ncols, max(1, nshow); style = Style(; fg = col_primary()))
     diamonds = Tuple{Int,Int,Any}[]
     sel_issue = _gantt_selected_issue(m)
@@ -246,18 +370,93 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
+    # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
+    # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
+    wcols = gantt_weekend_cols(win_start, dpc, ncols)
+    scols = gantt_week_sep_cols(win_start, dpc, ncols)
+    tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
+    for c in wcols
+        for ii in 1:nshow
+            set_string!(buf, chart_x + c, grid_y0 + ii - 1, "░", Style(; fg = col_text_muted(), dim = true))
+        end
+    end
+    for c in scols
+        c == tcol && continue
+        for ii in 1:nshow
+            set_char!(buf, chart_x + c, grid_y0 + ii - 1, '┆', Style(; fg = col_text_muted(), dim = true))
+        end
+    end
+
     render(canvas, Rect(chart_x, grid_y0, ncols, max(1, nshow)), buf)
+
+    # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
+    # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
+    # Theming only. Recompute rowy/selection here (same scroll logic as build pass; no y/layout change).
+    # NOTE (nit fix): row_start/ri/rowy/selected logic is intentionally duplicated from canvas pass (~338) for PR3 minimality;
+    # both copies must stay identical while layout unchanged (see PR2).
+    for i in 1:nshow
+        ri = row_start + i - 1
+        ri > length(rows) && break
+        row = rows[ri]
+        rowy = grid_y0 + (i - 1)
+        if row.kind === :issue
+            iss = row.issue
+            if iss !== nothing && iss.start_date !== nothing && iss.due_date !== nothing
+                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, ncols)
+                if ext !== nothing
+                    c0, c1 = ext
+                    # explicit bounds guard (mirrors ruler/band: xx > ... continue); though gantt_bar_extent clamps
+                    if chart_x + c0 < chart_x || chart_x + c1 > area.x + area.width - 1
+                        continue  # COV_EXCL_LINE (defensive; extent always clamps c0/c1 valid for current render paths; see review fix)
+                    end
+                    selected = sel_issue !== nothing && iss.id == sel_issue.id
+                    bar_col = (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
+                    bw = c1 - c0 + 1
+                    # status density fill (partial ▓ or full █ for Done) first
+                    # NOTE (bichrome warning addressed by doc): canvas always uses col_primary() cyan for entire base █ track (per design "Keep base █ from canvas").
+                    # Only prefix (nfill) + ends get bar_col tint; suffix remains cyan unless overwritten by label/caps. This is intentional augmentation, not full recolor.
+                    # Uniform suffix tint would require additional sets over canvas result (not done for minimal + fidelity to "keep base").
+                    p = status_progress(iss)
+                    nfill = max(0, floor(Int, bw * p))
+                    for k in 0:(nfill - 1)
+                        cc = c0 + k
+                        ch = (p >= 0.999 ? '█' : '▓')
+                        set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
+                    end
+                    # inside label when bar wide enough (overwrites density if collides)
+                    if bw >= 5
+                        avail = max(1, bw - 2)
+                        lbl = fit_width(iss.key, avail)
+                        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
+                        set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
+                    end
+                    # bar end caps (unicode) LAST so they win over density/label at edge cells
+                    set_char!(buf, chart_x + c0, rowy, '▌', Style(; fg = bar_col))
+                    if bw >= 2
+                        set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                    end
+                end
+            end
+        end
+    end
 
     for (dx, dy, dcol) in diamonds
         set_char!(buf, dx, dy, '◆', Style(; fg = dcol))
     end
 
-    # Today marker — a distinct vertical line spanning the band + grid rows.
-    tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
+    # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
+        is_narrow = area.width < 60
+        today_ch = is_narrow ? '│' : '┃'
         for i in 1:nshow
-            set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), '│', Style(; fg = col_primary_hi(), bold = true))
+            set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
+        end
+        if has_ruler && (ncols - tcol) > 5
+            lx = chart_x + tcol + 1
+            if lx + 4 < chart_x + ncols
+                set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
+            end
         end
     end
 end
