@@ -125,6 +125,10 @@ feeding any printable char changes only the input's text, never view state
   (quadrant blocks, gap-free, same API as braille `Canvas`: `set_point!`,
   `line!`, `rect!`) — renders into ordinary text cells, so fully
   TestBackend-assertable. Pixel backends are Phase 5 polish only.
+  **PR1–PR6 visual completion** (see README "Gantt visuals" table):
+  weekend shading, ruler/axis/today, bar ends/density/labels, selection+indents,
+  footer+rich empty, sprint/legend/fallbacks + responsive. (Foundation in
+  PHASES.md:149-158; no data model or public API changes.)
 - **Help** overlay generated from the declarative keymap (always accurate).
 
 ## Theme (final)
