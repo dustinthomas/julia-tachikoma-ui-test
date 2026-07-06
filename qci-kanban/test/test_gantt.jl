@@ -59,6 +59,20 @@ end
         @test G4.gantt_point_col(ws, 1, Date(2026, 3, 18), 3) === nothing   # past right edge
         @test G4.gantt_point_col(ws, 1, nothing, 40) === nothing
     end
+
+    @testset "gantt_is_weekend / gantt_date_for_col / gantt_weekend_cols / gantt_week_sep_cols (PR1)" begin
+        ws = Date(2026, 3, 10)  # Tue
+        @test G4.gantt_is_weekend(Date(2026, 3, 14)) == true   # Sat
+        @test G4.gantt_is_weekend(Date(2026, 3, 15)) == true   # Sun
+        @test G4.gantt_is_weekend(Date(2026, 3, 16)) == false  # Mon
+        @test G4.gantt_date_for_col(ws, 1, 4) == Date(2026, 3, 14)
+        @test G4.gantt_date_for_col(ws, 7, 0) == ws
+        wcs = G4.gantt_weekend_cols(ws, 1, 10)
+        @test 4 in wcs && 5 in wcs  # Sat/Sun cols 14/15
+        @test !(6 in wcs)
+        scs = G4.gantt_week_sep_cols(ws, 1, 10)
+        @test 6 in scs  # 2026-03-16 Mon == col 6
+    end
 end
 
 @testset "Phase 4 — Gantt rendering" begin
@@ -217,5 +231,29 @@ end
         tb = T.TestBackend(20, 5); T.reset!(tb.buf)
         G4.render_gantt!(m, tb.buf, T.Rect(1, 1, 20, 5))
         @test T.find_text(tb, "Gantt needs") !== nothing
+    end
+
+    @testset "weekend shading ░ (dim muted) + week grid seps ┆ (PR1; full re-render; no layout y change)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "Wend")
+        # bar includes a weekend; use wide w so later weekends visible for shade assert beyond bar
+        G4.Stores.create_issue!(m.boardstore; title = "WkndBar", epic_id = e.id,
+                                start_date = Date(2026, 3, 12), due_date = Date(2026, 3, 16))
+        g4!(m, 'G')
+        @test m.gantt_start == Date(2026, 3, 12)
+        tb = gantt_render(m; w=120, h=20)
+        @test T.find_text(tb, "GANTT") !== nothing
+        @test T.find_text(tb, "Wend") !== nothing
+        r = row_with(tb, "WkndBar", 30)
+        @test r !== nothing
+        # shading '░' present on grid rows (from weekend cols; visible beyond bar extent)
+        @test occursin("░", r)
+        # week seps '┆' present (new grid lines)
+        @test T.find_text(tb, "┆") !== nothing
+        # full re-render after update!
+        g4!(m, 'l')  # scroll window
+        tb2 = gantt_render(m)
+        @test T.find_text(tb2, "┆") !== nothing
+        @test occursin("░", row_with(tb2, "WkndBar", 30))
     end
 end

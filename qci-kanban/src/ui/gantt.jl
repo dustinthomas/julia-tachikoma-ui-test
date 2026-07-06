@@ -61,6 +61,21 @@ function gantt_point_col(win_start::Date, dpc::Int, d, ncols::Int)
     c
 end
 
+# ── PR1 weekend/week geometry (pure, added for shading + separators) ────────
+"True for Saturday/Sunday (Dates.dayofweek 6/7); locale-independent for TUI."
+gantt_is_weekend(d::Date)::Bool = Dates.dayofweek(d) ∈ (6, 7)
+
+"Date represented by 0-based column `col` (used for weekend + axis + shading)."
+gantt_date_for_col(win_start::Date, dpc::Int, col::Int)::Date = win_start + Day(col * dpc)
+
+"Columns that are weekends within the visible window (for shading pass)."
+gantt_weekend_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
+    [c for c in 0:(ncols-1) if gantt_is_weekend(gantt_date_for_col(win_start, dpc, c))]
+
+"Columns at Monday (dayofweek==1) week starts, for vertical `┆` grid separators."
+gantt_week_sep_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
+    [c for c in 0:(ncols-1) if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1]
+
 # ── Rows (pure projection of the store) ─────────────────────────────────────
 struct GanttRow
     kind::Symbol                       # :epic | :issue
@@ -246,6 +261,24 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
+    # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
+    # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
+    # Sprint bands (above) and layout y (grid_y0/area.y+2, nshow) unchanged.
+    wcols = gantt_weekend_cols(win_start, dpc, ncols)
+    scols = gantt_week_sep_cols(win_start, dpc, ncols)
+    tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
+    for c in wcols
+        for ii in 1:nshow
+            set_string!(buf, chart_x + c, grid_y0 + ii - 1, "░", Style(; fg = col_text_muted(), dim = true))
+        end
+    end
+    for c in scols
+        c == tcol && continue
+        for ii in 1:nshow
+            set_char!(buf, chart_x + c, grid_y0 + ii - 1, '┆', Style(; fg = col_text_muted(), dim = true))
+        end
+    end
+
     render(canvas, Rect(chart_x, grid_y0, ncols, max(1, nshow)), buf)
 
     for (dx, dy, dcol) in diamonds
@@ -253,7 +286,6 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     # Today marker — a distinct vertical line spanning the band + grid rows.
-    tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
         for i in 1:nshow
