@@ -106,6 +106,20 @@ function _open_detail_issue!(m::AppModel, iss)
     m
 end
 
+"""
+    _open_edit_issue!(m, iss)
+
+Open the card-edit modal pre-populated from a specific issue (used by the
+calendar/gantt 'e' binding, where the target comes from the view's own
+selected issue rather than board selection). No-op when `iss === nothing`.
+"""
+function _open_edit_issue!(m::AppModel, iss)
+    iss === nothing && return m
+    m.card_issue_id = iss.id; m.edit_form = _build_edit_form(m, iss)
+    m.modal = :card_edit; m.focus = FocusState(edit_editors(m.edit_form); active = true)
+    m
+end
+
 function _close_modal!(m::AppModel)
     m.modal = :none
     m.card_issue_id = nothing

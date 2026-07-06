@@ -84,6 +84,9 @@ end
 "Open the card-detail modal for the first issue on the selected day."
 _cal_open_detail!(m::AppModel) = _open_detail_issue!(m, _cal_selected_issue(m))
 
+"Open the card-edit modal for the first issue on the selected day."
+_cal_open_edit!(m::AppModel) = _open_edit_issue!(m, _cal_selected_issue(m))
+
 # ── Layout helper (pure): where a given day's number is drawn ───────────────
 """
     cal_day_cell(year, month, day, origin_x, grid_y0) -> (x, y)

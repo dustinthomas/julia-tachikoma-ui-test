@@ -254,6 +254,12 @@ end
         g4!(m, :enter)
         @test m.modal == :card_detail && m.card_issue_id == b.id
         g4!(m, :escape)                          # back to gantt
+        # 'e' → edit the selected gantt issue (TestBackend re-render after update!)
+        g4!(m, 'e')
+        tb = app_tb(m; w = 80, h = 20)
+        @test m.modal == :card_edit && m.card_issue_id == b.id
+        @test T.find_text(tb, "EDIT CARD") !== nothing
+        g4!(m, :escape)                          # back to gantt
         # scroll right then left moves the window by a week
         st0 = m.gantt_start
         g4!(m, 'l'); @test m.gantt_start == st0 + Day(7)

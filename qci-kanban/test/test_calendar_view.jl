@@ -91,6 +91,25 @@ cal_goto_day!(m, d) = (steps = d - m.cal_sel_day;
         @test T.find_text(tb, "NEW CARD") !== nothing
     end
 
+    @testset "e edits the due-day issue and pre-fills due from the issue (TestBackend re-render)" begin
+        m = cal_login()
+        k4!(m, 'C')
+        y, mo = m.cal_year, m.cal_month
+        iss = C4.Stores.create_issue!(m.boardstore; title = "Due for Edit", priority = "Medium",
+                                      due_date = Date(y, mo, 22))
+        cal_goto_day!(m, 22)
+        # must re-render after update! before asserts (per rules)
+        k4!(m, 'e')
+        tb = app_tb(m; w = 100, h = 28)
+        @test m.modal == :card_edit
+        @test m.card_issue_id == iss.id
+        @test T.text(m.edit_form.due_input) == string(Date(y, mo, 22))
+        @test T.find_text(tb, "EDIT CARD") !== nothing
+        @test T.find_text(tb, iss.title) !== nothing   # title value rendered in edit form input
+        # no bleed from calendar under modal
+        @test T.find_text(tb, "No issues due") === nothing
+    end
+
     @testset "month navigation h/l changes the displayed month" begin
         m = cal_login()
         k4!(m, 'C')
