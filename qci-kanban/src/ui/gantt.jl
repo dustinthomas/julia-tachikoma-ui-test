@@ -76,6 +76,53 @@ gantt_weekend_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
 gantt_week_sep_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
     [c for c in 0:(ncols-1) if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1]
 
+# ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
+"""
+    gantt_axis_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
+
+(col, label) for ruler row (y+2): "┬" (or +) at Mon week starts; month labels
+("Mar 2026" or abbr "Mar") centered when their visible span >=3 cols.
+"""
+function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
+    out = Tuple{Int,String}[]
+    ncols <= 0 && return out
+    # week ticks at Mondays
+    for c in 0:(ncols-1)
+        if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1
+            push!(out, (c, "┬"))
+        end
+    end
+    # month labels (one per month)
+    seen = Set{Tuple{Int,Int}}()
+    for c in 0:(ncols-1)
+        d = gantt_date_for_col(win_start, dpc, c)
+        key = (Dates.year(d), Dates.month(d))
+        key in seen && continue
+        push!(seen, key)
+        m1 = Date(year(d), month(d), 1)
+        mN = (m1 + Dates.Month(1)) - Day(1)
+        cs = gantt_col_for_date(win_start, dpc, m1)
+        ce = gantt_col_for_date(win_start, dpc, mN)
+        c0v = max(0, cs); c1v = min(ncols-1, ce)
+        span = c1v - c0v + 1
+        if span >= 3
+            lcol = c0v + (span - 1) ÷ 2
+            fmt = narrow ? "u" : "u yyyy"
+            push!(out, (lcol, Dates.format(d, fmt)))
+        end
+    end
+    sort!(out, by = t -> t[1])
+    dedup = Tuple{Int,String}[]
+    for t in out
+        if isempty(dedup) || dedup[end][1] != t[1]
+            push!(dedup, t)
+        elseif textwidth(t[2]) > 1
+            dedup[end] = t  # prefer label over tick on collision
+        end
+    end
+    filter!(t -> 0 <= t[1] < ncols, dedup)
+end
+
 # ── Rows (pure projection of the store) ─────────────────────────────────────
 struct GanttRow
     kind::Symbol                       # :epic | :issue
@@ -141,6 +188,21 @@ function gantt_sprint_bands(m::AppModel, win_start::Date, dpc::Int, ncols::Int)
     bands
 end
 
+"""
+    gantt_left_width(rows, area_w) -> Int
+
+Adaptive left label width (PR2). Guarantees chart space; uses longest label on data.
+"""
+function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
+    area_w < 24 && return max(8, area_w - 10)
+    if isempty(rows)
+        return clamp(area_w ÷ 3, 14, 22)
+    end
+    maxl = maximum((textwidth(r.label) for r in rows), init = 0)
+    desired = clamp(max(14, min(24, maxl + 3)), 14, area_w ÷ 3)
+    min(desired, area_w - 20)
+end
+
 # ── Initialisation + actions ────────────────────────────────────────────────
 "Set the window to start at the earliest dated issue (or today), week scale."
 function _gantt_init!(m::AppModel)
@@ -190,7 +252,12 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         return
     end
     dpc = gantt_days_per_col(m.gantt_scale)
-    left_w = clamp(area.width ÷ 3, 14, 22)
+    rows = gantt_rows(m)
+    left_w = gantt_left_width(rows, area.width)
+    if area.width < 60
+        left_w = min(14, max(10, area.width - 20))
+    end
+    left_w = max(10, min(left_w, area.width - 10))
     chart_x = area.x + left_w
     ncols = area.width - left_w
     win_start = m.gantt_start
@@ -200,15 +267,23 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 _short("GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]", area.width),
                 Style(; fg = col_primary(), bold = true))
 
-    rows = gantt_rows(m)
+    has_ruler = area.height >= 8
+    has_footer = area.height >= 10 && length(rows) > 0
+    ruler_rows = has_ruler ? 1 : 0
+    footer_rows = has_footer ? 1 : 0
+    content_start = 1 + 1 + ruler_rows
     if isempty(rows)
-        set_string!(buf, area.x, area.y + 2, _short("No scheduled issues", area.width),
+        empty_y = has_ruler ? area.y + 3 : area.y + 2
+        set_string!(buf, area.x, empty_y, _short("No scheduled issues", area.width),
                     Style(; fg = col_text_dim()))
         return
     end
 
     # Sprint bands live on the row directly under the header.
     band_y = area.y + 1
+    ruler_y = area.y + 2
+    grid_y0 = area.y + content_start
+    nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
     for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, ncols)
         for cc in c0:c1
             xx = chart_x + cc
@@ -218,8 +293,22 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     Style(; fg = col_text_dim(), underline = true))
     end
 
-    grid_y0 = area.y + 2
-    nshow = min(length(rows), area.height - 2)
+    if has_ruler
+        is_narrow = area.width < 60
+        ax = gantt_axis_labels(win_start, dpc, ncols; narrow = is_narrow)
+        for (c, lab) in ax
+            (c < 0 || c >= ncols) && continue
+            xx = chart_x + c
+            xx > area.x + area.width - 1 && continue
+            if textwidth(lab) <= 1
+                tch = is_narrow ? '+' : '┬'
+                set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
+            else
+                set_string!(buf, xx, ruler_y, _short(lab, max(1, ncols - c)), Style(; fg = col_text_dim()))
+            end
+        end
+    end
+
     canvas = BlockCanvas(ncols, max(1, nshow); style = Style(; fg = col_primary()))
     diamonds = Tuple{Int,Int,Any}[]
     sel_issue = _gantt_selected_issue(m)
@@ -263,7 +352,6 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
     # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
-    # Sprint bands (above) and layout y (grid_y0/area.y+2, nshow) unchanged.
     wcols = gantt_weekend_cols(win_start, dpc, ncols)
     scols = gantt_week_sep_cols(win_start, dpc, ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
@@ -285,11 +373,19 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         set_char!(buf, dx, dy, '◆', Style(; fg = dcol))
     end
 
-    # Today marker — a distinct vertical line spanning the band + grid rows.
+    # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
+        is_narrow = area.width < 60
+        today_ch = is_narrow ? '│' : '┃'
         for i in 1:nshow
-            set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), '│', Style(; fg = col_primary_hi(), bold = true))
+            set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
+        end
+        if has_ruler && (ncols - tcol) > 5
+            lx = chart_x + tcol + 1
+            if lx + 4 < chart_x + ncols
+                set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
+            end
         end
     end
 end

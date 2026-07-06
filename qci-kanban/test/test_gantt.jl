@@ -73,6 +73,20 @@ end
         scs = G4.gantt_week_sep_cols(ws, 1, 10)
         @test 6 in scs  # 2026-03-16 Mon == col 6
     end
+
+    @testset "gantt_axis_labels + gantt_left_width + layout helpers (PR2)" begin
+        ws = Date(2026, 3, 10)  # Tue
+        labs = G4.gantt_axis_labels(ws, 1, 30)
+        @test !isempty(labs)
+        @test any(occursin("┬", string(l[2])) || occursin("Mar", string(l[2])) for l in labs)
+        labsn = G4.gantt_axis_labels(ws, 1, 30; narrow=true)
+        @test any(l[2] == "Mar" for l in labsn if occursin("Mar", string(l[2])))
+        # left width adaptive
+        er = [G4.GanttRow(:epic, "EpicName", nothing, ""); G4.GanttRow(:issue, "QCI-99 Long title here", nothing, "")]
+        @test G4.gantt_left_width(er, 120) <= 24
+        @test G4.gantt_left_width(er, 120) >= 14
+        @test G4.gantt_left_width(G4.GanttRow[], 80) == clamp(80 ÷ 3, 14, 22)
+    end
 end
 
 @testset "Phase 4 — Gantt rendering" begin
@@ -83,6 +97,9 @@ end
         tb = gantt_render(m)
         @test T.find_text(tb, "GANTT") !== nothing
         @test T.find_text(tb, "No scheduled issues") !== nothing
+        # empty position: for tall use grid_y0=y+3 (has_ruler); verify via row search (layout fix)
+        erow = row_with(tb, "No scheduled", 30)
+        @test erow !== nothing && occursin("No scheduled issues", erow)
         # row-nav / detail are inert with nothing scheduled
         g4!(m, 'j'); @test m.gantt_sel == 1
         @test G4._gantt_selected_issue(m) === nothing
@@ -160,7 +177,7 @@ end
         tb = gantt_render(m; w = w, h = 20)
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        @test T.char_at(tb, loc.x, loc.y + 1) == '│'         # vertical line directly under the marker
+        @test T.char_at(tb, loc.x, loc.y + 2) == '┃'         # vertical line (ruler at +1, grid shifted; ┃ for today)
     end
 
     @testset "sprint bands: dated sprints shade their column range with the name" begin
@@ -255,5 +272,39 @@ end
         tb2 = gantt_render(m)
         @test T.find_text(tb2, "┆") !== nothing
         @test occursin("░", row_with(tb2, "WkndBar", 30))
+    end
+
+    @testset "boundary heights + narrow: ruler/footer visibility, empty pos, today semantic (PR2)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "Bound")
+        G4.Stores.create_issue!(m.boardstore; title = "B1", epic_id = e.id,
+                                start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        @test m.gantt_start == Dates.today() - Day(2)
+        # h=6: no ruler; ruler chars absent
+        tb6 = T.TestBackend(55, 6); T.reset!(tb6.buf)
+        G4.render_gantt!(m, tb6.buf, T.Rect(1, 1, 55, 6))
+        @test T.find_text(tb6, "GANTT") !== nothing
+        @test T.find_text(tb6, "Bound") !== nothing
+        @test T.find_text(tb6, "┬") === nothing
+        # h=8: ruler yes
+        tb8 = T.TestBackend(55, 8); T.reset!(tb8.buf)
+        G4.render_gantt!(m, tb8.buf, T.Rect(1, 1, 55, 8))
+        @test T.find_text(tb8, "GANTT") !== nothing
+        r3 = T.row_text(tb8, 3); @test (T.find_text(tb8, "┬") !== nothing || T.find_text(tb8, "+") !== nothing || T.find_text(tb8, Dates.format(Dates.today(), "u")) !== nothing || T.find_text(tb8, "TODAY") !== nothing)
+        # h=10 w=80: ruler present
+        tb10 = T.TestBackend(80, 10); T.reset!(tb10.buf)
+        G4.render_gantt!(m, tb10.buf, T.Rect(1, 1, 80, 10))
+        @test T.find_text(tb10, "GANTT") !== nothing
+        @test (T.find_text(tb10, "┬") !== nothing || T.find_text(tb10, "+") !== nothing || T.find_text(tb10, Dates.format(Dates.today(), "u")) !== nothing || T.find_text(tb10, "TODAY") !== nothing)
+        # narrow today semantic (uses │ on narrow)
+        tbn = T.TestBackend(55, 10); T.reset!(tbn.buf)
+        G4.render_gantt!(m, tbn.buf, T.Rect(1, 1, 55, 10))
+        locn = T.find_text(tbn, "▼")
+        @test locn !== nothing
+        ch_today = T.char_at(tbn, locn.x, locn.y + 2)
+        @test ch_today == '│' || ch_today == '┃'
+        row_today = T.row_text(tbn, locn.y + 2)
+        @test row_today !== nothing && (occursin("│", row_today) || occursin("┃", row_today))
     end
 end
