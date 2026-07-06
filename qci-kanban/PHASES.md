@@ -155,6 +155,11 @@ line, small-terminal guard.
   report (braille/block canvas; pixel backend where supported, text fallback
   ALWAYS correct under TestBackend); today marker; zoom (week/month);
   horizontal scroll; sprint bands shaded.
+  **Visual polish completed (PR1–PR6)**: weekend shading (`░`), ruler/axis
+  (month labels + `┬`), upgraded today (`┃` + label), bar ends (`▌▐`)/density
+  (`▓` status fills)/inside labels, selection bar accents + epic tree indents,
+  selected footer + richer empty, sprint polish + adaptive left width + legend
+  + unicode/responsive fallbacks. All TestBackend-covered; 100% on gantt.jl.
 
 ### Acceptance
 - Deterministic TestBackend assertions on bar extents (row_text patterns) for
