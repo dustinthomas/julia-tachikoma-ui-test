@@ -42,7 +42,7 @@ function _initials(name::AbstractString)
     parts = filter(!isempty, split(strip(name)))
     isempty(parts) && return "?"
     length(parts) == 1 ? uppercase(string(first(parts[1]))) :
-        uppercase(string(first(parts[1])) * string(first(parts[end])))
+    uppercase(string(first(parts[1])) * string(first(parts[end])))
 end
 
 # ── Filtering + search (pure predicate over an issue) ───────────────────────
@@ -67,7 +67,9 @@ function _passes_filters(m::AppModel, iss::Domain.Issue)
     q = strip(text(m.search_input))
     if !isempty(q)
         ql = lowercase(q)
-        hay = lowercase(join([iss.title, iss.key, iss.description, join(iss.labels, " ")], " "))
+        hay = lowercase(
+            join([iss.title, iss.key, iss.description, join(iss.labels, " ")], " "),
+        )
         occursin(ql, hay) || return false
     end
     true
@@ -108,17 +110,22 @@ function board_grid(m::AppModel)::Vector{Lane}
     issues = filter(i -> _passes_filters(m, i), Stores.list_issues(m.boardstore))
     # bucket: lane key -> (name, status -> issues)
     order = String[]
-    names = Dict{String,String}()
-    buckets = Dict{String,Vector{Domain.Issue}}()
+    names = Dict{String, String}()
+    buckets = Dict{String, Vector{Domain.Issue}}()
     for iss in issues
         k, nm = _lane_of(m, iss)
         if !haskey(buckets, k)
-            buckets[k] = Domain.Issue[]; names[k] = nm; push!(order, k)
+            buckets[k] = Domain.Issue[];
+            names[k] = nm;
+            push!(order, k)
         end
         push!(buckets[k], iss)
     end
-    isempty(order) && return Lane[Lane("~all", m.swimlane_by === :none ? "All Issues" : "(no matches)",
-                                       [Domain.Issue[] for _ in BOARD_STATUSES])]
+    isempty(order) && return Lane[Lane(
+        "~all",
+        m.swimlane_by === :none ? "All Issues" : "(no matches)",
+        [Domain.Issue[] for _ in BOARD_STATUSES],
+    )]
     sort!(order; by = k -> _lane_order(m, k, names[k]))
     lanes = Lane[]
     for k in order
@@ -137,7 +144,8 @@ end
 
 # ── Selection ───────────────────────────────────────────────────────────────
 _cell(g::Vector{Lane}, lane::Int, col::Int) =
-    (1 <= lane <= length(g) && 1 <= col <= length(BOARD_STATUSES)) ? g[lane].cols[col] : Domain.Issue[]
+    (1 <= lane <= length(g) && 1 <= col <= length(BOARD_STATUSES)) ? g[lane].cols[col] :
+    Domain.Issue[]
 
 function _clamp_selection!(m::AppModel, g::Vector{Lane} = board_grid(m))
     m.sel_lane = clamp(m.sel_lane, 1, max(1, length(g)))
@@ -175,15 +183,18 @@ function _nav!(m::AppModel, dir::Symbol)
     g = _clamp_selection!(m)
     nl = length(g)
     if dir === :left
-        m.sel_col = max(1, m.sel_col - 1); m.sel_idx = 1
+        m.sel_col = max(1, m.sel_col - 1);
+        m.sel_idx = 1
     elseif dir === :right
-        m.sel_col = min(length(BOARD_STATUSES), m.sel_col + 1); m.sel_idx = 1
+        m.sel_col = min(length(BOARD_STATUSES), m.sel_col + 1);
+        m.sel_idx = 1
     elseif dir === :down
         cell = _cell(g, m.sel_lane, m.sel_col)
         if m.sel_idx < length(cell)
             m.sel_idx += 1
         elseif m.sel_lane < nl
-            m.sel_lane += 1; m.sel_idx = 1
+            m.sel_lane += 1;
+            m.sel_idx = 1
         end
     elseif dir === :up
         if m.sel_idx > 1
@@ -205,7 +216,9 @@ function _select_issue!(m::AppModel, id)
     for (li, lane) in enumerate(g), (ci, cell) in enumerate(lane.cols)
         k = findfirst(i -> i.id == id, cell)
         if k !== nothing
-            m.sel_lane = li; m.sel_col = ci; m.sel_idx = k
+            m.sel_lane = li;
+            m.sel_col = ci;
+            m.sel_idx = k
             return m
         end
     end
@@ -221,14 +234,18 @@ end
 
 function _cycle_swimlane!(m::AppModel)
     i = findfirst(==(m.swimlane_by), SWIMLANE_MODES)
-    m.swimlane_by = SWIMLANE_MODES[mod1((i === nothing ? 1 : i) + 1, length(SWIMLANE_MODES))]
-    m.sel_lane = 1; m.sel_col = 1; m.sel_idx = 1
+    m.swimlane_by =
+        SWIMLANE_MODES[mod1((i === nothing ? 1 : i) + 1, length(SWIMLANE_MODES))]
+    m.sel_lane = 1;
+    m.sel_col = 1;
+    m.sel_idx = 1
     m.message = "Swimlanes: $(m.swimlane_by)"
     m
 end
 
 # ── WIP limits ──────────────────────────────────────────────────────────────
-_col_count(m::AppModel, status::AbstractString) = length(Stores.list_issues(m.boardstore; status = status))
+_col_count(m::AppModel, status::AbstractString) =
+    length(Stores.list_issues(m.boardstore; status = status))
 _wip_limit(m::AppModel, status::AbstractString) = get(m.wip_limits, status, 0)
 function _is_over_wip(m::AppModel, status::AbstractString)
     lim = _wip_limit(m, status)
@@ -243,12 +260,24 @@ function _warn_if_over_wip!(m::AppModel, status::AbstractString)
 end
 
 # ── Notifications helper (only when a valid recipient email exists) ─────────
-function _notify_issue!(m::AppModel, iss::Domain.Issue, kind::Symbol, recipient_id, detail::AbstractString)
+function _notify_issue!(
+    m::AppModel,
+    iss::Domain.Issue,
+    kind::Symbol,
+    recipient_id,
+    detail::AbstractString,
+)
     email = _user_email(m, recipient_id)
     email === nothing && return
     actor = m.current_user === nothing ? "" : m.current_user.name
-    ev = Domain.NotificationEvent(; kind = kind, recipient_email = email, actor_name = actor,
-                                  issue_key = iss.key, issue_title = iss.title, detail = detail)
+    ev = Domain.NotificationEvent(;
+        kind = kind,
+        recipient_email = email,
+        actor_name = actor,
+        issue_key = iss.key,
+        issue_title = iss.title,
+        detail = detail,
+    )
     Notify.notify!(m.notifier, ev)
 end
 
@@ -256,15 +285,21 @@ _actor_id(m::AppModel) = m.current_user === nothing ? nothing : m.current_user.i
 
 # ── Board ops (all mutate the store, then re-clamp selection) ───────────────
 function _move_status!(m::AppModel, delta::Int)
-    iss = selected_issue(m); iss === nothing && return m
+    iss = selected_issue(m);
+    iss === nothing && return m
     ci = findfirst(==(iss.status), BOARD_STATUSES)
     ci === nothing && return m
     nci = clamp(ci + delta, 1, length(BOARD_STATUSES))
     nci == ci && return m
     target = BOARD_STATUSES[nci]
     Stores.move_issue!(m.boardstore, iss.id; status = target)
-    Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
-                         kind = :status_changed, detail = "$(iss.status) → $(target)")
+    Stores.log_activity!(
+        m.boardstore;
+        issue_id = iss.id,
+        actor_id = _actor_id(m),
+        kind = :status_changed,
+        detail = "$(iss.status) → $(target)",
+    )
     _notify_issue!(m, iss, :status_changed, iss.assignee_id, "$(iss.status) → $(target)")
     m.message = "$(iss.key) → $(target)"
     _warn_if_over_wip!(m, target)
@@ -273,7 +308,8 @@ function _move_status!(m::AppModel, delta::Int)
 end
 
 function _rank!(m::AppModel, delta::Int)
-    iss = selected_issue(m); iss === nothing && return m
+    iss = selected_issue(m);
+    iss === nothing && return m
     Stores.rank_issue!(m.boardstore, iss.id; position = max(0, iss.position + delta))
     m.message = "Ranked $(iss.key)"
     _select_issue!(m, iss.id)
@@ -281,19 +317,27 @@ function _rank!(m::AppModel, delta::Int)
 end
 
 function _assign_me!(m::AppModel)
-    iss = selected_issue(m); iss === nothing && return m
+    iss = selected_issue(m);
+    iss === nothing && return m
     m.current_user === nothing && return m
     Stores.update_issue!(m.boardstore, iss.id; assignee_id = m.current_user.id)
-    Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
-                         kind = :assigned, detail = "assigned to $(m.current_user.name)")
+    Stores.log_activity!(
+        m.boardstore;
+        issue_id = iss.id,
+        actor_id = _actor_id(m),
+        kind = :assigned,
+        detail = "assigned to $(m.current_user.name)",
+    )
     _notify_issue!(m, iss, :assigned, m.current_user.id, "")
     m.message = "$(iss.key) assigned to you"
     m
 end
 
 function _toggle_select!(m::AppModel)
-    iss = selected_issue(m); iss === nothing && return m
-    iss.id in m.selected_ids ? delete!(m.selected_ids, iss.id) : push!(m.selected_ids, iss.id)
+    iss = selected_issue(m);
+    iss === nothing && return m
+    iss.id in m.selected_ids ? delete!(m.selected_ids, iss.id) :
+    push!(m.selected_ids, iss.id)
     m.message = "$(length(m.selected_ids)) selected"
     m
 end
@@ -305,11 +349,23 @@ function _bulk_move!(m::AppModel)
     n = 0
     for id in collect(m.selected_ids)
         id in vis || continue                       # never act on filtered-out cards
-        iss = Stores.get_issue(m.boardstore, id); iss === nothing && continue
+        iss = Stores.get_issue(m.boardstore, id);
+        iss === nothing && continue
         Stores.move_issue!(m.boardstore, id; status = target)
-        Stores.log_activity!(m.boardstore; issue_id = id, actor_id = _actor_id(m),
-                             kind = :status_changed, detail = "$(iss.status) → $(target)")
-        _notify_issue!(m, iss, :status_changed, iss.assignee_id, "$(iss.status) → $(target)")
+        Stores.log_activity!(
+            m.boardstore;
+            issue_id = id,
+            actor_id = _actor_id(m),
+            kind = :status_changed,
+            detail = "$(iss.status) → $(target)",
+        )
+        _notify_issue!(
+            m,
+            iss,
+            :status_changed,
+            iss.assignee_id,
+            "$(iss.status) → $(target)",
+        )
         n += 1
     end
     m.message = "Moved $(n) → $(target)"
@@ -325,10 +381,16 @@ function _bulk_assign!(m::AppModel)
     n = 0
     for id in collect(m.selected_ids)
         id in vis || continue                       # never act on filtered-out cards
-        iss = Stores.get_issue(m.boardstore, id); iss === nothing && continue
+        iss = Stores.get_issue(m.boardstore, id);
+        iss === nothing && continue
         Stores.update_issue!(m.boardstore, id; assignee_id = m.current_user.id)
-        Stores.log_activity!(m.boardstore; issue_id = id, actor_id = _actor_id(m),
-                             kind = :assigned, detail = "assigned to $(m.current_user.name)")
+        Stores.log_activity!(
+            m.boardstore;
+            issue_id = id,
+            actor_id = _actor_id(m),
+            kind = :assigned,
+            detail = "assigned to $(m.current_user.name)",
+        )
         _notify_issue!(m, iss, :assigned, m.current_user.id, "")
         n += 1
     end
@@ -340,24 +402,31 @@ end
 # ── Quick filters ───────────────────────────────────────────────────────────
 function _toggle_filter!(m::AppModel, f::Symbol)
     f in m.active_filters ? delete!(m.active_filters, f) : push!(m.active_filters, f)
-    m.sel_lane = 1; m.sel_col = 1; m.sel_idx = 1
-    m.message = isempty(m.active_filters) && m.label_filter === nothing ? "Filters cleared" :
-                "Filter: " * join(sort(collect(string.(m.active_filters))), ",")
+    m.sel_lane = 1;
+    m.sel_col = 1;
+    m.sel_idx = 1
+    m.message =
+        isempty(m.active_filters) && m.label_filter === nothing ? "Filters cleared" :
+        "Filter: " * join(sort(collect(string.(m.active_filters))), ",")
     m
 end
 
 function _cycle_label_filter!(m::AppModel)
     lbls = Stores.list_labels(m.boardstore)
     if isempty(lbls)
-        m.message = "No labels"; return m
+        m.message = "No labels";
+        return m
     end
     ids = [l.id for l in lbls]
     cur = m.label_filter === nothing ? 0 : something(findfirst(==(m.label_filter), ids), 0)
     m.label_filter = cur >= length(ids) ? nothing : ids[cur + 1]
-    nm = m.label_filter === nothing ? "off" :
-         something(findfirst(l -> l.id == m.label_filter, lbls), 1) |> i -> lbls[i].name
+    nm =
+        m.label_filter === nothing ? "off" :
+        something(findfirst(l -> l.id == m.label_filter, lbls), 1) |> i -> lbls[i].name
     m.message = "Label filter: $(nm)"
-    m.sel_lane = 1; m.sel_col = 1; m.sel_idx = 1
+    m.sel_lane = 1;
+    m.sel_col = 1;
+    m.sel_idx = 1
     m
 end
 
@@ -365,7 +434,8 @@ end
 function _wrap_title(t::AbstractString, w::Int, maxlines::Int)
     w <= 0 && return String[]
     words = split(t)
-    lines = String[]; cur = ""
+    lines = String[];
+    cur = ""
     for wd in words
         cand = isempty(cur) ? wd : cur * " " * wd
         if textwidth(cand) <= w
@@ -377,9 +447,11 @@ function _wrap_title(t::AbstractString, w::Int, maxlines::Int)
         end
     end
     length(lines) < maxlines && !isempty(cur) && push!(lines, cur)
-    if !isempty(lines) && textwidth(join(words, " ")) > sum(textwidth, lines) + length(lines) - 1
+    if !isempty(lines) &&
+       textwidth(join(words, " ")) > sum(textwidth, lines) + length(lines) - 1
         last = lines[end]
-        lines[end] = textwidth(last) > w - 1 ? fit_width(last, max(1, w - 1)) * "…" : last * "…"
+        lines[end] =
+            textwidth(last) > w - 1 ? fit_width(last, max(1, w - 1)) * "…" : last * "…"
     end
     lines
 end
@@ -392,14 +464,26 @@ function _due_chip(iss::Domain.Issue)
     ("▣" * Dates.format(iss.due_date, "u-dd"), overdue)
 end
 
+function _start_chip(iss::Domain.Issue)
+    iss.start_date === nothing && return ""
+    "S:" * Dates.format(iss.start_date, "u-dd")
+end
+
 """
 Render one rich card's content into a rect; returns nothing. Selected/bulk
 styling applied. `bg` threads a card-surface background through every style
 (the modern bordered card fills its interior); `inline_marker=false` drops the
 leading ▸/space (the modern card draws its arrow on the frame instead).
 """
-function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, selected::Bool;
-                       bg = nothing, inline_marker::Bool = true)
+function _render_card!(
+    m::AppModel,
+    buf::Buffer,
+    r::Rect,
+    iss::Domain.Issue,
+    selected::Bool;
+    bg = nothing,
+    inline_marker::Bool = true,
+)
     (r.width < 4 || r.height < 1) && return
     stl(; kw...) = bg === nothing ? Style(; kw...) : Style(; kw..., bg = bg)
     bulk = iss.id in m.selected_ids
@@ -411,9 +495,17 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
     set_string!(buf, r.x, r.y, fit_width(head, r.width), key_style)
     gx = r.x + textwidth(head) + 1
     if gx + 1 <= r.x + r.width
-        set_string!(buf, gx, r.y, _priority_glyph(iss.priority), stl(; fg = priority_color(iss.priority)))
+        set_string!(
+            buf,
+            gx,
+            r.y,
+            _priority_glyph(iss.priority),
+            stl(; fg = priority_color(iss.priority)),
+        )
         pxs = gx + 2
-        isempty(pts) || pxs + length(pts) > r.x + r.width || set_string!(buf, pxs, r.y, pts, stl(; fg = col_text_dim()))
+        isempty(pts) ||
+            pxs + length(pts) > r.x + r.width ||
+            set_string!(buf, pxs, r.y, pts, stl(; fg = col_text_dim()))
     end
     # line 2-3: wrapped title
     if r.height >= 2
@@ -422,14 +514,15 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
             set_string!(buf, r.x, r.y + i, ln, stl(; fg = col_text()))
         end
     end
-    # line 4: epic tag / labels / assignee / due
+    # line 4: epic tag / labels / assignee / start / due (PR1 date surfacing)
     if r.height >= 4
         y = r.y + 3
         x = r.x
         if iss.epic_id !== nothing
             tag = "◆" * _short(_epic_name(m, iss.epic_id), 7)
-            x + length(tag) <= r.x + r.width && set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
-            x += length(tag) + 1
+            x + textwidth(tag) <= r.x + r.width &&
+                set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
+            x += textwidth(tag) + 1
         end
         for lid in iss.labels
             chip = "•"
@@ -438,11 +531,17 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
         end
         if iss.assignee_id !== nothing
             ini = _initials(_user_name(m, iss.assignee_id))
-            x + length(ini) <= r.x + r.width && set_string!(buf, x, y, ini, stl(; fg = col_primary_hi()))
-            x += length(ini) + 1
+            x + textwidth(ini) <= r.x + r.width &&
+                set_string!(buf, x, y, ini, stl(; fg = col_primary_hi()))
+            x += textwidth(ini) + 1
+        end
+        sch = _start_chip(iss)
+        if !isempty(sch) && x + textwidth(sch) <= r.x + r.width
+            set_string!(buf, x, y, sch, stl(; fg = col_text_muted()))
+            x += textwidth(sch) + 1
         end
         chip, overdue = _due_chip(iss)
-        if !isempty(chip) && x + length(chip) <= r.x + r.width
+        if !isempty(chip) && x + textwidth(chip) <= r.x + r.width
             set_string!(buf, x, y, chip, stl(; fg = overdue ? col_err() : col_text_muted()))
         end
     end
@@ -469,8 +568,12 @@ function _render_col_headers!(m::AppModel, buf::Buffer, x::Int, y::Int, col_w::I
         cnt = _col_count(m, st)
         hdr = lim > 0 ? "$(st) $(cnt)/$(lim)" : "$(st) $(cnt)"
         over = _is_over_wip(m, st)
-        hstyle = over ? Style(; fg = col_err(), bold = true) :
-                 (ci == m.sel_col ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_primary()))
+        hstyle =
+            over ? Style(; fg = col_err(), bold = true) :
+            (
+                ci == m.sel_col ? Style(; fg = col_primary_hi(), bold = true) :
+                Style(; fg = col_primary())
+            )
         set_string!(buf, cx, y, _short(hdr, col_w - 1), hstyle)
     end
 end
@@ -484,16 +587,25 @@ edge tinted by priority. The selected card pops — bright border, raised
 `col_surface_hi` background, a ▸ arrow on its frame, and (animations on) a
 subtle border shimmer.
 """
-function _render_card_modern!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, selected::Bool)
+function _render_card_modern!(
+    m::AppModel,
+    buf::Buffer,
+    r::Rect,
+    iss::Domain.Issue,
+    selected::Bool,
+)
     (r.width < 6 || r.height < 3) && return
     bg = selected ? col_surface_hi() : col_surface()
-    border = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_muted())
+    border =
+        selected ? Style(; fg = col_primary_hi(), bold = true) :
+        Style(; fg = col_text_muted())
     render(Block(; border_style = border), r, buf)
     inner = Rect(r.x + 1, r.y + 1, r.width - 2, r.height - 2)
     set_style!(buf, inner, Style(; bg = bg))
     _render_card!(m, buf, inner, iss, selected; bg = bg, inline_marker = false)
     if selected
-        animations_enabled() && border_shimmer!(buf, r, col_primary_hi(), m.tick; intensity = 0.25)
+        animations_enabled() &&
+            border_shimmer!(buf, r, col_primary_hi(), m.tick; intensity = 0.25)
         set_string!(buf, r.x, r.y + 1, "▸", Style(; fg = col_primary_hi(), bold = true))
     else
         pstyle = Style(; fg = priority_color(iss.priority))
@@ -512,7 +624,13 @@ mini-panel (`_render_card_modern!`).
 function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
     g = _clamp_selection!(m)
     ncols = length(BOARD_STATUSES)
-    set_string!(buf, area.x, area.y, _short(_filter_line(m), area.width), Style(; fg = col_text_dim()))
+    set_string!(
+        buf,
+        area.x,
+        area.y,
+        _short(_filter_line(m), area.width),
+        Style(; fg = col_text_dim()),
+    )
 
     grid_y = area.y + 1
     inner_x = area.x + 1                     # lane panels inset content by the frame
@@ -542,9 +660,16 @@ function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
         # lane title over the frame (drawn after the tees so it always reads clean)
         if m.swimlane_by !== :none && area.width > 6
             total = sum(length, lane.cols)
-            tstyle = li == m.sel_lane ? Style(; fg = col_primary_hi(), bold = true) :
-                                        Style(; fg = col_text_dim())
-            set_string!(buf, area.x + 2, y, _short(" $(lane.name) ($(total)) ", area.width - 4), tstyle)
+            tstyle =
+                li == m.sel_lane ? Style(; fg = col_primary_hi(), bold = true) :
+                Style(; fg = col_text_dim())
+            set_string!(
+                buf,
+                area.x + 2,
+                y,
+                _short(" $(lane.name) ($(total)) ", area.width - 4),
+                tstyle,
+            )
         end
         # When the lane interior can't hold a full bordered card, degrade to the
         # flat card so the cursor card is never invisible while ops
@@ -577,8 +702,13 @@ function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
             hidden = length(cell) - last
             if hidden > 0
                 my = y + 1 + slot * card_h
-                my <= y + lh - 2 &&
-                    set_string!(buf, cx, my, _short("+$(hidden) more", col_w - 1), Style(; fg = col_text_muted()))
+                my <= y + lh - 2 && set_string!(
+                    buf,
+                    cx,
+                    my,
+                    _short("+$(hidden) more", col_w - 1),
+                    Style(; fg = col_text_muted()),
+                )
             end
         end
         y += lh
@@ -596,5 +726,17 @@ function _filter_line(m::AppModel)
     m.label_filter === nothing || push!(parts, "label")
     sw = "lanes:$(m.swimlane_by)"
     bulk = isempty(m.selected_ids) ? "" : " • $(length(m.selected_ids)) selected"
-    isempty(parts) ? "Filters: none • $(sw)$(bulk)" : "Filters: " * join(parts, " ") * " • $(sw)$(bulk)"
+    line =
+        isempty(parts) ? "Filters: none • $(sw)$(bulk)" :
+        "Filters: " * join(parts, " ") * " • $(sw)$(bulk)"
+    sel = selected_issue(m)
+    if sel !== nothing
+        ds = String[]
+        sel.start_date !== nothing && push!(ds, "S:$(sel.start_date)")
+        sel.due_date !== nothing && push!(ds, "D:$(sel.due_date)")
+        !isempty(ds) && (line *= " • " * join(ds, " "))
+    end
+    # Note (nit): _short() on caller may truncate date suffix at narrow widths;
+    # selected date visibility relies on filter meta + wider terminals in practice.
+    line
 end

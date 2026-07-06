@@ -27,21 +27,26 @@ mkey(m, k) = T.update!(m, T.KeyEvent(k))
     @testset "swimlane cycles none→assignee→epic→priority→none with named lanes" begin
         m = lb()
         @test m.swimlane_by == :none
-        mkey(m, 's'); @test m.swimlane_by == :assignee
+        mkey(m, 's');
+        @test m.swimlane_by == :assignee
         rows = app_rows(m; w = 100, h = 30)
         @test any(occursin("Unassigned", r) for r in rows)  # lane-by-assignee name
-        mkey(m, 's'); @test m.swimlane_by == :epic
+        mkey(m, 's');
+        @test m.swimlane_by == :epic
         rows = app_rows(m; w = 100, h = 30)
         @test any(occursin("Board Core", r) || occursin("Onboarding", r) for r in rows)
-        mkey(m, 's'); @test m.swimlane_by == :priority
+        mkey(m, 's');
+        @test m.swimlane_by == :priority
         rows = app_rows(m; w = 100, h = 30)
         @test any(occursin("High", r) for r in rows)
-        mkey(m, 's'); @test m.swimlane_by == :none
+        mkey(m, 's');
+        @test m.swimlane_by == :none
     end
 
     @testset "swimlane-by-epic grid: cards land in the correct status cells" begin
         m = lb()
-        mkey(m, 's'); mkey(m, 's')               # → epic
+        mkey(m, 's');
+        mkey(m, 's')               # → epic
         @test m.swimlane_by == :epic
         g = Q3.board_grid(m)
         @test length(g) >= 2                     # at least Board Core + Onboarding lanes
@@ -56,24 +61,34 @@ end
     @testset "h/l move columns; j/k move within & across cells" begin
         m = lb()
         @test m.sel_col == 1
-        mkey(m, 'l'); @test m.sel_col == 2
-        mkey(m, 'l'); @test m.sel_col == 3
-        mkey(m, 'h'); @test m.sel_col == 2
+        mkey(m, 'l');
+        @test m.sel_col == 2
+        mkey(m, 'l');
+        @test m.sel_col == 3
+        mkey(m, 'h');
+        @test m.sel_col == 2
         # left edge clamps
-        mkey(m, 'h'); mkey(m, 'h'); @test m.sel_col == 1
+        mkey(m, 'h');
+        mkey(m, 'h');
+        @test m.sel_col == 1
         # down within the Backlog cell (2 cards) then clamps
         @test m.sel_idx == 1
-        mkey(m, 'j'); @test m.sel_idx == 2
+        mkey(m, 'j');
+        @test m.sel_idx == 2
         iss = Q3.selected_issue(m)
         @test iss !== nothing && iss.status == "Backlog"
     end
 
     @testset "arrow keys mirror h/l/j/k" begin
         m = lb()
-        mkey(m, :right); @test m.sel_col == 2
-        mkey(m, :left);  @test m.sel_col == 1
-        mkey(m, :down);  @test m.sel_idx == 2
-        mkey(m, :up);    @test m.sel_idx == 1
+        mkey(m, :right);
+        @test m.sel_col == 2
+        mkey(m, :left);
+        @test m.sel_col == 1
+        mkey(m, :down);
+        @test m.sel_idx == 2
+        mkey(m, :up);
+        @test m.sel_idx == 1
     end
 
     @testset "vertical nav crosses lanes coherently (assignee mode)" begin
@@ -81,7 +96,10 @@ end
         mkey(m, 's')                              # assignee mode (all Unassigned → 1 lane here)
         @test m.swimlane_by == :assignee
         # navigating down past the cell should not error and stays in-bounds
-        for _ in 1:6; mkey(m, 'j'); end
+        for _ in 1:6
+            ;
+            mkey(m, 'j');
+        end
         @test m.sel_lane >= 1 && m.sel_idx >= 1
     end
 end
@@ -98,7 +116,8 @@ end
         # activity logged
         acts = Q3.Stores.list_activity(m.boardstore, iss.id)
         @test any(a.kind == :status_changed for a in acts)
-        mkey(m, '<'); mkey(m, '<')                # back and clamp at Backlog
+        mkey(m, '<');
+        mkey(m, '<')                # back and clamp at Backlog
         @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "Backlog"
     end
 
@@ -108,7 +127,9 @@ end
         mkey(m, 'a')
         upd = Q3.Stores.get_issue(m.boardstore, iss.id)
         @test upd.assignee_id == m.current_user.id
-        @test any(a.kind == :assigned for a in Q3.Stores.list_activity(m.boardstore, iss.id))
+        @test any(
+            a.kind == :assigned for a in Q3.Stores.list_activity(m.boardstore, iss.id)
+        )
     end
 
     @testset "rank J/K reorders within the column" begin
@@ -127,12 +148,17 @@ end
     @testset "space toggles selection; bulk move moves all to cursor column" begin
         m = lb()
         mkey(m, ' ')                              # select QCI-100 (Backlog)
-        mkey(m, 'j'); mkey(m, ' ')                # select QCI-101 (Backlog)
+        mkey(m, 'j');
+        mkey(m, ' ')                # select QCI-101 (Backlog)
         @test length(m.selected_ids) == 2
-        mkey(m, 'l'); mkey(m, 'l')                # cursor → In Progress column
+        mkey(m, 'l');
+        mkey(m, 'l')                # cursor → In Progress column
         @test m.sel_col == 3
         mkey(m, 'M')                              # bulk move
-        movedstatuses = [i.status for i in Q3.Stores.list_issues(m.boardstore) if i.key in ("QCI-100", "QCI-101")]
+        movedstatuses = [
+            i.status for
+            i in Q3.Stores.list_issues(m.boardstore) if i.key in ("QCI-100", "QCI-101")
+        ]
         @test all(==("In Progress"), movedstatuses)
         @test isempty(m.selected_ids)             # cleared after bulk op
         @test occursin("Moved 2", m.message)
@@ -140,9 +166,14 @@ end
 
     @testset "bulk assign assigns all selected to me" begin
         m = lb()
-        mkey(m, ' '); mkey(m, 'j'); mkey(m, ' ')
+        mkey(m, ' ');
+        mkey(m, 'j');
+        mkey(m, ' ')
         mkey(m, 'A')
-        assigned = [i.assignee_id for i in Q3.Stores.list_issues(m.boardstore) if i.assignee_id !== nothing]
+        assigned = [
+            i.assignee_id for
+            i in Q3.Stores.list_issues(m.boardstore) if i.assignee_id !== nothing
+        ]
         @test length(assigned) >= 2
         @test all(==(m.current_user.id), assigned)
     end
@@ -154,10 +185,12 @@ end
         # High priority filter: only High cards remain
         mkey(m, 'H')
         @test :high in m.active_filters
-        for iss in filter(i -> Q3._passes_filters(m, i), Q3.Stores.list_issues(m.boardstore))
+        for iss in
+            filter(i -> Q3._passes_filters(m, i), Q3.Stores.list_issues(m.boardstore))
             @test iss.priority == "High"
         end
-        mkey(m, 'H'); @test !(:high in m.active_filters)   # toggle off
+        mkey(m, 'H');
+        @test !(:high in m.active_filters)   # toggle off
         # Mine (nothing assigned yet → empty grid, no matches lane)
         mkey(m, 'm')
         @test :mine in m.active_filters
@@ -169,7 +202,10 @@ end
         m = lb()
         mkey(m, '/')
         @test m.modal == :search
-        for ch in collect("login"); mkey(m, ch); end
+        for ch in collect("login")
+            ;
+            mkey(m, ch);
+        end
         # live filter applies from search_input text
         vis = filter(i -> Q3._passes_filters(m, i), Q3.Stores.list_issues(m.boardstore))
         @test !isempty(vis)
@@ -178,7 +214,8 @@ end
         @test m.modal == :none
         @test !isempty(strip(Q3.text(m.search_input)))
         # reopen and Esc clears
-        mkey(m, '/'); mkey(m, :escape)
+        mkey(m, '/');
+        mkey(m, :escape)
         @test isempty(strip(Q3.text(m.search_input)))
     end
 
@@ -188,12 +225,16 @@ end
         @test nlabels >= 1
         mkey(m, '#')
         @test m.label_filter !== nothing          # first label
-        for _ in 1:nlabels; mkey(m, '#'); end     # cycle through the rest → back to off
+        for _ in 1:nlabels
+            ;
+            mkey(m, '#');
+        end     # cycle through the rest → back to off
         @test m.label_filter === nothing
     end
 
     @testset "label filter with no labels reports gracefully" begin
-        m = fresh_app(; seed = false); app_login_new(m; name = "No Labels")
+        m = fresh_app(; seed = false);
+        app_login_new(m; name = "No Labels")
         @test isempty(Q3.Stores.list_labels(m.boardstore))
         mkey(m, '#')
         @test occursin("No labels", m.message)
@@ -223,8 +264,11 @@ end
         m = lb()
         # give the top Backlog card an assignee (initials) + long title
         iss = Q3.selected_issue(m)
-        Q3.Stores.update_issue!(m.boardstore, iss.id;
-            title = "A very long card title that must wrap across two lines and ellipsize")
+        Q3.Stores.update_issue!(
+            m.boardstore,
+            iss.id;
+            title = "A very long card title that must wrap across two lines and ellipsize",
+        )
         mkey(m, 'a')                              # assign to me → initials render
         tb = app_tb(m; w = 120, h = 34)
         blob = join([T.row_text(tb, i) for i in 1:34], "\n")
@@ -232,17 +276,29 @@ end
         @test occursin("▣", blob)                 # due chip (QCI-100 has a due date)
         @test occursin("AL", blob)                # assignee initials for "Ada Lovelace"
         @test occursin("…", blob)                 # wrapped/ellipsized long title
+        # PR1: surface start_date in selected meta (chip may clip on busy card; filter always shows)
+        # Fixture data via Stores ok; all UI behavior + re-render driven via mkey/update! + TestBackend.
+        iss = Q3.selected_issue(m)
+        Q3.Stores.update_issue!(m.boardstore, iss.id; start_date = Dates.Date(2026, 7, 15))
+        tb2 = app_tb(m; w = 120, h = 34)
+        blob2 = join([T.row_text(tb2, i) for i in 1:34], "\n")
+        @test occursin("S:2026-07-15", blob2)  # selected meta from _filter_line (PR1; filter always surfaces for selected)
     end
 
     @testset "overdue due chip uses err color" begin
         m = lb()
         # seed QCI-106 (Done, due in the past) — but Done cards are not overdue.
         # Create an explicitly overdue non-Done card and select it.
-        Q3.Stores.create_issue!(m.boardstore; title = "overdue task", status = "To Do",
-                                due_date = Dates.today() - Dates.Day(3))
+        Q3.Stores.create_issue!(
+            m.boardstore;
+            title = "overdue task",
+            status = "To Do",
+            due_date = Dates.today() - Dates.Day(3),
+        )
         mkey(m, 'l')                              # → To Do column
         # walk to the overdue card
-        g = Q3.board_grid(m); cell = g[1].cols[2]
+        g = Q3.board_grid(m);
+        cell = g[1].cols[2]
         idx = findfirst(i -> i.title == "overdue task", cell)
         @test idx !== nothing
         tb = app_tb(m; w = 120, h = 34)
@@ -252,12 +308,19 @@ end
 
     @testset "vertical nav crosses lanes up and down (epic mode)" begin
         m = lb()
-        mkey(m, 's'); mkey(m, 's')                # epic mode, multiple lanes
+        mkey(m, 's');
+        mkey(m, 's')                # epic mode, multiple lanes
         @test m.swimlane_by == :epic
         # move down into a lower lane then back up
         start_lane = m.sel_lane
-        for _ in 1:8; mkey(m, 'j'); end
-        for _ in 1:8; mkey(m, 'k'); end
+        for _ in 1:8
+            ;
+            mkey(m, 'j');
+        end
+        for _ in 1:8
+            ;
+            mkey(m, 'k');
+        end
         @test m.sel_lane >= 1
     end
 
@@ -267,7 +330,10 @@ end
         @test :due_soon in m.active_filters
         vis = filter(i -> Q3._passes_filters(m, i), Q3.Stores.list_issues(m.boardstore))
         @test !isempty(vis)
-        @test all(i -> i.due_date !== nothing && i.due_date <= Dates.today() + Dates.Day(7), vis)
+        @test all(
+            i -> i.due_date !== nothing && i.due_date <= Dates.today() + Dates.Day(7),
+            vis,
+        )
     end
 
     @testset "_wrap_title wraps, breaks at maxlines, ellipsizes; _select_issue fallback" begin
@@ -303,7 +369,10 @@ end
         # navigate to Review column, move a card in from Backlog instead:
         iss = Q3.selected_issue(m)                # Backlog card
         # move it right until Review
-        for _ in 1:3; mkey(m, '>'); end           # Backlog→To Do→In Progress→Review
+        for _ in 1:3
+            ;
+            mkey(m, '>');
+        end           # Backlog→To Do→In Progress→Review
         @test occursin("WIP limit exceeded", m.message)
         @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "Review"   # move still applied
     end
@@ -345,7 +414,10 @@ end
         for i in 1:14
             Q3.Stores.create_issue!(m.boardstore; title = "MScroll $i", status = "Backlog")
         end
-        for _ in 1:11; mkey(m, 'j'); end
+        for _ in 1:11
+            ;
+            mkey(m, 'j');
+        end
         sel = Q3.selected_issue(m)
         @test sel !== nothing
         rows = app_rows(m; w = 100, h = 16)
@@ -362,11 +434,44 @@ end
         @test any(occursin(sel.key, r) for r in rows)
         # scroll-follow still holds in the degraded mode
         for i in 1:14
-            Q3.Stores.create_issue!(m.boardstore; title = "TinyScroll $i", status = "Backlog")
+            Q3.Stores.create_issue!(
+                m.boardstore;
+                title = "TinyScroll $i",
+                status = "Backlog",
+            )
         end
-        for _ in 1:11; mkey(m, 'j'); end
+        for _ in 1:11
+            ;
+            mkey(m, 'j');
+        end
         sel2 = Q3.selected_issue(m)
         rows2 = app_rows(m; w = 100, h = 14)
         @test any(occursin(sel2.key, r) for r in rows2)
     end
+end
+
+@testset "Phase 3 — board+detail dates PR1 (AppModel path: selected meta, chips, detail Start+Due)" begin
+    m = lb()
+    # fixture setup via store only; drive UI exclusively with mkey=update! + re-render via app_rows/app_tb
+    sel = Q3.selected_issue(m)
+    Q3.Stores.update_issue!(
+        m.boardstore,
+        sel.id;
+        start_date = Dates.Date(2026, 7, 15),
+        due_date = Dates.Date(2026, 7, 22),
+    )
+    rows = app_rows(m; w = 120, h = 24)
+    # chips for visible/selected card (S:Jul + ▣ due) -- at w=120 fits when no crowding
+    @test any(occursin("S:Jul-15", r) || occursin("▣Jul-22", r) for r in rows)
+    # selected meta from _filter_line: extract the filter row specifically (stronger than any)
+    frow = findfirst(r -> occursin("Filters:", r), rows)
+    @test frow !== nothing &&
+          occursin("S:2026-07-15", rows[frow]) &&
+          occursin("D:2026-07-22", rows[frow])
+    # detail via v (update! + re-render) shows Start+Due
+    mkey(m, 'v')
+    tb = app_tb(m; w = 100, h = 26)
+    @test T.find_text(tb, "Start:2026-07-15") !== nothing
+    @test T.find_text(tb, "Due:2026-07-22") !== nothing
+    mkey(m, :escape)
 end

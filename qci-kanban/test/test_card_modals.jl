@@ -3,9 +3,18 @@
 # every field. Driven only via update!. Helpers from test_app_shell.jl.
 
 Qm = QciKanban
-lbm() = (m = Qm.AppModel(; token_path = tempname(), secret = "s"); app_login_new(m; name = "Grace H"); m)
+lbm() = (
+    m = Qm.AppModel(; token_path = tempname(), secret = "s");
+    app_login_new(m; name = "Grace H");
+    m
+)
 k!(m, x) = T.update!(m, T.KeyEvent(x))
-typ!(m, s) = (for ch in collect(s); T.update!(m, T.KeyEvent(ch)); end)
+typ!(m, s) = (
+    for ch in collect(s)
+        ;
+        T.update!(m, T.KeyEvent(ch));
+    end
+)
 
 @testset "Phase 3 — Create card modal" begin
     @testset "n opens NEW CARD; save creates an issue (digits type into points)" begin
@@ -30,13 +39,16 @@ typ!(m, s) = (for ch in collect(s); T.update!(m, T.KeyEvent(ch)); end)
         made = first(filter(i -> i.title == "Write the tests", issues))
         @test made.story_points == 8
         @test made.description == "cover everything"
-        @test any(a.kind == :created for a in Qm.Stores.list_activity(m.boardstore, made.id))
+        @test any(
+            a.kind == :created for a in Qm.Stores.list_activity(m.boardstore, made.id)
+        )
     end
 
     @testset "empty title is rejected (no issue, modal stays)" begin
         m = lbm()
         n0 = length(Qm.Stores.list_issues(m.boardstore))
-        k!(m, 'n'); k!(m, :enter)
+        k!(m, 'n');
+        k!(m, :enter)
         @test m.modal == :card_edit
         @test occursin("Title is required", m.message)
         @test length(Qm.Stores.list_issues(m.boardstore)) == n0
@@ -60,7 +72,8 @@ typ!(m, s) = (for ch in collect(s); T.update!(m, T.KeyEvent(ch)); end)
 
     @testset "labels multi-select toggles the highlighted chip on space" begin
         m = lbm()
-        k!(m, 'n'); typ!(m, "Labeled")
+        k!(m, 'n');
+        typ!(m, "Labeled")
         Qm.focus_index!(m.focus, 10)         # labels multiselect is last
         ms = m.edit_form.labels_ms
         if !isempty(ms.options)
@@ -68,7 +81,9 @@ typ!(m, s) = (for ch in collect(s); T.update!(m, T.KeyEvent(ch)); end)
             k!(m, ' ')
             @test ms.checked[ms.cursor]
             k!(m, :enter)
-            made = first(filter(i -> i.title == "Labeled", Qm.Stores.list_issues(m.boardstore)))
+            made = first(
+                filter(i -> i.title == "Labeled", Qm.Stores.list_issues(m.boardstore)),
+            )
             @test !isempty(made.labels)
         end
     end
@@ -102,6 +117,8 @@ end
         @test T.find_text(tb, iss.key) !== nothing
         @test T.find_text(tb, "COMMENTS") !== nothing
         @test T.find_text(tb, "ACTIVITY") !== nothing
+        @test T.find_text(tb, "Start:") !== nothing   # PR1: Start surfaced in detail
+        @test T.find_text(tb, "Due:") !== nothing     # PR1: Due surfaced in detail (even if —)
         typ!(m, "looks good")
         k!(m, :enter)                         # submit comment
         cs = Qm.Stores.list_comments(m.boardstore, iss.id)
@@ -114,7 +131,8 @@ end
     @testset "empty comment is not stored" begin
         m = lbm()
         iss = Qm.selected_issue(m)
-        k!(m, 'v'); k!(m, :enter)
+        k!(m, 'v');
+        k!(m, :enter)
         @test isempty(Qm.Stores.list_comments(m.boardstore, iss.id))
     end
 end
@@ -132,7 +150,8 @@ end
         @test m.modal == :none
         @test length(Qm.Stores.list_issues(m.boardstore)) == n0
         # now really delete
-        k!(m, 'd'); k!(m, 'y')
+        k!(m, 'd');
+        k!(m, 'y')
         @test m.modal == :none
         @test Qm.Stores.get_issue(m.boardstore, iss.id) === nothing
         @test length(Qm.Stores.list_issues(m.boardstore)) == n0 - 1
@@ -140,7 +159,9 @@ end
 
     @testset "bulk delete D removes all selected after confirm" begin
         m = lbm()
-        k!(m, ' '); k!(m, 'j'); k!(m, ' ')     # select 2 in Backlog
+        k!(m, ' ');
+        k!(m, 'j');
+        k!(m, ' ')     # select 2 in Backlog
         n0 = length(Qm.Stores.list_issues(m.boardstore))
         k!(m, 'D')
         @test m.modal == :confirm
@@ -153,20 +174,24 @@ end
 @testset "Phase 3 — Modal no-bleed at 3 sizes" begin
     for (w, h) in [(80, 24), (100, 30), (60, 18)]
         @testset "card_edit clears board bleed at $(w)x$(h)" begin
-            m = lbm(); k!(m, 'n'); typ!(m, "X")
+            m = lbm();
+            k!(m, 'n');
+            typ!(m, "X")
             tb = app_tb(m; w = w, h = h)
             @test T.find_text(tb, "NEW CARD") !== nothing
             @test T.find_text(tb, "QCI-100") === nothing        # board card must not bleed
             @test T.find_text(tb, "Set up project") === nothing
         end
         @testset "card_detail clears board bleed at $(w)x$(h)" begin
-            m = lbm(); k!(m, 'v')
+            m = lbm();
+            k!(m, 'v')
             tb = app_tb(m; w = w, h = h)
             @test T.find_text(tb, "COMMENTS") !== nothing
             @test T.find_text(tb, "QCI-101") === nothing
         end
         @testset "confirm clears board bleed at $(w)x$(h)" begin
-            m = lbm(); k!(m, 'd')
+            m = lbm();
+            k!(m, 'd')
             tb = app_tb(m; w = w, h = h)
             @test T.find_text(tb, "CONFIRM") !== nothing
             @test T.find_text(tb, "QCI-100") === nothing
@@ -191,14 +216,19 @@ end
 
     @testset "confirm modal renders bulk + close-sprint messages" begin
         m = lbm()
-        k!(m, ' '); k!(m, 'j'); k!(m, ' ')          # select 2
+        k!(m, ' ');
+        k!(m, 'j');
+        k!(m, ' ')          # select 2
         k!(m, 'D')
         tb = app_tb(m; w = 90, h = 26)
         @test T.find_text(tb, "Delete 2 selected") !== nothing
         k!(m, 'n')
         # close-sprint confirm message
-        m2 = lbm(); k!(m2, 'C'); k!(m2, 'K')        # backlog
-        k!(m2, 'S'); k!(m2, 'X')                    # start then request close
+        m2 = lbm();
+        k!(m2, 'C');
+        k!(m2, 'K')        # backlog
+        k!(m2, 'S');
+        k!(m2, 'X')                    # start then request close
         @test m2.modal == :confirm
         tb2 = app_tb(m2; w = 90, h = 26)
         @test T.find_text(tb2, "roll back") !== nothing
@@ -233,7 +263,9 @@ end
     end
 
     @testset "new-sprint empty name is rejected" begin
-        m = lbm(); k!(m, 'C'); k!(m, 'K')          # backlog
+        m = lbm();
+        k!(m, 'C');
+        k!(m, 'K')          # backlog
         k!(m, 'n')                                 # new sprint modal
         @test m.modal == :new_sprint
         k!(m, :enter)                              # empty name
@@ -243,17 +275,22 @@ end
     @testset "search + detail-with-description + comments actually render" begin
         m = lbm()
         # search modal renders
-        k!(m, '/'); typ!(m, "board")
+        k!(m, '/');
+        typ!(m, "board")
         tb = app_tb(m; w = 90, h = 24)
         @test T.find_text(tb, "SEARCH") !== nothing
         @test T.find_text(tb, "Query") !== nothing
         k!(m, :escape)
         # add a description to the selected card, then view + comment + render
         iss = Qm.selected_issue(m)
-        k!(m, 'e'); typ!(m, " more")               # tweak title (form focused on title)
-        Qm.focus_index!(m.focus, 2); typ!(m, "detailed description here")
+        k!(m, 'e');
+        typ!(m, " more")               # tweak title (form focused on title)
+        Qm.focus_index!(m.focus, 2);
+        typ!(m, "detailed description here")
         T.update!(m, T.KeyEvent(:ctrl, 's'))       # Desc is a TextArea: Enter=newline, ^S saves (U6)
-        k!(m, 'v'); typ!(m, "first comment"); k!(m, :enter)   # comment stored
+        k!(m, 'v');
+        typ!(m, "first comment");
+        k!(m, :enter)   # comment stored
         tb2 = app_tb(m; w = 100, h = 30)                      # re-render with comment present
         @test T.find_text(tb2, "COMMENTS") !== nothing
         @test T.find_text(tb2, "first comment") !== nothing
@@ -264,7 +301,8 @@ end
 @testset "Phase 3 — PROPERTY: focused editor absorbs J/K/M/A/D/s + digits (card_edit)" begin
     # In the edit form, printable chars (incl. would-be shortcuts and digits)
     # must only mutate the focused text editor, never board/modal state.
-    m = lbm(); k!(m, 'n')                     # card_edit, title focused (index 1)
+    m = lbm();
+    k!(m, 'n')                     # card_edit, title focused (index 1)
     for ch in ['J', 'K', 'M', 'A', 'D', 's', 'q', '<', '>', '1', '9', '0']
         before = Qm.text(m.edit_form.title_input)
         snap = (m.modal, m.view, m.quit)
