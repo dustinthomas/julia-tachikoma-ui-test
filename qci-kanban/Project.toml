@@ -6,6 +6,7 @@ description = "QCI Kanban — Jira-inspired terminal Kanban board with board + c
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+Coverage = "a2441757-f6aa-5fb2-8edb-039e3f45d037"
 DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 JSONWebTokens = "9b8beb19-0777-58c6-920b-28f749fee4d3"
@@ -21,6 +22,7 @@ Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
+Coverage = "1.7.0"
 DBInterface = "2"
 JSONWebTokens = "1.1.2"
 LibPQ = "1.18.0"

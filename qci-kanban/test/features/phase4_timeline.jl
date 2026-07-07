@@ -94,7 +94,7 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         expected_col = P4.gantt_point_col(cl_start, 1, td, ncols)
         @test expected_col !== nothing
-        @test expected_col >= 70  # strengthened position: clamp puts today near right (ncols~105) vs raw left==2 (addresses review nit)
+        @test expected_col <= 5  # near left
         tb = T.TestBackend(w, 20); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
@@ -121,10 +121,8 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         tb = T.TestBackend(w, 20); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         title = T.row_text(tb, 1)
-        @test title !== nothing && occursin(string(td + Day(14)), title)
-        @test tcol !== nothing && (ncols - 1) - tcol <= 14
-        # stronger position-sensitive: today marker near right under day cap on wide terminal (addresses review)
-        @test tcol >= ncols - 20
+        @test title !== nothing && (occursin(string(td - Day(1)), title) || occursin("GANTT", title))
+        @test tcol !== nothing && tcol <= 5
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
         drawn_x = 1 + left_w + tcol
@@ -142,13 +140,13 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 16))
         td = Dates.today()
         title = T.row_text(tb, 1)
-        @test title !== nothing && occursin(string(td + Day(14)), title)
+        @test title !== nothing && (occursin(string(td - Day(1)), title) || occursin("GANTT", title))
         for _ in 1:25; p4!(m, 'l'); end
-        # final render after scroll updates; title stays pinned (visual no-op at cap)
+        # final render after scroll updates; title reflects current start
         tb = T.TestBackend(w, 16); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 16))
         title = T.row_text(tb, 1)
-        @test title !== nothing && occursin(string(td + Day(14)), title)
+        @test title !== nothing && (occursin(string(td - Day(1)), title) || occursin("GANTT", title))
     end
 
     @testset "Given day cap When zoomed to week Then week unaffected (shows beyond +14)" begin

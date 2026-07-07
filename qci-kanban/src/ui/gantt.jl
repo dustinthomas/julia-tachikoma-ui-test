@@ -26,6 +26,10 @@ gantt_days_per_col(scale::Symbol)::Int = scale === :month ? 7 : 1
 gantt_scroll_days(scale::Symbol)::Int =
     scale === :month ? 28 : (scale === :day ? 1 : 7)
 
+"Fixed window size for day view (each column = 1 day). Produces a compact 14-day
+timeline strip even on wide terminals so day zoom does not devolve into months."
+const GANTT_DAY_VIEW_WINDOW = 14
+
 "0-based column offset of date `d` from the window's left edge (floored)."
 gantt_col_for_date(win_start::Date, dpc::Int, d::Date)::Int =
     fld(Dates.value(d) - Dates.value(win_start), dpc)
@@ -80,17 +84,21 @@ gantt_week_sep_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
 """
     gantt_clamped_start_for_day(win_start, today, dpc, ncols) -> Date
 
-For day scale only (dpc==1), returns a start date such that the computed
-window end <= today + 14. When the caller's start would overflow the future
-cap, returns the latest start that pins the right edge exactly at `today+14`.
-Earlier starts (more past context) are returned unchanged.
-Week/month and non-day scales are identity.
+For day scale only (dpc==1), returns a start date that positions "today" near the
+left of the timeline (traditional Gantt: limited past, mostly future visible).
+Uses today-1 as the preferred start. Day view render caps the window at
+GANTT_DAY_VIEW_WINDOW (14) columns so the visible range is e.g. today-1 → today+12.
+If the logical start is earlier (old data), it snaps; later starts (scrolled right)
+are kept. Week/month and non-day scales are identity.
 """
 function gantt_clamped_start_for_day(win_start::Date, today::Date, dpc::Int, ncols::Int)::Date
     dpc != 1 && return win_start
-    max_end = today + Day(14)
-    max_start = max_end - Day(max(ncols, 1) - 1)
-    min(win_start, max_start)
+    # Traditional day-view: position today near left of the timeline (limited past).
+    # Effective window starts at today-1 even if logical/raw start is far in the past.
+    # This prevents "today pushed to right" and "left goes to November".
+    # m.gantt_start (logical) is not mutated; only the render window is adjusted.
+    preferred = today - Day(1)
+    return max(win_start, preferred)
 end
 
 # ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
@@ -347,13 +355,17 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
     left_w = max(10, min(left_w, area.width - 10))
     chart_x = area.x + left_w
-    ncols = area.width - left_w
+    ncols = area.width - left_w   # physical chart columns (for legend fit, narrow checks, guards)
+    # Day view uses *per-day columns* and a hard-capped 14-day window (GANTT_DAY_VIEW_WINDOW)
+    # so the header always shows a ~2 week range and never months. view_ncols drives
+    # geometry, canvas, bars, shading, axis, and today marker.
+    view_ncols = m.gantt_scale === :day ? min(ncols, GANTT_DAY_VIEW_WINDOW) : ncols
     win_start = m.gantt_start
     if m.gantt_scale === :day
-        win_start = gantt_clamped_start_for_day(win_start, Dates.today(), dpc, ncols)
+        win_start = gantt_clamped_start_for_day(win_start, Dates.today(), dpc, view_ncols)
     end
-    win_end = gantt_window_end(win_start, dpc, ncols)
-    tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
+    win_end = gantt_window_end(win_start, dpc, view_ncols)
+    tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
     scale_lbl = m.gantt_scale === :month ? "month" :
                 m.gantt_scale === :day   ? "day"   : "week"
     base = "GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]"
@@ -391,13 +403,13 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     grid_y0 = area.y + content_start
     nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
     # weekend shading on band row first (polish consistency), band will overlay its range
-    for c in gantt_weekend_cols(win_start, dpc, ncols)
+    for c in gantt_weekend_cols(win_start, dpc, view_ncols)
         ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
         set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
     end
     # Sprint bands polish (PR6): cleaner edges (▓/safe at ends), better name placement
     # (inside after edge when room; underline+dim always), aggressive truncate narrow.
-    for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, ncols)
+    for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, view_ncols)
         bw = c1 - c0 + 1
         for cc in c0:c1
             ch = (cc == c0 || cc == c1) ? '▓' : '░'
@@ -427,9 +439,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     if has_ruler
-        ax = gantt_axis_labels(win_start, dpc, ncols; narrow = is_narrow)
+        ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
         for (c, lab) in ax
-            (c < 0 || c >= ncols) && continue
+            (c < 0 || c >= view_ncols) && continue
             xx = chart_x + c
             xx > area.x + area.width - 1 && continue
             if textwidth(lab) <= 1
@@ -437,7 +449,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end
                 set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
             else
-                set_string!(buf, xx, ruler_y, _short(lab, max(1, ncols - c)), Style(; fg = col_text_dim()))
+                set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
             end
         end
     end
@@ -451,7 +463,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         return
     end
 
-    canvas = BlockCanvas(ncols, max(1, nshow); style = Style(; fg = col_primary()))
+    canvas = BlockCanvas(view_ncols, max(1, nshow); style = Style(; fg = col_primary()))
     diamonds = Tuple{Int,Int,Any}[]
     sel_issue = _gantt_selected_issue(m)
 
@@ -482,7 +494,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             prefix = selected ? "▸ " : "├ "
             set_string!(buf, area.x, rowy, _short(prefix * row.label, left_w - 1), lstyle)
             if iss.start_date !== nothing && iss.due_date !== nothing
-                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, ncols)
+                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
                     for dx in (2 * c0):(2 * c1 + 1), dy in (2 * (i - 1)):(2 * (i - 1) + 1)
@@ -495,7 +507,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 end
             else
                 d = iss.start_date === nothing ? iss.due_date : iss.start_date
-                col = gantt_point_col(win_start, dpc, d, ncols)
+                col = gantt_point_col(win_start, dpc, d, view_ncols)
                 col === nothing || push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
             end
         end
@@ -503,9 +515,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
     # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
-    wcols = gantt_weekend_cols(win_start, dpc, ncols)
-    scols = gantt_week_sep_cols(win_start, dpc, ncols)
-    tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)
+    wcols = gantt_weekend_cols(win_start, dpc, view_ncols)
+    scols = gantt_week_sep_cols(win_start, dpc, view_ncols)
+    tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
     for c in wcols
         for ii in 1:nshow
             ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
@@ -522,7 +534,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
-    render(canvas, Rect(chart_x, grid_y0, ncols, max(1, nshow)), buf)
+    render(canvas, Rect(chart_x, grid_y0, view_ncols, max(1, nshow)), buf)
 
     # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
     # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
@@ -537,7 +549,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         if row.kind === :issue
             iss = row.issue
             if iss !== nothing && iss.start_date !== nothing && iss.due_date !== nothing
-                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, ncols)
+                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
                     # explicit bounds guard (mirrors ruler/band: xx > ... continue); though gantt_bar_extent clamps
@@ -598,9 +610,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         for i in 1:nshow
             set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
         end
-        if has_ruler && (ncols - tcol) > 5
+        if has_ruler && (view_ncols - tcol) > 5
             lx = chart_x + tcol + 1
-            if lx + 4 < chart_x + ncols
+            if lx + 4 < chart_x + view_ncols
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
             end
         end

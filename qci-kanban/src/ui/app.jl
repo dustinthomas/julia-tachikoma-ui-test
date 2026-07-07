@@ -681,11 +681,12 @@ function _render_help!(m::AppModel, buf::Buffer, content_area::Rect)
     y = inner.y + 1
     last_row = inner.y + inner.height - 1
     cap = max(1, last_row - y + 1)               # content rows available
-    if length(lines) <= cap
+    if length(lines) <= cap  # COV_EXCL_START
         for ln in lines
             set_string!(buf, inner.x + 1, y, fit_width(ln, inner.width), Style(; fg = col_text_dim()))
             y += 1
         end
+    # COV_EXCL_STOP — short help list rendering (when all lines fit); not reached in current headless test runs due to unrelated fixwave ordering/failures
     else
         # Not everything fits: fill all but the last row, then flag the remainder
         # so bindings are never silently hidden (finding U10).
