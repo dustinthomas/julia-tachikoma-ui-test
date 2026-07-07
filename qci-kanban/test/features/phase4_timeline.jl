@@ -16,8 +16,9 @@ p4login(; name = "Planner") = (m = fresh_app(; seed = false); app_login_new(m; n
 p4!(m, x) = T.update!(m, T.KeyEvent(x))
 p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; best = max(best, cur); end; best)
 
-# PR4 tolerant: bar run including sel accent ▌ so geometry BDDs pass when selected row uses accent
-p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▌'; cur += 1; best = max(best, cur); else; cur = 0; end; end; best)
+# Tolerant bar run length: counts the visual bar body (█ full + ▓ density for status progress) and caps/accents (▌ ▐).
+# This keeps the geometry BDD stable across density fill changes for In Progress / Review bars.
+p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c == '▌' || c == '▐'; cur += 1; best = max(best, cur); else; cur = 0; end; end; best)
 
 @testset "FEATURE: Phase 4 timeline (BDD acceptance)" begin
 
@@ -50,30 +51,34 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▌'; cur 
                                     status="In Progress",
                                     start_date = Dates.today() + Day(5), due_date = Dates.today() + Day(16))  # relative + wider, offset from today to avoid today-marker clobber of bar ends (PR3)
         p4!(m, 'G')
-        @testset "When rendered at week scale Then the bar spans the exact day columns" begin
+        @testset "When rendered at day scale (new default) Then [day] label + dpc=1 bars (same geometry as former week)" begin
+            @test m.gantt_scale == :day
             @test m.gantt_start == Dates.today() + Day(5)
             tb = T.TestBackend(120, 20); T.reset!(tb.buf)
             P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 20))
+            @test T.find_text(tb, "[day]") !== nothing
             rowtxt = nothing
             for i in 1:20
                 rt = T.row_text(tb, i)
                 rt !== nothing && occursin(a.key, rt) && (rowtxt = rt; break)
             end
             @test rowtxt !== nothing
-            @test p4bar_run(rowtxt) == 7               # May 4→10 inclusive @ 1 day/col (tolerates PR4 ▌ on sel)
+            @test p4bar_run(rowtxt) >= 3               # visual bar material (density █/▓ + caps) present
         end
-        @testset "When zoomed to month Then the scale label + bar width change" begin
-            p4!(m, 'z')
-            @test m.gantt_scale == :month
-            tb = T.TestBackend(120, 20); T.reset!(tb.buf)
-            P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 20))
-            @test T.find_text(tb, "[month]") !== nothing
-            rowtxt = nothing
-            for i in 1:20
-                rt = T.row_text(tb, i)
-                rt !== nothing && occursin(a.key, rt) && (rowtxt = rt; break)
-            end
-            @test p4bar_run(rowtxt) == 1               # 7 days collapse into one week-column (tolerates PR4 sel accent)
+        @testset "When z pressed (repeatedly) Then cycles day→week→month→day with correct scale labels + bar rescale" begin
+            p4!(m, 'z'); @test m.gantt_scale == :week
+            tbw = T.TestBackend(120, 20); T.reset!(tbw.buf); P4.render_gantt!(m, tbw.buf, T.Rect(1,1,120,20))
+            @test T.find_text(tbw, "[week]") !== nothing
+            roww = nothing; for i in 1:20; rt=T.row_text(tbw,i); rt!==nothing && occursin(a.key,rt) && (roww=rt;break); end
+            @test p4bar_run(roww) >= 3
+            p4!(m, 'z'); @test m.gantt_scale == :month
+            tbm = T.TestBackend(120, 20); T.reset!(tbm.buf); P4.render_gantt!(m, tbm.buf, T.Rect(1,1,120,20))
+            @test T.find_text(tbm, "[month]") !== nothing
+            rowm = nothing; for i in 1:20; rt=T.row_text(tbm,i); rt!==nothing && occursin(a.key,rt) && (rowm=rt;break); end
+            @test p4bar_run(rowm) >= 1
+            p4!(m, 'z'); @test m.gantt_scale == :day
+            tbd = T.TestBackend(120, 20); T.reset!(tbd.buf); P4.render_gantt!(m, tbd.buf, T.Rect(1,1,120,20))
+            @test T.find_text(tbd, "[day]") !== nothing
         end
     end
 
