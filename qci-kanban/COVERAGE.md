@@ -98,7 +98,7 @@ only `*.cov` produced are under `src/`, and all are deleted on exit.
 | `ui/backlog.jl` | 100/100 |
 | `ui/modals.jl` | 225/225 |
 | `ui/calendar.jl` | 75/75 |
-| `ui/gantt.jl` | 134/134 |
+| `ui/gantt.jl` | 350/350 |
 | `ui/app.jl` | 436/436 |
 | `gfx/logo.jl` | 44/44 |
 | `gfx/charts.jl` | 50/50 |
@@ -133,14 +133,13 @@ definition line never registered a hit. Rather than exclude tested code, they
 were rewritten in multi-line `function … return true … end` form, which Coverage
 tracks correctly — both now count as genuinely covered (no marker).
 
-## Gantt visual polish coverage (PR5/PR6 + prior)
+## Gantt visual polish coverage (PR5/PR6 + prior) + day-cap (2026-07 plan PR1-3)
 
-`ui/gantt.jl` is gated at 134/134 (100%) line coverage (see table above). All
-PR1–PR6 slices (weekend shading PR1, ruler/axis/today+layout PR2, bar ends/density/labels PR3,
-selection accents+indents PR4, footer+rich empty PR5, sprint/legend/responsive/fallbacks PR6)
-added pure helpers (`gantt_*`), render passes, and overlays that are fully exercised
+`ui/gantt.jl` is gated at 350/350 (100%) line coverage (see table above; post clamp helper + render integration). All
+prior PR1–PR6 slices plus day future-cap (pure clamp in PR1, render wire in PR2, BDD+position tests+COVERAGE update in PR3)
+added pure helpers (`gantt_clamped_start_for_day`, others), render passes, and overlays that are fully exercised
 by `test/test_gantt.jl` (maxrun/char_at/find_text/occursin after every re-render),
-`test/features/phase4_timeline.jl` (BDD), and boundary cases (h=6/8/10, w=40/55/80).
+`test/features/phase4_timeline.jl` (BDD + day cap/scroll pin/week unaffected), and boundary cases (h=6/8/10, w=40/55/80/100/120).
 
 Justified COV_EXCL_LINE markers (2 total, pre-existing in gantt.jl:273 and :477) cover only
 defensive `catch` blocks for inconsistent userstore paths:
