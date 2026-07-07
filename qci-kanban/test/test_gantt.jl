@@ -263,6 +263,24 @@ end
         # semantic row check for vertical (robust across left_w / find offsets); re-rendered
         rv = T.row_text(tb, loc.y + 2)
         @test rv !== nothing && occursin("┃", rv)
+        # PR2: wide-terminal cap assertions (clamp active; today near right; title end <=today+14; re-render after update!)
+        td = Dates.today()
+        cl_start = G4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
+        tcol = G4.gantt_point_col(cl_start, 1, td, ncols)
+        @test tcol !== nothing
+        future_shown = (ncols - 1) - tcol
+        @test future_shown <= 14
+        @test tcol >= ncols - 16  # ~ncols-15 on wide
+        title = T.row_text(tb, 1)
+        @test title !== nothing && occursin(string(td + Day(14)), title)
+        # update! + re-render keeps cap
+        g4!(m, 'l')
+        tb2 = gantt_render(m; w = w, h = 20)
+        title2 = T.row_text(tb2, 1)
+        @test title2 !== nothing && occursin(string(td + Day(14)), title2)
+        cl_start2 = G4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
+        tcol2 = G4.gantt_point_col(cl_start2, 1, td, ncols)
+        @test (ncols - 1) - tcol2 <= 14
     end
 
     @testset "sprint bands: dated sprints shade their column range with the name" begin
@@ -386,6 +404,9 @@ end
         G4.render_gantt!(m, tb10.buf, T.Rect(1, 1, 80, 10))
         @test T.find_text(tb10, "GANTT") !== nothing
         @test (T.find_text(tb10, "┬") !== nothing || T.find_text(tb10, "+") !== nothing || T.find_text(tb10, Dates.format(Dates.today(), "u")) !== nothing || T.find_text(tb10, "TODAY") !== nothing)
+        # PR2 boundary wide-ish cap (title end; w=80 triggers clamp for data start)
+        tw = T.row_text(tb10, 1)
+        @test tw !== nothing && occursin(string(Dates.today() + Day(14)), tw)
         # narrow today semantic (uses │ on narrow)
         tbn = T.TestBackend(55, 10); T.reset!(tbn.buf)
         G4.render_gantt!(m, tbn.buf, T.Rect(1, 1, 55, 10))

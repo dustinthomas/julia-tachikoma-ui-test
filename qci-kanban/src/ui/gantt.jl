@@ -349,6 +349,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     chart_x = area.x + left_w
     ncols = area.width - left_w
     win_start = m.gantt_start
+    if m.gantt_scale === :day
+        win_start = gantt_clamped_start_for_day(win_start, Dates.today(), dpc, ncols)
+    end
     win_end = gantt_window_end(win_start, dpc, ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
     scale_lbl = m.gantt_scale === :month ? "month" :
