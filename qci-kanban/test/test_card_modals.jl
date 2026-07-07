@@ -280,3 +280,30 @@ end
         @test Qm.text(m.edit_form.desc_area) == before * string(ch)
     end
 end
+
+@testset "Phase 3 — bad date format in new card: popup warning, can save anyway, informs YYYY-MM-DD format" begin
+    # RED test for the required behavior (currently blocks with status msg only, no popup, no save-allow)
+    m = lbm()
+    n0 = length(Qm.Stores.list_issues(m.boardstore))
+    k!(m, 'n')
+    @test m.modal == :card_edit
+    typ!(m, "BadFormatDate")
+    # jump to start date field (editors: 1 title,2 desc,3 prio,4 points,5 epic,6 sprint,7 assignee,8 start,9 due)
+    Qm.focus_index!(m.focus, 8)
+    typ!(m, "not-a-valid-date")
+    k!(m, :enter)   # trigger save attempt
+    # Should show popup (confirm modal) with warning, not just status + block
+    @test m.modal == :confirm
+    @test m.confirm_kind == :bad_date
+    tb = app_tb(m; w = 80, h = 20)
+    @test T.find_text(tb, "WARNING") !== nothing || T.find_text(tb, "Invalid") !== nothing
+    @test T.find_text(tb, "YYYY-MM-DD") !== nothing || T.find_text(tb, "format") !== nothing
+    # can save anyway with 'y'
+    k!(m, 'y')
+    @test m.modal == :none
+    issues = Qm.Stores.list_issues(m.boardstore)
+    @test length(issues) == n0 + 1
+    made = first(filter(i -> i.title == "BadFormatDate", issues))
+    @test made.start_date === nothing  # bad date not persisted
+    @test occursin("BadFormatDate", m.message) || m.message == "" || occursin("Created", m.message)  # saved
+end

@@ -57,7 +57,7 @@ mutable struct AppModel <: Model
     card_issue_id::Union{String,Nothing}   # issue under detail/edit (nothing = create)
     comment_input::TextArea
     edit_form::Any                     # EditForm | nothing
-    confirm_kind::Symbol               # :none | :delete_one | :bulk_delete | :close_sprint
+    confirm_kind::Symbol               # :none | :delete_one | :bulk_delete | :close_sprint | :bad_date
     confirm_target::Any
     sprint_name_input::TextInput
     sprint_goal_input::TextInput

@@ -128,8 +128,8 @@ end
 
 Classify a date-input field. An empty field clears the date (`:empty`); a
 well-formed date parses (`:date`); a non-empty but unparseable value is
-`:invalid` — the caller must NOT persist it (that would silently erase the
-stored date). See finding C6.
+`:invalid`. The UI now shows a warning popup (allowing save with the date
+cleared) and informs the expected format (YYYY-MM-DD).
 """
 function _date_field(s::AbstractString)
     t = strip(s)
@@ -160,12 +160,17 @@ function _save_edit!(m::AppModel)
     if isempty(title)
         m.message = "Title is required"; return m
     end
+    start_text = text(f.start_input)
+    due_text = text(f.due_input)
     # Dates: distinguish empty (clear) from malformed (keep old value, error out).
-    start_kind, start_date = _date_field(text(f.start_input))
-    due_kind, due_date = _date_field(text(f.due_input))
+    start_kind, start_date = _date_field(start_text)
+    due_kind, due_date = _date_field(due_text)
     if start_kind === :invalid || due_kind === :invalid
         bad = start_kind === :invalid ? "start" : "due"
-        m.message = "Invalid $(bad) date (use YYYY-MM-DD) — not saved"
+        m.confirm_kind = :bad_date
+        m.confirm_target = bad
+        m.modal = :confirm
+        m.focus = FocusState()
         return m
     end
     priority = String(sel_current_value(f.priority_sel))
@@ -262,6 +267,17 @@ function _confirm_yes!(m::AppModel)
         m.message = "Deleted $(n) issues"
     elseif k === :close_sprint
         _do_close_sprint!(m, m.confirm_target)
+    elseif k === :bad_date
+        bad = m.confirm_target
+        f = m.edit_form
+        if bad == "start"
+            set_text!(f.start_input, "")
+        else
+            set_text!(f.due_input, "")
+        end
+        m.confirm_kind = :none
+        _save_edit!(m)  # now validates clean and performs the save/close
+        return m
     end
     _clamp_selection!(m)
     _close_modal!(m)
@@ -374,11 +390,18 @@ function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
 end
 
 function render_confirm!(m::AppModel, buf::Buffer, content_area::Rect)
-    msg = m.confirm_kind === :bulk_delete ? "Delete $(length(m.confirm_target)) selected issues?" :
-          m.confirm_kind === :close_sprint ? "Close sprint? Incomplete issues roll back to backlog." :
-          "Delete this issue?"
+    if m.confirm_kind === :bad_date
+        bad = m.confirm_target
+        msg = "Invalid $(bad) date format. Use YYYY-MM-DD. Save anyway?"
+        title = "WARNING"
+    else
+        msg = m.confirm_kind === :bulk_delete ? "Delete $(length(m.confirm_target)) selected issues?" :
+              m.confirm_kind === :close_sprint ? "Close sprint? Incomplete issues roll back to backlog." :
+              "Delete this issue?"
+        title = "CONFIRM"
+    end
     w = clamp(length(msg) + 6, 24, content_area.width)
-    inner = _modal_box(content_area, w, 5, "CONFIRM", buf)
+    inner = _modal_box(content_area, w, 5, title, buf)
     set_string!(buf, inner.x + 1, inner.y + 1, _short(msg, inner.width - 2), Style(; fg = col_text()))
     set_string!(buf, inner.x + 1, inner.y + inner.height - 1, "[y] yes   [n] no",
                 Style(; fg = col_primary(), dim = true))
