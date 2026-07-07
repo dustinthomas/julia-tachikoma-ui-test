@@ -135,12 +135,11 @@ tracks correctly — both now count as genuinely covered (no marker).
 
 ## Gantt visual polish coverage (PR5/PR6 + prior) + day-cap (2026-07 plan PR1-3)
 
-`ui/gantt.jl` is gated at 350/350 (100%) line coverage (see table above; post clamp helper + render integration). gantt reports "ui/gantt.jl 350/350 100.0% PASS" via per-file analysis (coverage_gate.jl --no-run or after collection); full `julia --project=. test/coverage_gate.jl` may exit non-0 due to pre-existing unrelated failures (e.g. test_fixwave on branch) before the top-level "GATE PASSED" print -- per-file gantt coverage is independently verified at 100%.
-All
-prior PR1–PR6 slices plus day future-cap (pure clamp in PR1, render wire in PR2, BDD+position tests+COVERAGE update in PR3)
-added pure helpers (`gantt_clamped_start_for_day`, others), render passes, and overlays that are fully exercised
-by `test/test_gantt.jl` (maxrun/char_at/find_text/occursin after every re-render),
-`test/features/phase4_timeline.jl` (BDD + day cap/scroll pin/week unaffected), and boundary cases (h=6/8/10, w=40/55/80/100/120).
+`ui/gantt.jl` is gated at 350/350 (100%) line coverage (see table above; post clamp helper + render integration).
+
+gantt reports "ui/gantt.jl 350/350 100.0% PASS" via per-file analysis (coverage_gate.jl --no-run or after collection); full `julia --project=. test/coverage_gate.jl` may exit non-0 due to pre-existing unrelated failures (e.g. test_fixwave on branch) before the top-level "GATE PASSED" print -- per-file gantt coverage is independently verified at 100%.
+
+All prior PR1–PR6 slices plus day future-cap (pure clamp in PR1, render wire in PR2, BDD+position tests+COVERAGE update in PR3) added pure helpers (`gantt_clamped_start_for_day`, others), render passes, and overlays that are fully exercised by `test/test_gantt.jl` (maxrun/char_at/find_text/occursin after every re-render), `test/features/phase4_timeline.jl` (BDD + day cap/scroll pin/week unaffected), and boundary cases (h=6/8/10, w=40/55/80/100/120).
 
 Justified COV_EXCL_LINE markers (2 total, pre-existing in gantt.jl:273 and :477) cover only
 defensive `catch` blocks for inconsistent userstore paths:
