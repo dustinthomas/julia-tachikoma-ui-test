@@ -143,7 +143,7 @@ const KEYMAP = Binding[
     Binding(:gantt, 'k',    :gantt_row_prev,     "k",     "Prev row",   true),
     Binding(:gantt, :down,  :gantt_row_next,     "↓",     "Next row",   false),
     Binding(:gantt, :up,    :gantt_row_prev,     "↑",     "Prev row",   false),
-    Binding(:gantt, 'z',    :gantt_zoom,         "z",     "Zoom wk/mo", true),
+    Binding(:gantt, 'z',    :gantt_zoom,         "z",     "Zoom day/wk/mo", true),
     Binding(:gantt, 'v',    :gantt_view_card,    "v",     "Details",    true),
     Binding(:gantt, :enter, :gantt_view_card,    "Enter", "Details",    false),
 

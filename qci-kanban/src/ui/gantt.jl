@@ -5,8 +5,8 @@
 # header rows. Bars span start_date→due_date rendered with `BlockCanvas`
 # (quadrant blocks → ordinary text cells, so fully TestBackend-assertable);
 # single-date issues render as a diamond. A today marker is a vertical line;
-# sprint start→end are shaded bands with the sprint name. `z` toggles the
-# week/month scale, h/l scroll the window, j/k select a row, Enter opens the
+# sprint start→end are shaded bands with the sprint name. `z` cycles
+# day/week/month scale, h/l scroll the window, j/k select a row, Enter opens the
 # card detail modal.
 #
 # The date→column geometry lives in small PURE functions with direct unit
@@ -23,7 +23,8 @@ using Dates
 gantt_days_per_col(scale::Symbol)::Int = scale === :month ? 7 : 1
 
 "Days the window scrolls per h/l press at the given scale."
-gantt_scroll_days(scale::Symbol)::Int = scale === :month ? 28 : 7
+gantt_scroll_days(scale::Symbol)::Int =
+    scale === :month ? 28 : (scale === :day ? 1 : 7)
 
 "0-based column offset of date `d` from the window's left edge (floored)."
 gantt_col_for_date(win_start::Date, dpc::Int, d::Date)::Int =
@@ -221,8 +222,21 @@ gantt_safe_char(ch::Char, narrow::Bool=false)::Char =
     ch == '┬' ? '+' :
     ch == '▬' ? '-' : ch
 
+"""
+    status_progress(iss) -> Float64
+
+PR3 helper: density fraction for bar fill.
+Done=1.0 (full █), Review=0.85, In Progress=0.55, else 0.25.
+"""
+function status_progress(iss::Domain.Issue)::Float64
+    iss.status == "Done"        && return 1.0
+    iss.status == "Review"      && return 0.85
+    iss.status == "In Progress" && return 0.55
+    0.25
+end
+
 # ── Initialisation + actions ────────────────────────────────────────────────
-"Set the window to start at the earliest dated issue (or today), week scale."
+"Set the window to start at the earliest dated issue (or today), day scale (day/wk/mo 3-way cycle)."
 function _gantt_init!(m::AppModel)
     dates = Date[]
     for i in gantt_dated_issues(m)
@@ -230,7 +244,7 @@ function _gantt_init!(m::AppModel)
         i.due_date === nothing || push!(dates, i.due_date)
     end
     m.gantt_start = isempty(dates) ? Dates.today() : minimum(dates)
-    m.gantt_scale = :week
+    m.gantt_scale = :day
     m.gantt_sel = 1
     m
 end
@@ -249,7 +263,10 @@ function _gantt_row!(m::AppModel, delta::Int)
 end
 
 function _gantt_zoom!(m::AppModel)
-    m.gantt_scale = m.gantt_scale === :week ? :month : :week
+    m.gantt_scale = if m.gantt_scale === :day; :week
+                    elseif m.gantt_scale === :week; :month
+                    else :day
+                    end
     m.message = "Gantt scale: $(m.gantt_scale)"
     m
 end
@@ -318,7 +335,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     win_start = m.gantt_start
     win_end = gantt_window_end(win_start, dpc, ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
-    scale_lbl = m.gantt_scale === :month ? "month" : "week"
+    scale_lbl = m.gantt_scale === :month ? "month" :
+                m.gantt_scale === :day   ? "day"   : "week"
     base = "GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]"
     # Compact legend (PR6): ensure visible; shorten base on narrow to fit legend + responsive.
     if is_narrow && ncols >= 8

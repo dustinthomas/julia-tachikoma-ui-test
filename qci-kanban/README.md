@@ -41,7 +41,7 @@ shows the login gate: **no users → press `[c]` to create an account**.
   incomplete issues back), move issues backlog ↔ sprint; a **burndown** footer for
   the active sprint.
 - **Calendar** — month grid, due-date badges, day drill-down, month nav.
-- **Gantt** — timeline bars from `start_date → due_date` with full modern visual polish (PR1–PR6), today marker, week/month
+- **Gantt** — timeline bars from `start_date → due_date` with full modern visual polish (PR1–PR6), today marker, day/week/month
   zoom, horizontal scroll. See "Gantt visuals" table below for weekend shading, ruler/axis/today, bar ends/density/labels, selection+indents, footer+rich empty, sprint/legend/fallbacks.
 - **Graphics polish (Phase 5)** — layered QCI logo (kitty/sixel pixel canvas when
   the terminal supports it, braille/block vector art otherwise, text fallback at
@@ -102,7 +102,7 @@ status-bar hints are generated from the same table, so they never drift. The
 |-----|--------|
 | `h`/`l` or arrows | Scroll timeline |
 | `j`/`k` or arrows | Move row |
-| `z` | Zoom week/month |
+| `z` | Zoom day/wk/mo |
 | `v`/`Enter` | Details |
 
 ### Gantt visuals (PR1–PR6)

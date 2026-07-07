@@ -68,7 +68,7 @@ mutable struct AppModel <: Model
     cal_month::Int
     cal_sel_day::Int                   # selected day within the month (1-based)
     gantt_start::Date                  # left edge (earliest visible date) of the Gantt window
-    gantt_scale::Symbol                # :week (1 day/col) | :month (7 days/col)
+    gantt_scale::Symbol                # :day (1 day/col) | :week (1 day/col) | :month (7 days/col)
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
@@ -135,7 +135,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  _make_input(), _make_input(),
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
-                 td, :week, 1,
+                 td, :day, 1,
                  false)
     _init_login_focus!(m)
     if restore && Auth.restore_from_file!(sess, us) && sess.current_user !== nothing

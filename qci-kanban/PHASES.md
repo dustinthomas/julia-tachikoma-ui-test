@@ -153,7 +153,7 @@ line, small-terminal guard.
 - Gantt: timeline view; rows = issues (grouped by epic/sprint), bars from
   start_date→due_date rendered with canvas/graphics primitives per scout
   report (braille/block canvas; pixel backend where supported, text fallback
-  ALWAYS correct under TestBackend); today marker; zoom (week/month);
+  ALWAYS correct under TestBackend); today marker; zoom (day/week/month);
   horizontal scroll; sprint bands shaded.
   **Visual polish completed (PR1–PR6)**: weekend shading (`░`), ruler/axis
   (month labels + `┬`), upgraded today (`┃` + label), bar ends (`▌▐`)/density

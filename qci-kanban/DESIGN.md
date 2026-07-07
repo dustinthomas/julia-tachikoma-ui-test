@@ -121,7 +121,7 @@ feeding any printable char changes only the input's text, never view state
   between backlog and sprints (keyboard), start/close sprint.
 - **Calendar**: month grid, due-date badges, day drill-down list, navigation.
 - **Gantt**: horizontal timeline; issue/epic bars from `start_date→due_date`,
-  today marker, sprint bands; zoom week/month. Bars via `BlockCanvas`
+  today marker, sprint bands; zoom (day/week/month). Bars via `BlockCanvas`
   (quadrant blocks, gap-free, same API as braille `Canvas`: `set_point!`,
   `line!`, `rect!`) — renders into ordinary text cells, so fully
   TestBackend-assertable. Pixel backends are Phase 5 polish only.
