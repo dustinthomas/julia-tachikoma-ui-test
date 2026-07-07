@@ -77,6 +77,22 @@ gantt_weekend_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
 gantt_week_sep_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
     [c for c in 0:(ncols-1) if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1]
 
+"""
+    gantt_clamped_start_for_day(win_start, today, dpc, ncols) -> Date
+
+For day scale only (dpc==1), returns a start date such that the computed
+window end <= today + 14. When the caller's start would overflow the future
+cap, returns the latest start that pins the right edge exactly at `today+14`.
+Earlier starts (more past context) are returned unchanged.
+Week/month and non-day scales are identity.
+"""
+function gantt_clamped_start_for_day(win_start::Date, today::Date, dpc::Int, ncols::Int)::Date
+    dpc != 1 && return win_start
+    max_end = today + Day(14)
+    max_start = max_end - Day(max(ncols, 1) - 1)
+    min(win_start, max_start)
+end
+
 # ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
 """
     gantt_axis_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}

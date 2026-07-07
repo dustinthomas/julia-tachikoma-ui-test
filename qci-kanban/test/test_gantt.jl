@@ -97,6 +97,22 @@ end
         @test 6 in scs  # 2026-03-16 Mon == col 6
     end
 
+    @testset "gantt_clamped_start_for_day (pure, day cap)" begin
+        td = Dates.today()
+        @test G4.gantt_clamped_start_for_day(td - Day(100), td, 1, 80) == td - Day(100)  # identity (no overflow; past enough)
+        late = td - Day(5)
+        maxs = td + Day(14) - Day(79)
+        @test G4.gantt_clamped_start_for_day(late, td, 1, 80) == maxs             # overflow clamp
+        @test G4.gantt_clamped_start_for_day(td + Day(100), td, 1, 5) == td + Day(10)  # small ncols overflow
+        @test G4.gantt_clamped_start_for_day(td - Day(1), td, 7, 10) == td - Day(1)   # non-day dpc (identity)
+        @test G4.gantt_window_end(G4.gantt_clamped_start_for_day(late, td, 1, 80), 1, 80) == td + Day(14)
+        # boundary / edge cases (ncols<=1, exact max_start)
+        @test G4.gantt_clamped_start_for_day(td + Day(100), td, 1, 1) == td + Day(14)  # ncols=1 pins right edge to today+14
+        @test G4.gantt_clamped_start_for_day(td - Day(100), td, 1, 15) == td - Day(100)  # far past remains (maxs=today for ncols=15)
+        maxs15 = td + Day(14) - Day(14)
+        @test G4.gantt_clamped_start_for_day(maxs15, td, 1, 15) == maxs15  # exact boundary start
+    end
+
     @testset "gantt_axis_labels + gantt_left_width + layout helpers (PR2)" begin
         ws = Date(2026, 3, 10)  # Tue
         labs = G4.gantt_axis_labels(ws, 1, 30)
