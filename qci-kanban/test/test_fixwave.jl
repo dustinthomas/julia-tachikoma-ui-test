@@ -128,25 +128,42 @@ end
     @test iss0.title == "ZzDueCard"
     @test iss0.due_date == Date(2026, 3, 3)
 
-    @testset "malformed due date → not saved, error shown, DB date untouched" begin
+    # Current UX (modals.jl): malformed dates open a :bad_date confirm dialog
+    # ("Invalid <field> date format… Save anyway?") instead of staying on
+    # card_edit with m.message. DB is untouched until the user confirms (yes
+    # clears the bad field then saves) or declines (no closes without write).
+
+    @testset "malformed due date → confirm warning, DB date untouched on decline" begin
         fw_key!(m, 'e')
         @test Qf.text(m.edit_form.due_input) == "2026-03-03"
         Qf.focus_index!(m.focus, 9)                 # due field
         fw_type!(m, "x")                            # "2026-03-03x" — unparseable
         fw_key!(m, :ctrl, 's')                      # attempt save
-        @test m.modal == :card_edit                 # stayed open
-        @test occursin("Invalid due date", m.message)
+        @test m.modal == :confirm
+        @test m.confirm_kind === :bad_date
+        @test m.confirm_target == "due"
+        tb = app_tb(m; w = 80, h = 20)
+        @test T.find_text(tb, "Invalid due date") !== nothing
+        @test Qf.Stores.get_issue(m.boardstore, iss0.id).due_date == Date(2026, 3, 3)
+        fw_key!(m, 'n')                             # decline — no write
         @test Qf.Stores.get_issue(m.boardstore, iss0.id).due_date == Date(2026, 3, 3)
     end
     @testset "malformed start date reports the start field" begin
+        fw_key!(m, 'e')
         T.set_text!(m.edit_form.due_input, "2026-03-03")   # fix due
         T.set_text!(m.edit_form.start_input, "not-a-date")
         fw_key!(m, :ctrl, 's')
-        @test m.modal == :card_edit
-        @test occursin("Invalid start date", m.message)
+        @test m.modal == :confirm
+        @test m.confirm_kind === :bad_date
+        @test m.confirm_target == "start"
+        tb = app_tb(m; w = 80, h = 20)
+        @test T.find_text(tb, "Invalid start date") !== nothing
+        @test Qf.Stores.get_issue(m.boardstore, iss0.id).start_date == Date(2026, 3, 1)
+        fw_key!(m, 'n')
         @test Qf.Stores.get_issue(m.boardstore, iss0.id).start_date == Date(2026, 3, 1)
     end
     @testset "empty date field clears the stored date" begin
+        fw_key!(m, 'e')
         T.set_text!(m.edit_form.start_input, "2026-03-01")
         T.set_text!(m.edit_form.due_input, "")             # intentional clear
         fw_key!(m, :ctrl, 's')

@@ -170,6 +170,105 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         @test raw_end > Dates.today() + Day(14)
     end
 
+    @testset "Given day Gantt When rendered Then denser numeric axis ticks are readable" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "AxisBDD")
+        P4.Stores.create_issue!(m.boardstore; title = "A", epic_id = e.id,
+                                start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(3))
+        p4!(m, 'G')
+        @test m.view == :gantt && m.gantt_scale == :day
+        tb = T.TestBackend(90, 12); T.reset!(tb.buf)
+        P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 90, 12))
+        @test T.find_text(tb, "[day]") !== nothing
+        axis = T.row_text(tb, 3)
+        @test axis !== nothing
+        @test count(isdigit, axis) >= 8
+        @test occursin(string(Dates.day(Dates.today() - Day(1))), axis)
+        # Pure helpers used by render also expose period + tick APIs
+        ticks = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 1, 14)
+        @test length([t for t in ticks if occursin(r"^\d{1,2}$", t[2])]) >= 7
+        periods = P4.gantt_axis_period_labels(Dates.today() - Day(1), 1, 30)
+        @test !isempty(periods)
+    end
+
+    @testset "Given an off-window future issue When j selects it Then keep-in-view reveals its bar" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "OrientBDD")
+        near = P4.Stores.create_issue!(m.boardstore; title = "NearB", epic_id = e.id,
+                                       start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(2))
+        far = P4.Stores.create_issue!(m.boardstore; title = "FarB", epic_id = e.id,
+                                      start_date = Dates.today() + Day(45), due_date = Dates.today() + Day(55))
+        p4!(m, 'G')
+        @test m.gantt_sel == 1
+        tb0 = T.TestBackend(90, 14); T.reset!(tb0.buf)
+        P4.render_gantt!(m, tb0.buf, T.Rect(1, 1, 90, 14))
+        r0 = nothing
+        for i in 1:14
+            rt = T.row_text(tb0, i)
+            rt !== nothing && occursin(far.key, rt) && (r0 = rt; break)
+        end
+        @test r0 !== nothing && p4bar_run(r0) == 0
+        p4!(m, 'j')
+        @test m.gantt_sel == 2
+        @test P4._gantt_selected_issue(m).id == far.id
+        tb1 = T.TestBackend(90, 14); T.reset!(tb1.buf)
+        P4.render_gantt!(m, tb1.buf, T.Rect(1, 1, 90, 14))
+        r1 = nothing
+        for i in 1:14
+            rt = T.row_text(tb1, i)
+            rt !== nothing && occursin(far.key, rt) && (r1 = rt; break)
+        end
+        @test r1 !== nothing
+        @test p4bar_run(r1) >= 1 || occursin("▌", r1) || occursin("█", r1) || occursin("▓", r1)
+        # Near-term day window still the default until orient; after orient title moves
+        title = T.row_text(tb1, 1)
+        @test title !== nothing && occursin("GANTT", title)
+        p4!(m, 'k')
+        @test m.gantt_sel == 1
+        tb2 = T.TestBackend(90, 14); T.reset!(tb2.buf)
+        P4.render_gantt!(m, tb2.buf, T.Rect(1, 1, 90, 14))
+        rnear = nothing
+        for i in 1:14
+            rt = T.row_text(tb2, i)
+            rt !== nothing && occursin(near.key, rt) && (rnear = rt; break)
+        end
+        @test rnear !== nothing && (p4bar_run(rnear) >= 1 || occursin("▌", rnear))
+    end
+
+    @testset "Given an off-window past issue When k selects it Then keep-in-view reveals its bar (day)" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "PastBDD")
+        near = P4.Stores.create_issue!(m.boardstore; title = "NearP", epic_id = e.id,
+                                       start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(2))
+        past = P4.Stores.create_issue!(m.boardstore; title = "PastP", epic_id = e.id,
+                                       start_date = Dates.today() - Day(60), due_date = Dates.today() - Day(50))
+        p4!(m, 'G')
+        # rows sort by anchor → past first; j to near then k back to past via keys only
+        p4!(m, 'j')
+        @test P4._gantt_selected_issue(m).id == near.id
+        tb0 = T.TestBackend(90, 14); T.reset!(tb0.buf)
+        P4.render_gantt!(m, tb0.buf, T.Rect(1, 1, 90, 14))
+        r0 = nothing
+        for i in 1:14
+            rt = T.row_text(tb0, i)
+            rt !== nothing && occursin(past.key, rt) && (r0 = rt; break)
+        end
+        @test r0 !== nothing && p4bar_run(r0) == 0
+        p4!(m, 'k')
+        @test P4._gantt_selected_issue(m).id == past.id
+        tb1 = T.TestBackend(90, 14); T.reset!(tb1.buf)
+        P4.render_gantt!(m, tb1.buf, T.Rect(1, 1, 90, 14))
+        r1 = nothing
+        for i in 1:14
+            rt = T.row_text(tb1, i)
+            rt !== nothing && occursin(past.key, rt) && (r1 = rt; break)
+        end
+        @test r1 !== nothing
+        @test p4bar_run(r1) >= 1 || occursin("▌", r1) || occursin("█", r1) || occursin("▓", r1)
+        title = T.row_text(tb1, 1)
+        @test title !== nothing && occursin("GANTT", title)
+    end
+
     @testset "No-conflict: printable chars in the calendar create modal edit only the field" begin
         m = p4login(); p4!(m, 'C'); p4!(m, 'n')
         @test m.modal == :card_edit

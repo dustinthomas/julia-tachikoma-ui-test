@@ -102,22 +102,19 @@ function gantt_clamped_start_for_day(win_start::Date, today::Date, dpc::Int, nco
 end
 
 # ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
-"""
-    gantt_axis_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
+# Overhaul (2026-07): denser product-style axis — period labels (months) plus
+# numeric day/period ticks so the chart is readable without relying only on a
+# month span string. Dual-row render uses period + tick helpers separately;
+# gantt_axis_labels remains the single-row combined API (compat + h=8 path).
 
-(col, label) for ruler row (y+2): "┬" (or +) at Mon week starts; month labels
-("Mar 2026" or abbr "Mar") centered when their visible span >=3 cols.
 """
-function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
+    gantt_axis_period_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
+
+Month (or multi-week) period labels centered over their visible span when span ≥ 3.
+"""
+function gantt_axis_period_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
     out = Tuple{Int,String}[]
     ncols <= 0 && return out
-    # week ticks at Mondays
-    for c in 0:(ncols-1)
-        if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1
-            push!(out, (c, "┬"))
-        end
-    end
-    # month labels (one per month)
     seen = Set{Tuple{Int,Int}}()
     for c in 0:(ncols-1)
         d = gantt_date_for_col(win_start, dpc, c)
@@ -128,24 +125,163 @@ function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=f
         mN = (m1 + Dates.Month(1)) - Dates.Day(1)
         cs = gantt_col_for_date(win_start, dpc, m1)
         ce = gantt_col_for_date(win_start, dpc, mN)
-        c0v = max(0, cs); c1v = min(ncols-1, ce)
+        c0v = max(0, cs); c1v = min(ncols - 1, ce)
         span = c1v - c0v + 1
         if span >= 3
             lcol = c0v + (span - 1) ÷ 2
             fmt = narrow ? "u" : "u yyyy"
             push!(out, (lcol, Dates.format(d, fmt)))
+        elseif span >= 1 && c0v == 0
+            # short visible month tail/head still gets an abbr at left edge
+            push!(out, (c0v, Dates.format(d, "u")))
         end
     end
+    filter!(t -> 0 <= t[1] < ncols, out)
+end
+
+"""
+    gantt_axis_tick_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
+
+Numeric day/period ticks with non-overlapping pack:
+- dpc == 1 (day/week): day-of-month digits; 1-digit days on every col, 2-digit
+  labels reserve 2 cols so neighbors do not mash. Narrow + wide windows thin to
+  every 2nd column when ncols > 20.
+- dpc >= 2 (month): day-of-month of each period column start (usually 1 cell).
+"""
+function gantt_axis_tick_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
+    out = Tuple{Int,String}[]
+    ncols <= 0 && return out
+    if dpc >= 2
+        for c in 0:(ncols-1)
+            d = gantt_date_for_col(win_start, dpc, c)
+            push!(out, (c, string(Dates.day(d))))
+        end
+        return out
+    end
+    # dpc == 1: pack day numbers without overlap
+    thin = narrow && ncols > 20
+    c = 0
+    while c < ncols
+        d = gantt_date_for_col(win_start, dpc, c)
+        lab = string(Dates.day(d))
+        w = textwidth(lab)
+        if c + w - 1 >= ncols
+            # last cell: prefer single digit (ones place) so something shows
+            lab = string(Dates.day(d) % 10)
+            w = 1
+        end
+        push!(out, (c, lab))
+        step = thin ? max(2, w) : w
+        c += max(1, step)
+    end
+    out
+end
+
+"""
+    gantt_axis_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
+
+Combined single-row axis (compat / short height): prefers numeric day ticks;
+keeps Monday `┬` only where it does not collide with a day number; overlays
+month period labels when they do not stomp a dense tick column (prefer tick).
+"""
+function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
+    out = Tuple{Int,String}[]
+    ncols <= 0 && return out
+    # Short Monday markers first (dpc==1), then period labels (longer non-digit wins
+    # when period center lands on a Monday), then dense day ticks (digits always win).
+    if dpc == 1
+        for c in 0:(ncols-1)
+            if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1
+                push!(out, (c, "┬"))
+            end
+        end
+    end
+    for (c, lab) in gantt_axis_period_labels(win_start, dpc, ncols; narrow=narrow)
+        push!(out, (c, lab))
+    end
+    append!(out, gantt_axis_tick_labels(win_start, dpc, ncols; narrow=narrow))
     sort!(out, by = t -> t[1])
     dedup = Tuple{Int,String}[]
     for t in out
         if isempty(dedup) || dedup[end][1] != t[1]
             push!(dedup, t)
-        elseif textwidth(t[2]) > 1
-            dedup[end] = t  # prefer label over tick on collision
+        else
+            # prefer numeric tick over month/┬ on collision; else longer label
+            if occursin(r"^\d{1,2}$", t[2])
+                dedup[end] = t
+            elseif !occursin(r"^\d{1,2}$", dedup[end][2]) && textwidth(t[2]) > textwidth(dedup[end][2])
+                dedup[end] = t
+            end
         end
     end
     filter!(t -> 0 <= t[1] < ncols, dedup)
+end
+
+# ── Keep-in-view / selection orientation (pure) ─────────────────────────────
+"""
+    gantt_bar_in_window(win_start, dpc, ncols, sd, ed) -> Bool
+
+True when the bar [sd,ed] intersects the visible column window.
+"""
+gantt_bar_in_window(win_start::Date, dpc::Int, ncols::Int, sd::Date, ed::Date)::Bool =
+    gantt_bar_extent(win_start, dpc, sd, ed, ncols) !== nothing
+
+"""
+    gantt_reveal_start(win_start, dpc, ncols, sd, ed; pad=1) -> Date
+
+Window start that makes [sd,ed] visible. Identity when already in view.
+When scrolling, places the earlier date at column `pad` (default 1).
+"""
+function gantt_reveal_start(win_start::Date, dpc::Int, ncols::Int, sd::Date, ed::Date; pad::Int=1)::Date
+    lo, hi = sd <= ed ? (sd, ed) : (ed, sd)
+    gantt_bar_in_window(win_start, dpc, ncols, lo, hi) && return win_start
+    p = clamp(pad, 0, max(0, ncols - 1))
+    lo - Day(p * dpc)
+end
+
+"Anchor span for an issue (start/due, order-normalized); nothing if undated."
+function gantt_issue_span(iss::Domain.Issue)::Union{Nothing,Tuple{Date,Date}}
+    if iss.start_date !== nothing && iss.due_date !== nothing
+        lo, hi = iss.start_date <= iss.due_date ? (iss.start_date, iss.due_date) : (iss.due_date, iss.start_date)
+        return (lo, hi)
+    elseif iss.start_date !== nothing
+        return (iss.start_date, iss.start_date)
+    elseif iss.due_date !== nothing
+        return (iss.due_date, iss.due_date)
+    end
+    nothing
+end
+
+"""
+    gantt_effective_win_start(win_start, today, dpc, ncols, sel_span) -> Date
+
+Day-scale near-term clamp (today-1 floor) so wide terminals / ancient data do not
+open a multi-month empty strip — **unless** keep-in-view has already placed
+`win_start` at the reveal position for `sel_span` (pad=1 → lo − 1·dpc). That
+lets j/k-focused past bars stay on chart without reintroducing init-time
+multi-month empty strips (init earliest ≠ reveal start). Non-day scales are
+identity.
+"""
+function gantt_effective_win_start(win_start::Date, today::Date, dpc::Int, ncols::Int,
+                                   sel_span::Union{Nothing,Tuple{Date,Date}})::Date
+    dpc != 1 && return win_start
+    preferred = today - Day(1)
+    clamped = max(win_start, preferred)
+    if sel_span !== nothing
+        sd, ed = sel_span
+        lo, hi = sd <= ed ? (sd, ed) : (ed, sd)
+        # Keep-in-view already put the bar in [win_start, …] but the near-term
+        # floor would hide it → honor the reveal-aligned start only.
+        if !gantt_bar_in_window(clamped, dpc, ncols, lo, hi) &&
+           gantt_bar_in_window(win_start, dpc, ncols, lo, hi)
+            # gantt_reveal_start places lo at column `pad` (default 1)
+            expected = gantt_reveal_start(clamped, dpc, ncols, lo, hi)
+            if win_start == expected
+                return win_start
+            end
+        end
+    end
+    clamped
 end
 
 # ── Rows (pure projection of the store) ─────────────────────────────────────
@@ -283,6 +419,7 @@ function _gantt_row!(m::AppModel, delta::Int)
     n = length(gantt_issue_rows(m))
     n == 0 && return m
     m.gantt_sel = clamp(m.gantt_sel + delta, 1, n)
+    _gantt_ensure_selection_visible!(m)
     m
 end
 
@@ -299,6 +436,31 @@ function _gantt_selected_issue(m::AppModel)
     irows = gantt_issue_rows(m)
     isempty(irows) && return nothing
     irows[clamp(m.gantt_sel, 1, length(irows))].issue
+end
+
+"""
+    _gantt_ensure_selection_visible!(m)
+
+If the selected issue's bar/point lies wholly outside the current chart window,
+scroll `m.gantt_start` so the bar is visible (modern Gantt keep-in-view).
+Uses day-view 14-col cap for day scale; a representative width for week/month.
+"""
+function _gantt_ensure_selection_visible!(m::AppModel)
+    iss = _gantt_selected_issue(m)
+    iss === nothing && return m
+    span = gantt_issue_span(iss)
+    span === nothing && return m
+    sd, ed = span
+    dpc = gantt_days_per_col(m.gantt_scale)
+    ncols = m.gantt_scale === :day ? GANTT_DAY_VIEW_WINDOW : 60
+    # Match render: day scale applies near-term clamp unless selection needs past
+    win = gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, ncols, span)
+    if gantt_bar_in_window(win, dpc, ncols, sd, ed)
+        return m
+    end
+    m.gantt_start = gantt_reveal_start(win, dpc, ncols, sd, ed)
+    m.message = "Gantt: focused $(iss.key)"
+    m
 end
 
 """
@@ -360,10 +522,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # so the header always shows a ~2 week range and never months. view_ncols drives
     # geometry, canvas, bars, shading, axis, and today marker.
     view_ncols = m.gantt_scale === :day ? min(ncols, GANTT_DAY_VIEW_WINDOW) : ncols
-    win_start = m.gantt_start
-    if m.gantt_scale === :day
-        win_start = gantt_clamped_start_for_day(win_start, Dates.today(), dpc, view_ncols)
-    end
+    sel_issue_early = _gantt_selected_issue(m)
+    sel_span = sel_issue_early === nothing ? nothing : gantt_issue_span(sel_issue_early)
+    win_start = gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, view_ncols, sel_span)
     win_end = gantt_window_end(win_start, dpc, view_ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
     scale_lbl = m.gantt_scale === :month ? "month" :
@@ -393,6 +554,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # PR5: has_footer = h>=10 && rows>0 && !narrow (responsive hide on small terminals)
     # predicate approx per design; nshow accounts for footer_rows to reserve space.
     has_footer = area.height >= 10 && length(rows) > 0 && !is_narrow
+    # Keep single axis row (ruler_rows=1) so band→grid geometry stays band_y+2 = first
+    # grid row (today ┃ asserts). Density comes from numeric day ticks on that row;
+    # period labels appear when height allows a second axis strip *above* ticks only
+    # if we still preserve band_y+2 grid — so we draw period text into the left label
+    # gutter of the axis row / as non-colliding overlays, not an extra content offset.
     ruler_rows = has_ruler ? 1 : 0
     footer_rows = has_footer ? 1 : 0
     content_start = 1 + 1 + ruler_rows
@@ -439,14 +605,23 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     if has_ruler
+        # Product-style dense axis: numeric day ticks + period labels where free.
+        # Also paint a short month tag in the left gutter (under labels) when room.
+        for (c, lab) in gantt_axis_period_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+            # Period label in left gutter only (first period), keeps chart ticks dense
+            if c == 0 && left_w >= 4
+                set_string!(buf, area.x, ruler_y, _short(lab, min(left_w - 1, textwidth(lab) + 1)),
+                            Style(; fg = col_text_dim()))
+            end
+        end
         ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
         for (c, lab) in ax
             (c < 0 || c >= view_ncols) && continue
             xx = chart_x + c
             xx > area.x + area.width - 1 && continue
             if textwidth(lab) <= 1
-                tch = gantt_safe_char('┬', is_narrow)  # COV_EXCL_LINE (safe paths covered elsewhere)
-                if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end
+                tch = lab == "┬" ? gantt_safe_char('┬', is_narrow) : (isempty(lab) ? ' ' : lab[1])
+                if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
                 set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
             else
                 set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
@@ -465,7 +640,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     canvas = BlockCanvas(view_ncols, max(1, nshow); style = Style(; fg = col_primary()))
     diamonds = Tuple{Int,Int,Any}[]
-    sel_issue = _gantt_selected_issue(m)
+    sel_issue = sel_issue_early
 
     # Track for PR4 selection bar accent (set during label/bar loop; used post-canvas)
     selected_vis_i = nothing

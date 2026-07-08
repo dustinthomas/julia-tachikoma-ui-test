@@ -113,14 +113,92 @@ end
         ws = Date(2026, 3, 10)  # Tue
         labs = G4.gantt_axis_labels(ws, 1, 30)
         @test !isempty(labs)
-        @test any(occursin("┬", string(l[2])) || occursin("Mar", string(l[2])) for l in labs)
-        labsn = G4.gantt_axis_labels(ws, 1, 30; narrow=true)
-        @test any(l[2] == "Mar" for l in labsn)
+        # Overhaul: dense numeric ticks; period labels via dedicated helper / gutter
+        @test any(occursin(r"^\d{1,2}$", string(l[2])) || occursin("┬", string(l[2])) || occursin("Mar", string(l[2])) for l in labs)
+        periods = G4.gantt_axis_period_labels(ws, 1, 30; narrow=true)
+        @test any(l[2] == "Mar" for l in periods)
+        periods_w = G4.gantt_axis_period_labels(ws, 1, 30; narrow=false)
+        @test any(occursin("Mar", string(l[2])) for l in periods_w)
         # left width adaptive
         er = [G4.GanttRow(:epic, "EpicName", nothing, ""); G4.GanttRow(:issue, "QCI-99 Long title here", nothing, "")]
         @test G4.gantt_left_width(er, 120) <= 24
         @test G4.gantt_left_width(er, 120) >= 14
         @test G4.gantt_left_width(G4.GanttRow[], 80) == clamp(80 ÷ 3, 14, 22)
+    end
+
+    @testset "overhaul: denser numeric axis ticks (pure)" begin
+        # Day/week (dpc=1): every column (or dense subset) exposes day-of-month digits
+        ws = Date(2026, 7, 7)  # fixed Tue
+        ticks = G4.gantt_axis_tick_labels(ws, 1, 14)
+        @test !isempty(ticks)
+        # Must include numeric day labels the user can read (not only month span / ┬)
+        nums = [t[2] for t in ticks if occursin(r"^\d{1,2}$", t[2])]
+        @test length(nums) >= 7  # dense: majority of the 14-day strip
+        @test "7" in nums || "07" in nums
+        @test "8" in nums || "08" in nums
+        # Month scale (dpc=7): period-start day numbers across weeks
+        mticks = G4.gantt_axis_tick_labels(ws, 7, 8)
+        @test !isempty(mticks)
+        mnums = [t[2] for t in mticks if occursin(r"^\d{1,2}$", t[2])]
+        @test length(mnums) >= 2
+        # Period labels still available (month names)
+        periods = G4.gantt_axis_period_labels(ws, 1, 30)
+        @test any(occursin("Jul", string(l[2])) || occursin("Jul 2026", string(l[2])) for l in periods)
+        # Combined gantt_axis_labels remains non-empty and includes at least one digit label
+        combined = G4.gantt_axis_labels(ws, 1, 14)
+        @test any(occursin(r"\d", l[2]) for l in combined)
+        # Wider window exercises period+tick collision (digit wins) and Monday ┬
+        combined30 = G4.gantt_axis_labels(ws, 1, 30)
+        @test any(occursin(r"^\d{1,2}$", l[2]) for l in combined30)
+        # Month-scale combined still has numeric ticks
+        @test any(occursin(r"^\d{1,2}$", l[2]) for l in G4.gantt_axis_labels(ws, 7, 8))
+        # gantt_issue_span: both / start-only / due-only / none
+        both = G4.Domain.Issue(; id="1", key="QCI-1", title="Both",
+                               start_date=Date(2026,7,1), due_date=Date(2026,7,5))
+        @test G4.gantt_issue_span(both) == (Date(2026,7,1), Date(2026,7,5))
+        rev = G4.Domain.Issue(; id="2", key="QCI-2", title="Rev",
+                              start_date=Date(2026,7,5), due_date=Date(2026,7,1))
+        @test G4.gantt_issue_span(rev) == (Date(2026,7,1), Date(2026,7,5))
+        so = G4.Domain.Issue(; id="3", key="QCI-3", title="StartOnly", start_date=Date(2026,7,2))
+        @test G4.gantt_issue_span(so) == (Date(2026,7,2), Date(2026,7,2))
+        do_ = G4.Domain.Issue(; id="4", key="QCI-4", title="DueOnly", due_date=Date(2026,7,3))
+        @test G4.gantt_issue_span(do_) == (Date(2026,7,3), Date(2026,7,3))
+        none = G4.Domain.Issue(; id="5", key="QCI-5", title="None")
+        @test G4.gantt_issue_span(none) === nothing
+        # effective win start identity for non-day dpc
+        @test G4.gantt_effective_win_start(ws, Dates.today(), 7, 10, nothing) == ws
+        @test G4.gantt_effective_win_start(ws, Dates.today(), 1, 14, nothing) ==
+              G4.gantt_clamped_start_for_day(ws, Dates.today(), 1, 14)
+        # Past selection after keep-in-view: honor reveal start (pad=1 → lo-1 day)
+        td = Dates.today()
+        past_lo, past_hi = td - Day(60), td - Day(55)
+        rev = G4.gantt_reveal_start(td - Day(1), 1, 14, past_lo, past_hi)
+        @test G4.gantt_effective_win_start(rev, td, 1, 14, (past_lo, past_hi)) == rev
+        @test G4.gantt_bar_in_window(rev, 1, 14, past_lo, past_hi)
+        # Init-style earliest far past without reveal alignment still clamps near today
+        earliest = past_lo
+        @test G4.gantt_effective_win_start(earliest, td, 1, 14, (past_lo, past_hi)) == td - Day(1)
+    end
+
+    @testset "overhaul: reveal / keep-in-view geometry (pure)" begin
+        ws = Date(2026, 7, 7)
+        dpc, ncols = 1, 14
+        # Bar fully inside → no scroll
+        @test G4.gantt_reveal_start(ws, dpc, ncols, Date(2026, 7, 8), Date(2026, 7, 12)) == ws
+        @test G4.gantt_bar_in_window(ws, dpc, ncols, Date(2026, 7, 8), Date(2026, 7, 12))
+        # Bar wholly to the right → scroll so bar start lands near left pad
+        far_sd, far_ed = Date(2026, 8, 17), Date(2026, 8, 27)
+        @test !G4.gantt_bar_in_window(ws, dpc, ncols, far_sd, far_ed)
+        rev = G4.gantt_reveal_start(ws, dpc, ncols, far_sd, far_ed)
+        @test rev != ws
+        @test G4.gantt_bar_in_window(rev, dpc, ncols, far_sd, far_ed)
+        # Bar wholly to the left
+        past_sd, past_ed = Date(2026, 1, 1), Date(2026, 1, 5)
+        @test !G4.gantt_bar_in_window(ws, dpc, ncols, past_sd, past_ed)
+        revp = G4.gantt_reveal_start(ws, dpc, ncols, past_sd, past_ed)
+        @test G4.gantt_bar_in_window(revp, dpc, ncols, past_sd, past_ed)
+        # Single-day diamond span
+        @test G4.gantt_reveal_start(ws, dpc, ncols, Date(2026, 9, 1), Date(2026, 9, 1)) != ws
     end
 
     @testset "gantt_safe_char + narrow unicode guards (PR6)" begin
@@ -524,6 +602,122 @@ end
         @test bar_run(rb2) >= 1
     end
 
+    @testset "overhaul: denser axis visible in TestBackend day/week renders" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "AxisLook")
+        G4.Stores.create_issue!(m.boardstore; title = "Near", epic_id = e.id,
+                                start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        tb = gantt_render(m; w = 90, h = 12)
+        @test T.find_text(tb, "GANTT") !== nothing
+        @test T.find_text(tb, "[day]") !== nothing
+        # Axis row (row 3 under title+band): dense day-of-month digits packed into chart cols.
+        # Title ISO dates also have digits; require the axis row itself to be digit-dense
+        # beyond a single month label (pre-overhaul axis was sparse ┬ / "Jul 2026" only).
+        axis_rt = T.row_text(tb, 3)
+        @test axis_rt !== nothing
+        axis_digits = count(isdigit, axis_rt)
+        @test axis_digits >= 8  # ~14-day window with packed day numbers
+        td = Dates.today()
+        # Day-window starts at today-1; that digit is on the axis (TODAY label may
+        # overwrite later cols, so do not require every neighbor digit).
+        d_left = string(Dates.day(td - Day(1)))
+        @test occursin(d_left, axis_rt)
+        # Period label (month) still present somewhere (gutter or axis/title)
+        blob = join([something(T.row_text(tb, i), "") for i in 1:12], "\n")
+        @test occursin(Dates.format(td, "u"), blob) || occursin(Dates.format(td, "U"), blob) ||
+              occursin(Dates.monthabbr(td), blob) || occursin("Jul", blob) || occursin("2026", blob)
+        @test bar_run(row_with(tb, "Near", 12)) >= 1 || T.find_text(tb, "█") !== nothing || T.find_text(tb, "▌") !== nothing
+        # Week scale also denser on its axis row
+        g4!(m, 'z')
+        tbw = gantt_render(m; w = 90, h = 12)
+        @test T.find_text(tbw, "[week]") !== nothing
+        axis_w = T.row_text(tbw, 3)
+        @test axis_w !== nothing && count(isdigit, axis_w) >= 8
+    end
+
+    @testset "overhaul: j/k keep-in-view brings off-window selection bar into chart" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "Orient")
+        near = G4.Stores.create_issue!(m.boardstore; title = "NearNow", epic_id = e.id,
+                                       start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(2))
+        far = G4.Stores.create_issue!(m.boardstore; title = "FarFuture", epic_id = e.id,
+                                      start_date = Dates.today() + Day(40), due_date = Dates.today() + Day(50))
+        g4!(m, 'G')
+        @test m.gantt_sel == 1
+        tb0 = gantt_render(m; w = 90, h = 14)
+        rfar0 = row_with(tb0, far.key, 14)
+        @test rfar0 !== nothing
+        # Far bar off default near-term day window
+        @test bar_run(rfar0) == 0 && !occursin("▌", rfar0)
+        # Navigate to far issue via j (only key path) — must reveal bar
+        g4!(m, 'j')
+        @test m.gantt_sel == 2
+        @test G4._gantt_selected_issue(m).id == far.id
+        tb1 = gantt_render(m; w = 90, h = 14)
+        rfar1 = row_with(tb1, far.key, 14)
+        @test rfar1 !== nothing
+        @test bar_run(rfar1) >= 1 || occursin("▌", rfar1) || occursin("█", rfar1) || occursin("▓", rfar1)
+        # Title window should have moved toward the far span (not stuck on today-1 only)
+        title1 = T.row_text(tb1, 1)
+        @test title1 !== nothing && occursin("GANTT", title1)
+        # Far start date (or nearby after pad) appears in title window, or bar geometry proves reveal
+        far_in_title = occursin(string(far.start_date), title1) ||
+                       occursin(string(far.start_date - Day(1)), title1) ||
+                       occursin(string(far.start_date + Day(1)), title1)
+        @test far_in_title || bar_run(rfar1) >= 1
+        # Back to near via k — orient near-term again
+        g4!(m, 'k')
+        @test m.gantt_sel == 1
+        tb2 = gantt_render(m; w = 90, h = 14)
+        rnear = row_with(tb2, near.key, 14)
+        @test rnear !== nothing && (bar_run(rnear) >= 1 || occursin("▌", rnear))
+    end
+
+    @testset "overhaul: j/k keep-in-view reveals PAST selection bar (day clamp must not wipe reveal)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "PastOrient")
+        near = G4.Stores.create_issue!(m.boardstore; title = "NearNow2", epic_id = e.id,
+                                       start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(2))
+        past = G4.Stores.create_issue!(m.boardstore; title = "FarPast", epic_id = e.id,
+                                       start_date = Dates.today() - Day(60), due_date = Dates.today() - Day(50))
+        g4!(m, 'G')
+        # issue rows sorted by anchor: past first, then near
+        irows = G4.gantt_issue_rows(m)
+        @test length(irows) == 2
+        @test irows[1].issue.id == past.id   # earlier anchor
+        @test irows[2].issue.id == near.id
+        # Select near (sel=2) so default day window is near-term; past bar off-window
+        g4!(m, 'j')
+        @test m.gantt_sel == 2
+        tb_near = gantt_render(m; w = 90, h = 14)
+        rpast0 = row_with(tb_near, past.key, 14)
+        @test rpast0 !== nothing
+        @test bar_run(rpast0) == 0 && !occursin("▌", rpast0)
+        title_near = T.row_text(tb_near, 1)
+        @test title_near !== nothing && occursin(string(Dates.today() - Day(1)), title_near)
+        # k → select past; keep-in-view must scroll + render must show bar (not re-clamp to today)
+        g4!(m, 'k')
+        @test m.gantt_sel == 1
+        @test G4._gantt_selected_issue(m).id == past.id
+        @test occursin("focused", m.message) || occursin(past.key, m.message)
+        tb_past = gantt_render(m; w = 90, h = 14)
+        rpast1 = row_with(tb_past, past.key, 14)
+        @test rpast1 !== nothing
+        @test bar_run(rpast1) >= 1 || occursin("▌", rpast1) || occursin("█", rpast1) || occursin("▓", rpast1)
+        title_past = T.row_text(tb_past, 1)
+        @test title_past !== nothing && occursin("GANTT", title_past)
+        past_in_title = occursin(string(past.start_date), title_past) ||
+                        occursin(string(past.start_date - Day(1)), title_past) ||
+                        occursin(string(past.start_date + Day(1)), title_past)
+        @test past_in_title || bar_run(rpast1) >= 1
+        # Day near-term still holds when not following a past selection: re-select near
+        g4!(m, 'j')
+        tb_back = gantt_render(m; w = 90, h = 14)
+        rnear2 = row_with(tb_back, near.key, 14)
+        @test rnear2 !== nothing && (bar_run(rnear2) >= 1 || occursin("▌", rnear2))
+    end
+
     @testset "PR5: selected-item footer details (dates/dur/status/pri) at h>=10, hidden on small h or narrow; richer empty + hint; re-render after j/k; boundary h=6/8/10 (deps PR2/4)" begin
         # data case with explicit dates/status/pri/assignee
         m = gantt_login()
@@ -588,10 +782,11 @@ end
         @test T.find_text(tb6, "GANTT") !== nothing
         @test T.find_text(tb6, "(5d)") === nothing
         @test T.find_text(tb6, "(3d)") === nothing
-        # h=8: ruler yes, footer no
+        # h=8: ruler yes (dense day ticks and/or legacy ┬), footer no
         tb8 = T.TestBackend(80, 8); T.reset!(tb8.buf)
         G4.render_gantt!(m, tb8.buf, T.Rect(1, 1, 80, 8))
-        @test (T.find_text(tb8, "┬") !== nothing || T.find_text(tb8, "+") !== nothing)
+        ax8 = T.row_text(tb8, 3)
+        @test ax8 !== nothing && (count(isdigit, ax8) >= 4 || occursin("┬", ax8) || occursin("+", ax8))
         @test T.find_text(tb8, "(5d)") === nothing
         # narrow w<60 at h=12: footer hidden by responsive
         tbn = T.TestBackend(50, 12); T.reset!(tbn.buf)
