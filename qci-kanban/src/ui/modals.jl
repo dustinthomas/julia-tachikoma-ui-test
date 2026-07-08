@@ -328,8 +328,11 @@ function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
     id = m.card_issue_id
     iss = id === nothing ? nothing : Stores.get_issue(m.boardstore, id)
     iss === nothing && return
-    w = clamp(content_area.width - 4, 30, content_area.width)
-    h = clamp(content_area.height - 2, 10, content_area.height)
+    # Compact, centered panel (not a near-fullscreen sheet). Color-rect bleed is
+    # killed by the full content_area clear + set_style!(RESET) in view; these
+    # caps only control the panel size/margins.
+    w = clamp(min(64, content_area.width - 10), 30, content_area.width)
+    h = clamp(min(16, content_area.height - 6), 10, content_area.height)
     inner = _modal_box(content_area, w, h, "$(iss.key) — Enter comment, Esc close", buf)
     x = inner.x + 1; y = inner.y + 1; maxy = inner.y + inner.height - 1
     set_string!(buf, x, y, _short(iss.title, inner.width - 2), Style(; fg = col_text(), bold = true)); y += 1
@@ -367,8 +370,9 @@ end
 function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     f = m.edit_form; f === nothing && return
     creating = m.card_issue_id === nothing
-    w = clamp(content_area.width - 4, 40, content_area.width)
-    h = clamp(content_area.height - 2, 14, content_area.height)
+    # Match card-detail: compact centered form rather than a near-fullscreen sheet.
+    w = clamp(min(68, content_area.width - 10), 40, content_area.width)
+    h = clamp(min(16, content_area.height - 6), 14, content_area.height)
     title = creating ? "NEW CARD — Tab fields, ^S/Enter save, Esc cancel" : "EDIT CARD — Tab fields, ^S/Enter save"
     inner = _modal_box(content_area, w, h, title, buf)
     x = inner.x + 1; y = inner.y + 1; iw = inner.width - 2

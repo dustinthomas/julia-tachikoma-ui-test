@@ -117,6 +117,57 @@ end
         k!(m, 'v'); k!(m, :enter)
         @test isempty(Qm.Stores.list_comments(m.boardstore, iss.id))
     end
+
+    # Enter opens the same detail modal as 'v'. The overlay must be a compact,
+    # centered panel — not a near-fullscreen sheet — and must not leave modern
+    # board-card surface backgrounds showing through as colored rectangles.
+    @testset "Enter opens compact centered detail; no board color-rect bleed" begin
+        m = lbm()
+        iss = Qm.selected_issue(m)
+        k!(m, :enter)
+        @test m.modal == :card_detail
+        W, H = 100, 30
+        tb = app_tb(m; w = W, h = H)
+        loc = T.find_text(tb, iss.key)
+        @test loc !== nothing
+        # measure the modal box on the title row (╭ … ╮)
+        left_x = right_x = 0
+        for x in 1:W
+            c = T.char_at(tb, x, loc.y)
+            c == '╭' && (left_x = x)
+            c == '╮' && (right_x = x)
+        end
+        @test left_x > 0 && right_x > left_x
+        modal_w = right_x - left_x + 1
+        @test modal_w <= 72                          # compact, not near-fullscreen
+        @test modal_w < W - 10
+        # horizontally centered inside the outer frame (cols 2 .. W-1)
+        left_margin = left_x - 2
+        right_margin = (W - 1) - right_x
+        @test abs(left_margin - right_margin) <= 2
+        # vertical: box has a bottom ╰ and is shorter than the content band
+        bottom_y = loc.y
+        for y in loc.y:H
+            if T.char_at(tb, left_x, y) == '╰'
+                bottom_y = y
+                break
+            end
+        end
+        modal_h = bottom_y - loc.y + 1
+        @test modal_h <= 18
+        @test modal_h < H - 10
+        # board card surfaces must not paint through (Tachikoma preserves bg on
+        # NoColor writes — a space-only clear leaves colored rectangles)
+        surf = Qm.Theming.col_surface()
+        surf_hi = Qm.Theming.col_surface_hi()
+        n_card_bg = count(xy -> begin
+            bg = T.style_at(tb, xy[1], xy[2]).bg
+            bg == surf || bg == surf_hi
+        end, [(x, y) for y in 1:H for x in 1:W])
+        @test n_card_bg == 0
+        # content still present
+        @test T.find_text(tb, "COMMENTS") !== nothing
+    end
 end
 
 @testset "Phase 3 — Delete confirm (single + bulk)" begin

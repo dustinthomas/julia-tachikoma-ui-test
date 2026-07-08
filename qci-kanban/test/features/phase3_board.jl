@@ -131,4 +131,39 @@ u!(m, x) = T.update!(m, T.KeyEvent(x))
             @test T.style_at(tb, c, loc.y).bg == Q3f.Theming.col_surface_hi()
         end
     end
+
+    @testset "Given a selected card When Enter Then detail is compact, centered, no card-color bleed" begin
+        m = _login()
+        iss = Q3f.selected_issue(m)
+        @test iss !== nothing
+        u!(m, :enter)
+        @test m.modal == :card_detail
+        W, H = 100, 30
+        tb = app_tb(m; w = W, h = H)
+        loc = T.find_text(tb, iss.key)
+        @test loc !== nothing
+        left_x = right_x = 0
+        for x in 1:W
+            c = T.char_at(tb, x, loc.y)
+            c == '╭' && (left_x = x)
+            c == '╮' && (right_x = x)
+        end
+        @test left_x > 0 && right_x > left_x
+        modal_w = right_x - left_x + 1
+        @test modal_w <= 72
+        @test abs((left_x - 2) - ((W - 1) - right_x)) <= 2
+        bottom_y = loc.y
+        for y in loc.y:H
+            T.char_at(tb, left_x, y) == '╰' && (bottom_y = y; break)
+        end
+        @test (bottom_y - loc.y + 1) <= 18
+        surf = Q3f.Theming.col_surface()
+        surf_hi = Q3f.Theming.col_surface_hi()
+        n_card_bg = count(xy -> begin
+            bg = T.style_at(tb, xy[1], xy[2]).bg
+            bg == surf || bg == surf_hi
+        end, [(x, y) for y in 1:H for x in 1:W])
+        @test n_card_bg == 0
+        @test T.find_text(tb, "COMMENTS") !== nothing
+    end
 end

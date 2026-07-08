@@ -531,9 +531,14 @@ function _panel_rect(content_area::Rect, w::Int, h::Int)
 end
 
 function _clear_rect!(buf::Buffer, r::Rect)
+    # Clear glyphs, then force style reset. Tachikoma's set_char!/set_string!
+    # preserve an existing cell bg when the new style has NoColor bg — a
+    # space-only clear left modern-card surface colors showing through modals
+    # as colored rectangles. set_style!(…, RESET) replaces the whole style.
     for yy in r.y:(r.y + r.height - 1)
         set_string!(buf, r.x, yy, repeat(" ", r.width))
     end
+    set_style!(buf, r, RESET)
 end
 
 # ── Login rendering ─────────────────────────────────────────────────────────
