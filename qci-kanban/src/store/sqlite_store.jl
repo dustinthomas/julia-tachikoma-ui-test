@@ -589,6 +589,7 @@ end
 function delete_issue!(store::SQLiteBoardStore, id::AbstractString)::Bool
     iss = get_issue(store, id)
     iss === nothing && return false
+    _assert_project_writable!(store, iss.project_id)
     _exec(store.db, "DELETE FROM issues WHERE id = ?", [id])
     _exec(store.db, "DELETE FROM issue_labels WHERE issue_id = ?", [id])
     _reindex_status!(store, iss.status)
@@ -621,6 +622,7 @@ function move_issue!(store::SQLiteBoardStore, id::AbstractString;
                      position::Union{Integer,Nothing} = nothing)
     iss = get_issue(store, id)
     iss === nothing && return nothing
+    _assert_project_writable!(store, iss.project_id)
     old_status = iss.status
     new_status = status === nothing ? old_status : String(status)
     valid_status(new_status) || throw(ArgumentError("invalid status: $new_status"))
@@ -676,15 +678,21 @@ function list_epics(store::SQLiteBoardStore;
     [_epic_from(r, i) for i in eachindex(r.id)]
 end
 function update_epic!(store::SQLiteBoardStore, id::AbstractString; name = nothing, color = nothing)
+    ep = get_epic(store, id)
+    ep === nothing && return nothing
     fields = String[]; vals = Any[]
     name === nothing || (push!(fields, "name = ?"); push!(vals, name))
     color === nothing || (push!(fields, "color = ?"); push!(vals, color))
-    isempty(fields) && return get_epic(store, id)
+    isempty(fields) && return ep
+    _assert_project_writable!(store, ep.project_id)
     push!(vals, id)
     _exec(store.db, "UPDATE epics SET $(join(fields, ", ")) WHERE id = ?", vals)
     get_epic(store, id)
 end
 function delete_epic!(store::SQLiteBoardStore, id::AbstractString)::Bool
+    ep = get_epic(store, id)
+    ep === nothing && return false
+    _assert_project_writable!(store, ep.project_id)
     _exec(store.db, "DELETE FROM epics WHERE id = ?", [id]); true
 end
 
@@ -723,12 +731,15 @@ function list_sprints(store::SQLiteBoardStore;
 end
 function update_sprint!(store::SQLiteBoardStore, id::AbstractString;
                         name = nothing, goal = nothing, start_date = nothing, end_date = nothing)
+    sp = get_sprint(store, id)
+    sp === nothing && return nothing
     fields = String[]; vals = Any[]
     name === nothing || (push!(fields, "name = ?"); push!(vals, name))
     goal === nothing || (push!(fields, "goal = ?"); push!(vals, goal))
     start_date === nothing || (push!(fields, "start_date = ?"); push!(vals, string(start_date)))
     end_date === nothing || (push!(fields, "end_date = ?"); push!(vals, string(end_date)))
-    isempty(fields) && return get_sprint(store, id)
+    isempty(fields) && return sp
+    _assert_project_writable!(store, sp.project_id)
     push!(vals, id)
     _exec(store.db, "UPDATE sprints SET $(join(fields, ", ")) WHERE id = ?", vals)
     get_sprint(store, id)
@@ -798,6 +809,8 @@ function list_labels(store::SQLiteBoardStore;
      for i in eachindex(r.id)]
 end
 function set_labels!(store::SQLiteBoardStore, issue_id::AbstractString, label_ids::Vector{String})
+    iss = get_issue(store, issue_id)
+    iss !== nothing && _assert_project_writable!(store, iss.project_id)
     _exec(store.db, "DELETE FROM issue_labels WHERE issue_id = ?", [issue_id])
     for lid in label_ids
         _exec(store.db, "INSERT INTO issue_labels (issue_id, label_id) VALUES (?, ?)", [issue_id, lid])

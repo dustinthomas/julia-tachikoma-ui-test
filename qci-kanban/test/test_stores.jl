@@ -368,9 +368,11 @@ end
     S.start_sprint!(bs, sp.id)
     @test_throws ArgumentError S.archive_project!(bs, la.id)  # active sprint blocks
     S.close_sprint!(bs, sp.id)
-    # create a fresh future sprint on LA before archive for start_sprint! guard test
+    # create entities on LA before archive for write-guard tests
     sp2 = S.create_sprint!(bs; name = "Win2", project_id = la.id)
     i_la_upd = S.create_issue!(bs; title = "upd target", project_id = la.id)
+    e_la_upd = S.create_epic!(bs; name = "ArchEpic", project_id = la.id)
+    lbl_la = S.create_label!(bs; name = "LArch", project_id = la.id)
     arch = S.archive_project!(bs, la.id)
     @test arch.archived
     @test length(S.list_projects(bs)) == 1  # Default only
@@ -379,6 +381,13 @@ end
     # update_issue! / start_sprint! blocked on archived project (Issue 2)
     @test_throws ArgumentError S.update_issue!(bs, i_la_upd.id; title = "nope")
     @test_throws ArgumentError S.start_sprint!(bs, sp2.id)
+    # move / rank / delete / set_labels / update epic+sprint (Issue 8)
+    @test_throws ArgumentError S.move_issue!(bs, i_la_upd.id; status = "To Do")
+    @test_throws ArgumentError S.rank_issue!(bs, i_la_upd.id; position = 0)
+    @test_throws ArgumentError S.delete_issue!(bs, i_la_upd.id)
+    @test_throws ArgumentError S.set_labels!(bs, i_la_upd.id, [lbl_la.id])
+    @test_throws ArgumentError S.update_epic!(bs, e_la_upd.id; name = "nope")
+    @test_throws ArgumentError S.update_sprint!(bs, sp2.id; name = "nope")
 
     # Default path also respects archive (Issue 1): omit project_id after archiving Default
     # Keep LA archived; create a replacement writable project first, then archive Default.
