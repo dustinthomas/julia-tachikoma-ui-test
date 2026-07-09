@@ -40,7 +40,7 @@ mutable struct AppModel <: Model
     # post-login
     current_user::Union{Domain.User,Nothing}
     view::Symbol                       # one of APP_VIEWS
-    modal::Symbol                      # :none | :help | :card_detail | :card_edit | :confirm | :new_sprint | :search
+    modal::Symbol                      # :none | :help | :card_detail | :card_edit | :confirm | :new_sprint | :search | :project_switch | :project_create
     message::String
     # ── Phase 3: board state ───────────────────────────────────────────────
     notifier::Any                      # AbstractNotifier (NullNotifier default)
@@ -72,10 +72,12 @@ mutable struct AppModel <: Model
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
-    # ── Multi-project (PR-M2) ──────────────────────────────────────────────
+    # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
     active_project_id::Union{String,Nothing}
     projects_cache::Vector{Domain.Project}
     project_sel::Int                   # 1-based index into projects_cache (switcher)
+    project_name_input::TextInput      # create-project modal (name)
+    project_key_input::TextInput       # create-project modal (key)
 end
 
 should_quit(m::AppModel) = m.quit
@@ -141,7 +143,8 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  Dates.year(td), Dates.month(td), Dates.day(td),
                  td, :day, 1,
                  false,
-                 nothing, Domain.Project[], 1)
+                 nothing, Domain.Project[], 1,
+                 _make_input(), _make_input())
     _init_login_focus!(m)
     if restore && Auth.restore_from_file!(sess, us) && sess.current_user !== nothing
         _complete_login!(m, sess.current_user)
@@ -149,7 +152,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
     m
 end
 
-# ── Multi-project helpers (PR-M2) ──────────────────────────────────────────
+# ── Multi-project helpers (PR-M2 / PR-M7) ──────────────────────────────────
 # When no active project is set, UI list/create calls must NOT fall through to
 # the store's unfiltered path (omit/empty project_id ≡ all projects). A
 # non-empty sentinel matches zero rows and keeps isolation fail-closed.
@@ -164,18 +167,58 @@ when `active_project_id` is unset so lists stay empty (never unscoped).
 _scope(m::AppModel) =
     m.active_project_id === nothing ? _NO_PROJECT_SCOPE : m.active_project_id
 
-"""Reload non-archived projects and ensure `active_project_id` is valid."""
+"""Path of the last-project remember file (next to the session token)."""
+_last_project_path(m::AppModel) =
+    joinpath(dirname(m.session.token_path), "last_project")
+
+"Persist active project id (0600 atomic) so the next login restores it."
+function _save_last_project!(m::AppModel)
+    m.active_project_id === nothing && return m
+    try
+        Config._atomic_write_0600(_last_project_path(m), m.active_project_id * "\n")
+    catch err
+        @warn "could not write last_project" error = err  # COV_EXCL_LINE (I/O failure rare)
+    end
+    m
+end
+
+"""
+Read last_project file; return id string or `nothing` if missing/blank/unreadable.
+"""
+function _read_last_project_id(m::AppModel)::Union{String,Nothing}
+    path = _last_project_path(m)
+    isfile(path) || return nothing
+    try
+        id = strip(read(path, String))
+        isempty(id) ? nothing : String(id)
+    catch
+        nothing  # COV_EXCL_LINE
+    end
+end
+
+"""Reload non-archived projects and ensure `active_project_id` is valid.
+
+Prefers the current `active_project_id` when still valid, else restores
+`last_project` when present and non-archived, else the first listed project.
+Empty cache leaves `active_project_id = nothing` (caller may force create).
+"""
 function _load_projects!(m::AppModel)
     m.projects_cache = Stores.list_projects(m.boardstore; include_archived = false)
     if isempty(m.projects_cache)
-        # Default always exists after migrate; leave unset if somehow empty.
         m.active_project_id = nothing
         m.project_sel = 1
         return m
     end
-    if m.active_project_id === nothing ||
-       !any(p -> p.id == m.active_project_id, m.projects_cache)
-        m.active_project_id = m.projects_cache[1].id
+    if m.active_project_id !== nothing &&
+       any(p -> p.id == m.active_project_id, m.projects_cache)
+        # keep current
+    else
+        last_id = _read_last_project_id(m)
+        if last_id !== nothing && any(p -> p.id == last_id, m.projects_cache)
+            m.active_project_id = last_id
+        else
+            m.active_project_id = m.projects_cache[1].id
+        end
     end
     idx = findfirst(p -> p.id == m.active_project_id, m.projects_cache)
     m.project_sel = something(idx, 1)
@@ -203,6 +246,7 @@ end
 function _set_active_project!(m::AppModel, project_id::AbstractString)
     m.active_project_id = String(project_id)
     _clear_project_selection!(m)
+    _save_last_project!(m)
     p = Stores.get_project(m.boardstore, project_id)
     # Short action message only — the always-on toast prefix already shows
     # "PROJECT: name (key)"; repeating that string doubles it in the header.
@@ -213,12 +257,8 @@ end
 function _open_project_switch!(m::AppModel)
     _load_projects!(m)
     if isempty(m.projects_cache)
-        m.message = "No projects"
-        return m
-    end
-    if length(m.projects_cache) == 1
-        m.message = "Only one project: $(m.projects_cache[1].name)"
-        return m
+        # Zero projects → forced create-project modal (blocks board).
+        return _open_project_create!(m; forced = true)
     end
     idx = findfirst(p -> p.id == m.active_project_id, m.projects_cache)
     m.project_sel = something(idx, 1)
@@ -259,6 +299,75 @@ function create_project_with_defaults!(store, cfg::Config.AppConfig;
     p
 end
 
+"""Open the create-project modal (focus-routed name + key, like new_sprint)."""
+function _open_project_create!(m::AppModel; forced::Bool = false)
+    set_text!(m.project_name_input, "")
+    set_text!(m.project_key_input, "")
+    m.modal = :project_create
+    m.focus = FocusState(Any[m.project_name_input, m.project_key_input]; active = true)
+    forced && (m.message = "Create a project to continue")
+    m
+end
+
+function _submit_project_create!(m::AppModel)
+    name = strip(text(m.project_name_input))
+    key  = strip(text(m.project_key_input))
+    if isempty(name)
+        m.message = "Project name required"; return m
+    end
+    if isempty(key)
+        m.message = "Project key required"; return m
+    end
+    key_up = uppercase(key)
+    if !Domain.valid_project_key(key_up)
+        m.message = "Key must be 2–8 chars A-Z0-9 starting with a letter"
+        return m
+    end
+    local p
+    try
+        p = create_project_with_defaults!(m.boardstore, m.config;
+                                          key = key_up, name = String(name))
+    catch err
+        m.message = "Could not create project: $(sprint(showerror, err))"
+        return m
+    end
+    _load_projects!(m)
+    _set_active_project!(m, p.id)
+    m.message = "Created project $(p.name) ($(p.key))"
+    m
+end
+
+"Esc on create-project: cancel when projects exist; block dismiss when forced (empty)."
+function _close_project_create!(m::AppModel)
+    _load_projects!(m)
+    if isempty(m.projects_cache)
+        m.message = "A project is required"
+        # keep focus on the create form
+        m.modal = :project_create
+        m.focus = FocusState(Any[m.project_name_input, m.project_key_input]; active = true)
+        return m
+    end
+    _close_modal!(m)
+end
+
+"""Export active-project issues as CSV next to the session token (0600)."""
+function _export_csv!(m::AppModel)
+    m.active_project_id === nothing && (m.message = "No active project"; return m)
+    issues = Stores.list_issues(m.boardstore; project_id = _scope(m))
+    csv = Domain.issues_to_csv(issues)
+    p = Stores.get_project(m.boardstore, m.active_project_id)
+    key = p === nothing ? "PROJ" : p.key
+    stamp = Dates.format(Dates.now(), dateformat"yyyymmdd-HHMMSS")
+    path = joinpath(dirname(m.session.token_path), "export-$(key)-$(stamp).csv")
+    try
+        Config._atomic_write_0600(path, csv)
+        m.message = "Exported $(length(issues)) issues → $(path)"
+    catch err
+        m.message = "Export failed: $(sprint(showerror, err))"  # COV_EXCL_LINE
+    end
+    m
+end
+
 # ── Focus setup for the login screens ──────────────────────────────────────
 function _init_login_focus!(m::AppModel)
     if m.auth_stage === :create
@@ -292,6 +401,8 @@ function context_stack(m::AppModel)
         return Symbol[:new_sprint, :global]
     elseif m.modal === :project_switch
         return Symbol[:project_switch, :global]
+    elseif m.modal === :project_create
+        return Symbol[:project_create, :global]
     else
         return Symbol[m.view, :global]
     end
@@ -452,7 +563,7 @@ function _do_action!(m::AppModel, act::Symbol)
         _gantt_zoom!(m)
     elseif act === :gantt_view_card
         _gantt_open_detail!(m)
-    # ── Multi-project (PR-M2) ──────────────────────────────────────────────
+    # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
     elseif act === :project_switch
         _open_project_switch!(m)
     elseif act === :project_switch_up
@@ -461,6 +572,14 @@ function _do_action!(m::AppModel, act::Symbol)
         _project_switch_nav!(m, +1)
     elseif act === :project_switch_select
         _project_switch_select!(m)
+    elseif act === :project_create
+        _open_project_create!(m)
+    elseif act === :submit_project_create
+        _submit_project_create!(m)
+    elseif act === :close_project_create
+        _close_project_create!(m)
+    elseif act === :export_csv
+        _export_csv!(m)
     end
     m
 end
@@ -502,6 +621,13 @@ function _complete_login!(m::AppModel, user::Domain.User)
     m.modal = :none
     m.focus = FocusState()             # no editor in the main shell (Phase 2)
     _load_projects!(m)                 # Default always present after migrate
+    if isempty(m.projects_cache)
+        # Zero projects after login → forced create-project modal (blocks board).
+        _open_project_create!(m; forced = true)
+        m.message = "Signed in as $(user.name) — create a project to continue"
+        return m
+    end
+    _save_last_project!(m)             # remember restored/selected active project
     pname = begin
         p = m.active_project_id === nothing ? nothing :
             Stores.get_project(m.boardstore, m.active_project_id)
@@ -646,6 +772,8 @@ function view(m::AppModel, f::Frame)
             render_new_sprint!(m, buf, content_area)
         elseif m.modal === :project_switch
             render_project_switch!(m, buf, content_area)
+        elseif m.modal === :project_create
+            render_project_create!(m, buf, content_area)
         end
     end
     return

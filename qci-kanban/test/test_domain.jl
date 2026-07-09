@@ -74,6 +74,29 @@ const D = QciKanban.Domain
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", work_type = "bogus")
     end
 
+    @testset "issues_to_csv (pure)" begin
+        empty_csv = D.issues_to_csv(D.Issue[])
+        @test startswith(empty_csv, "key,title,status,")
+        @test count(==('\n'), empty_csv) == 1  # header only + trailing newline
+        iss = D.Issue(; id = "i1", key = "QCI-1", title = "Fix, \"quoted\"",
+                      description = "line1\nline2", status = "To Do", priority = "High",
+                      story_points = 3, asset_tag = "CNC-01", location = "Bay 2",
+                      work_type = "PM", labels = ["a", "b"], project_id = "p1",
+                      start_date = Date(2026, 3, 1), due_date = Date(2026, 3, 8))
+        csv = D.issues_to_csv([iss])
+        @test startswith(csv, "key,title,status,priority")
+        @test occursin("QCI-1", csv)
+        @test occursin("\"Fix, \"\"quoted\"\"\"", csv)  # RFC 4180 escape of comma+quotes
+        @test occursin("\"line1\nline2\"", csv)        # newline field is quoted
+        @test occursin("CNC-01", csv)
+        @test occursin("a|b", csv)
+        @test occursin("2026-03-01", csv)
+        # nothing cells are empty between commas
+        bare = D.Issue(; id = "i2", key = "X-1", title = "Bare")
+        bare_csv = D.issues_to_csv([bare])
+        @test occursin("X-1,Bare,Backlog,Medium,", bare_csv)
+    end
+
     @testset "Epic / Label / Comment" begin
         e = D.Epic(; id = "e1", key = "QCI-E-1", name = "Onboarding")
         @test e.color == "violet" && e.project_id == ""

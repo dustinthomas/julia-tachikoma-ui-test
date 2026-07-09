@@ -108,13 +108,16 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
                              Qm.Stores.list_issues(m.boardstore; project_id = def.id)))
     end
 
-    @testset "Given only Default When P pressed Then stay put with one-project message" begin
+    @testset "Given only Default When P pressed Then switcher opens (create via n)" begin
         m = _login_mp("One Proj")
         @test length(m.projects_cache) == 1
         u!(m, 'P')
-        @test m.modal == :none
-        @test occursin("Only one project", m.message)
+        @test m.modal == :project_switch
+        tb = app_tb(m; w = 90, h = 24)
+        @test T.find_text(tb, "SWITCH PROJECT") !== nothing
+        @test T.find_text(tb, "Default") !== nothing || T.find_text(tb, "QCI") !== nothing
         # empty toast message branch: project label alone still renders
+        u!(m, :escape)
         m.message = ""
         tb = app_tb(m; w = 90, h = 24)
         @test T.find_text(tb, "PROJECT:") !== nothing
@@ -125,7 +128,7 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         @test T.find_text(tb2, "hello") !== nothing
     end
 
-    @testset "Given all projects archived When load/switch Then defensive empty paths run" begin
+    @testset "Given all projects archived When P pressed Then forced create-project modal" begin
         m = _login_mp("Empty Proj")
         def = only(Qm.Stores.list_projects(m.boardstore))
         # archive Default → list_projects empty
@@ -134,7 +137,13 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         @test isempty(m.projects_cache)
         @test m.active_project_id === nothing
         u!(m, 'P')
-        @test occursin("No projects", m.message)
+        @test m.modal == :project_create
+        tb = app_tb(m; w = 90, h = 24)
+        @test T.find_text(tb, "NEW PROJECT") !== nothing
+        # Esc cannot dismiss when no projects exist
+        u!(m, :escape)
+        @test m.modal == :project_create
+        @test occursin("required", m.message)
         # Fail-closed: unset active project must not unfilter to all issues
         @test isempty(Qm.Stores.list_issues(m.boardstore; project_id = Qm._scope(m)))
         titles = String[iss.title for lane in Qm.board_grid(m) for col in lane.cols for iss in col]

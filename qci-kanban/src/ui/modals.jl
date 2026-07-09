@@ -340,15 +340,15 @@ function _submit_new_sprint!(m::AppModel)
     _close_modal!(m)
 end
 
-# ── Project switcher (PR-M2 minimal) ────────────────────────────────────────
+# ── Project switcher (PR-M7) ────────────────────────────────────────────────
 function render_project_switch!(m::AppModel, buf::Buffer, content_area::Rect)
     projs = m.projects_cache
     n = length(projs)
-    w = clamp(40, 24, content_area.width)
+    w = clamp(48, 28, content_area.width)
     h = clamp(n + 4, 6, content_area.height)
     inner = _modal_box(content_area, w, h, "SWITCH PROJECT", buf)
     set_string!(buf, inner.x + 1, inner.y,
-                _short("j/k navigate · Enter select · Esc cancel", inner.width),
+                _short("j/k navigate · Enter select · n new · Esc cancel", inner.width),
                 Style(; fg = col_text_dim()))
     y = inner.y + 2
     maxy = inner.y + inner.height - 1
@@ -361,6 +361,23 @@ function render_project_switch!(m::AppModel, buf::Buffer, content_area::Rect)
         set_string!(buf, inner.x + 1, y, _short(line, inner.width - 1), sty)
         y += 1
     end
+end
+
+# ── Create project (PR-M7; focus-routed name + key like new_sprint) ─────────
+function render_project_create!(m::AppModel, buf::Buffer, content_area::Rect)
+    inner = _modal_box(content_area, clamp(52, 28, content_area.width), 8,
+                       "NEW PROJECT — Tab, Enter create, Esc cancel", buf)
+    x = inner.x + 1; y = inner.y + 1
+    nsty = m.project_name_input.focused ? Style(; fg = col_primary(), bold = true) :
+                                          Style(; fg = col_text_dim())
+    ksty = m.project_key_input.focused  ? Style(; fg = col_primary(), bold = true) :
+                                          Style(; fg = col_text_dim())
+    set_string!(buf, x, y, "Name:", nsty)
+    render(m.project_name_input, Rect(x + 6, y, inner.width - 7, 1), buf); y += 2
+    set_string!(buf, x, y, "Key:", ksty)
+    render(m.project_key_input, Rect(x + 6, y, min(12, inner.width - 7), 1), buf); y += 2
+    set_string!(buf, x, y, _short("Key: 2–8 A-Z0-9, starts with letter (e.g. LINEA)", inner.width),
+                Style(; fg = col_text_muted()))
 end
 
 # ═══════════════════════════ RENDER ═════════════════════════════════════════

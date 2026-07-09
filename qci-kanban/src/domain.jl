@@ -25,6 +25,7 @@ export valid_email, valid_priority, valid_status, valid_sprint_state, valid_noti
 export valid_project_key, valid_work_type
 export can_transition, transition
 export sum_units
+export issues_to_csv
 
 # ── Validators ──────────────────────────────────────────────────────────
 valid_email(s::AbstractString)::Bool = occursin(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s)
@@ -296,3 +297,43 @@ end
 NotificationEvent(; kind::Symbol, recipient_email, actor_name = "", issue_key = "",
                   issue_title = "", detail = "") =
     NotificationEvent(kind, recipient_email, actor_name, issue_key, issue_title, detail)
+
+# ── CSV export (pure; PR-M7 / design §4.9) ────────────────────────────────
+"RFC 4180-style field escape: quote when the value contains comma, quote, or newline."
+function _csv_escape(s::AbstractString)::String
+    t = String(s)
+    if occursin(r"[,\"\r\n]", t)
+        return "\"" * replace(t, "\"" => "\"\"") * "\""
+    end
+    t
+end
+_csv_cell(::Nothing) = ""
+_csv_cell(x::Date) = string(x)
+_csv_cell(x::DateTime) = string(x)
+_csv_cell(x::AbstractVector) = _csv_escape(join(x, "|"))
+_csv_cell(x) = _csv_escape(string(x))
+
+const _CSV_ISSUE_HEADER = "key,title,status,priority,story_points,asset_tag,location,work_type," *
+                          "assignee_id,reporter_id,start_date,due_date,sprint_id,epic_id," *
+                          "labels,project_id,description"
+
+"""
+    issues_to_csv(issues) -> String
+
+Pure CSV serialization of issues (RFC 4180). Header row + one row per issue.
+Nullable fields become empty cells; labels are `|`-joined. No I/O.
+"""
+function issues_to_csv(issues)::String
+    io = IOBuffer()
+    println(io, _CSV_ISSUE_HEADER)
+    for iss in issues
+        cells = (
+            iss.key, iss.title, iss.status, iss.priority, iss.story_points,
+            iss.asset_tag, iss.location, iss.work_type,
+            iss.assignee_id, iss.reporter_id, iss.start_date, iss.due_date,
+            iss.sprint_id, iss.epic_id, iss.labels, iss.project_id, iss.description,
+        )
+        println(io, join(_csv_cell.(cells), ","))
+    end
+    String(take!(io))
+end

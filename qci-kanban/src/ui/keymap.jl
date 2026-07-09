@@ -120,6 +120,7 @@ const KEYMAP = Binding[
     Binding(:backlog, 'v',   :backlog_view_card,   "v",     "Details",      true),
     Binding(:backlog, :enter,:backlog_view_card,   "Enter", "Details",      false),
     Binding(:backlog, 'e',   :backlog_edit_card,   "e",     "Edit",         true),
+    Binding(:backlog, 'E',   :export_csv,          "E",     "Export CSV",   true),
     Binding(:backlog, 'd',   :backlog_delete_card, "d",     "Delete",       true),
 
     # ── Calendar view ──────────────────────────────────────────────────────
@@ -173,13 +174,18 @@ const KEYMAP = Binding[
     Binding(:new_sprint, :enter,  :submit_new_sprint, "Enter", "Create", true),
     Binding(:new_sprint, :escape, :close_card,        "Esc",   "Cancel", true),
 
-    # ── Project switcher modal (PR-M2 minimal; full create UX in PR-M7) ────
-    Binding(:project_switch, 'j',     :project_switch_down,   "j",     "Down",   true),
-    Binding(:project_switch, 'k',     :project_switch_up,     "k",     "Up",     true),
-    Binding(:project_switch, :down,   :project_switch_down,   "↓",     "Down",   false),
-    Binding(:project_switch, :up,     :project_switch_up,     "↑",     "Up",     false),
-    Binding(:project_switch, :enter,  :project_switch_select, "Enter", "Select", true),
-    Binding(:project_switch, :escape, :close_card,            "Esc",   "Cancel", true),
+    # ── Project switcher modal (PR-M7: select + new project) ───────────────
+    Binding(:project_switch, 'j',     :project_switch_down,   "j",     "Down",        true),
+    Binding(:project_switch, 'k',     :project_switch_up,     "k",     "Up",          true),
+    Binding(:project_switch, :down,   :project_switch_down,   "↓",     "Down",        false),
+    Binding(:project_switch, :up,     :project_switch_up,     "↑",     "Up",          false),
+    Binding(:project_switch, :enter,  :project_switch_select, "Enter", "Select",      true),
+    Binding(:project_switch, 'n',     :project_create,        "n",     "New project", true),
+    Binding(:project_switch, :escape, :close_card,            "Esc",   "Cancel",      true),
+
+    # ── Create-project modal (focus-routed name + key) ─────────────────────
+    Binding(:project_create, :enter,  :submit_project_create, "Enter", "Create", true),
+    Binding(:project_create, :escape, :close_project_create,  "Esc",   "Cancel", true),
 ]
 
 const _KEYMAP_INDEX = let d = Dict{Tuple{Symbol,Any},Binding}()
