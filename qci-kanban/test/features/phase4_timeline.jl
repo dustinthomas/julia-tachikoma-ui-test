@@ -191,6 +191,44 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         @test !isempty(periods)
     end
 
+    @testset "Given week/month Gantt When rendered Then axis day numbers have breathing room" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "SpaceBDD")
+        P4.Stores.create_issue!(m.boardstore; title = "Spaced", epic_id = e.id,
+                                start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(5))
+        p4!(m, 'G')
+        # Week
+        p4!(m, 'z')
+        @test m.gantt_scale == :week
+        tbw = T.TestBackend(100, 12); T.reset!(tbw.buf)
+        P4.render_gantt!(m, tbw.buf, T.Rect(1, 1, 100, 12))
+        @test T.find_text(tbw, "[week]") !== nothing
+        aw = T.row_text(tbw, 3)
+        @test aw !== nothing
+        chart_w = aw[min(end, 20):end]
+        @test count(isdigit, chart_w) >= 4
+        @test count(==(' '), chart_w) >= 6
+        # Month
+        p4!(m, 'z')
+        @test m.gantt_scale == :month
+        tbm = T.TestBackend(100, 12); T.reset!(tbm.buf)
+        P4.render_gantt!(m, tbm.buf, T.Rect(1, 1, 100, 12))
+        @test T.find_text(tbm, "[month]") !== nothing
+        am = T.row_text(tbm, 3)
+        @test am !== nothing
+        chart_m = am[min(end, 20):end]
+        @test count(isdigit, chart_m) >= 3
+        @test count(==(' '), chart_m) >= 6
+        # Pure contract: wide week + month ticks leave gaps (not a digit wall)
+        wt = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 1, 60)
+        @test any(begin
+            c0, lab0 = wt[i - 1]; c1 = wt[i][1]
+            c1 > c0 + textwidth(lab0)
+        end for i in 2:length(wt))
+        mt = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 7, 40)
+        @test length(mt) < 40
+    end
+
     @testset "Given an off-window future issue When j selects it Then keep-in-view reveals its bar" begin
         m = p4login()
         e = P4.Stores.create_epic!(m.boardstore; name = "OrientBDD")

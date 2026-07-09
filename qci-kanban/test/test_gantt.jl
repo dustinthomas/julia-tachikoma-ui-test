@@ -152,6 +152,58 @@ end
         @test any(occursin(r"^\d{1,2}$", l[2]) for l in combined30)
         # Month-scale combined still has numeric ticks
         @test any(occursin(r"^\d{1,2}$", l[2]) for l in G4.gantt_axis_labels(ws, 7, 8))
+    end
+
+    @testset "axis ticks leave breathing room on week/month (anti-smoosh pure)" begin
+        # Reconstruct painted axis row from (col, label) ticks (0-based cols).
+        paint(ncols, ticks) = begin
+            row = fill(' ', ncols)
+            for (c, lab) in ticks
+                for (i, ch) in enumerate(collect(lab))
+                    pos = c + i
+                    pos <= ncols && (row[pos] = ch)
+                end
+            end
+            String(row)
+        end
+        has_gap(ticks) = length(ticks) < 2 ? true : any(begin
+            c0, lab0 = ticks[i - 1]
+            c1 = ticks[i][1]
+            c1 > c0 + textwidth(lab0)   # strict blank between labels
+        end for i in 2:length(ticks))
+
+        ws = Date(2026, 3, 10)  # Tue
+        # Week scale uses dpc=1 without the 14-col day cap → wide window.
+        # Labels must not form a solid digit wall (pre-fix: 60/60 digit cells).
+        wticks = G4.gantt_axis_tick_labels(ws, 1, 60; narrow=false)
+        @test length(wticks) >= 8
+        wrow = paint(60, wticks)
+        @test count(isdigit, wrow) < 45
+        @test count(==(' '), wrow) >= 10
+        @test has_gap(wticks)
+        # No overlaps either
+        for i in 2:length(wticks)
+            c0, lab0 = wticks[i - 1]
+            @test wticks[i][1] >= c0 + textwidth(lab0)
+        end
+
+        # Month scale (dpc=7): one number per week-column was a solid wall.
+        mticks = G4.gantt_axis_tick_labels(ws, 7, 40; narrow=false)
+        @test length(mticks) >= 4
+        @test length(mticks) < 40          # not every column labeled
+        mrow = paint(40, mticks)
+        @test count(isdigit, mrow) < 28
+        @test count(==(' '), mrow) >= 8
+        @test has_gap(mticks)
+
+        # Compact day strip stays readable/dense (regression guard for day view).
+        dticks = G4.gantt_axis_tick_labels(ws, 1, 14; narrow=false)
+        dnums = [t[2] for t in dticks if occursin(r"^\d{1,2}$", t[2])]
+        @test length(dnums) >= 7
+    end
+
+    @testset "gantt_issue_span + effective win start (pure helpers)" begin
+        ws = Date(2026, 3, 10)
         # gantt_issue_span: both / start-only / due-only / none
         both = G4.Domain.Issue(; id="1", key="QCI-1", title="Both",
                                start_date=Date(2026,7,1), due_date=Date(2026,7,5))
@@ -172,9 +224,9 @@ end
         # Past selection after keep-in-view: honor reveal start (pad=1 → lo-1 day)
         td = Dates.today()
         past_lo, past_hi = td - Day(60), td - Day(55)
-        rev = G4.gantt_reveal_start(td - Day(1), 1, 14, past_lo, past_hi)
-        @test G4.gantt_effective_win_start(rev, td, 1, 14, (past_lo, past_hi)) == rev
-        @test G4.gantt_bar_in_window(rev, 1, 14, past_lo, past_hi)
+        rev_start = G4.gantt_reveal_start(td - Day(1), 1, 14, past_lo, past_hi)
+        @test G4.gantt_effective_win_start(rev_start, td, 1, 14, (past_lo, past_hi)) == rev_start
+        @test G4.gantt_bar_in_window(rev_start, 1, 14, past_lo, past_hi)
         # Init-style earliest far past without reveal alignment still clamps near today
         earliest = past_lo
         @test G4.gantt_effective_win_start(earliest, td, 1, 14, (past_lo, past_hi)) == td - Day(1)
@@ -634,6 +686,39 @@ end
         @test T.find_text(tbw, "[week]") !== nothing
         axis_w = T.row_text(tbw, 3)
         @test axis_w !== nothing && count(isdigit, axis_w) >= 8
+    end
+
+    @testset "week/month axis numbers not smooshed (TestBackend breathing room)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "Breath")
+        G4.Stores.create_issue!(m.boardstore; title = "Near", epic_id = e.id,
+                                start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(6))
+        g4!(m, 'G')
+        # Week filter: wide chart, day-of-month ticks must leave blank cells (not a digit wall).
+        g4!(m, 'z')
+        @test m.gantt_scale == :week
+        tbw = gantt_render(m; w = 100, h = 12)
+        @test T.find_text(tbw, "[week]") !== nothing
+        axis_w = T.row_text(tbw, 3)
+        @test axis_w !== nothing
+        # Still informative…
+        @test count(isdigit, axis_w) >= 6
+        # …but not solid: blank cells in the chart portion of the axis row.
+        # Left gutter holds labels; chart starts after ~14–24 cols. Require spaces among digits.
+        chartish = axis_w[min(end, 20):end]
+        @test count(==(' '), chartish) >= 6
+        @test count(isdigit, chartish) < length(chartish) - 4
+        # Month filter: same anti-smoosh contract on dpc=7 week columns.
+        g4!(m, 'z')
+        @test m.gantt_scale == :month
+        tbm = gantt_render(m; w = 100, h = 12)
+        @test T.find_text(tbm, "[month]") !== nothing
+        axis_m = T.row_text(tbm, 3)
+        @test axis_m !== nothing
+        @test count(isdigit, axis_m) >= 3
+        chartish_m = axis_m[min(end, 20):end]
+        @test count(==(' '), chartish_m) >= 6
+        @test count(isdigit, chartish_m) < length(chartish_m) - 4
     end
 
     @testset "overhaul: j/k keep-in-view brings off-window selection bar into chart" begin

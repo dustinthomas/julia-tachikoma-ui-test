@@ -142,24 +142,30 @@ end
 """
     gantt_axis_tick_labels(win_start, dpc, ncols; narrow=false) -> Vector{Tuple{Int,String}}
 
-Numeric day/period ticks with non-overlapping pack:
-- dpc == 1 (day/week): day-of-month digits; 1-digit days on every col, 2-digit
-  labels reserve 2 cols so neighbors do not mash. Narrow + wide windows thin to
-  every 2nd column when ncols > 20.
-- dpc >= 2 (month): day-of-month of each period column start (usually 1 cell).
+Numeric day/period ticks with non-overlapping pack and breathing room:
+- dpc == 1 + compact window (ncols ≤ 16, day view strip): dense pack (step = label
+  width) so ~14-day zoom stays informative.
+- dpc == 1 + wider window (week scale uses full terminal width): leave 1–2 blank
+  columns between labels so day numbers read as separated groups, not a digit wall.
+- dpc >= 2 (month, one col ≈ one week): day-of-month of each period start, with
+  at least one blank column between labels (2-digit days never mash into neighbors).
 """
 function gantt_axis_tick_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)::Vector{Tuple{Int,String}}
     out = Tuple{Int,String}[]
     ncols <= 0 && return out
-    if dpc >= 2
-        for c in 0:(ncols-1)
-            d = gantt_date_for_col(win_start, dpc, c)
-            push!(out, (c, string(Dates.day(d))))
-        end
-        return out
+    # Breathing room between tick starts (beyond label width):
+    # day strip = 0; medium/narrow week = 1; very wide week or month = 2/1.
+    min_gap = if dpc >= 2
+        1
+    elseif ncols <= 16
+        0
+    elseif ncols <= 36 || narrow
+        1
+    else
+        2
     end
-    # dpc == 1: pack day numbers without overlap
-    thin = narrow && ncols > 20
+    # On very wide day/week charts, also cap density (≈1 label / 3 cols).
+    min_step = (dpc == 1 && ncols > 40) ? 3 : 1
     c = 0
     while c < ncols
         d = gantt_date_for_col(win_start, dpc, c)
@@ -171,7 +177,7 @@ function gantt_axis_tick_labels(win_start::Date, dpc::Int, ncols::Int; narrow::B
             w = 1
         end
         push!(out, (c, lab))
-        step = thin ? max(2, w) : w
+        step = max(w + min_gap, min_step)
         c += max(1, step)
     end
     out
