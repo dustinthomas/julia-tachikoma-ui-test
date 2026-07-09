@@ -120,7 +120,7 @@ end
 
 @testset "Stores: SQLite board store CRUD" begin
     bs = S.SQLiteBoardStore(":memory:")
-    @test S.board_schema_version(bs) == 6
+    @test S.board_schema_version(bs) == 7
     @testset "issues" begin
         i = S.create_issue!(bs; title = "First", status = "Backlog", priority = "High")
         @test startswith(i.key, "QCI-") && i.position == 0
@@ -606,7 +606,7 @@ end
         SQLite.close(raw)
 
         bs = S.SQLiteBoardStore(path)
-        @test S.board_schema_version(bs) == 6
+        @test S.board_schema_version(bs) == 7
         projs = S.list_projects(bs)
         @test length(projs) == 1 && projs[1].key == "QCI" && projs[1].name == "Default"
         pid = projs[1].id
@@ -628,7 +628,7 @@ end
         # re-open store: v6 is idempotent (still one metrics row)
         S.close!(bs)
         bs2 = S.SQLiteBoardStore(path)
-        @test S.board_schema_version(bs2) == 6
+        @test S.board_schema_version(bs2) == 7
         @test length(S.list_sprint_metrics(bs2; project_id = pid)) == 1
         # create under a new project after migrate
         p2 = S.create_project!(bs2; key = "CAPEX", name = "Capex")
