@@ -301,6 +301,11 @@ function board_schema_version(store::RemoteBoardStore)::Int
     Int(something(_get(rows[1], "v"), 0))
 end
 
+# Note: `key=` / `position=` are FakeExec/test ergonomics (pre-existing remote
+# convenience). SQLite always generates `{project_key}-n` keys and appends
+# position. App code must omit them so keys stay project-scoped; an explicit
+# `key="QCI-9"` with `project_id=la` is allowed but not validated against
+# `pkey` (no prefix assert in MVP). Same for `create_epic!(…; key=)`.
 function create_issue!(store::RemoteBoardStore; title::AbstractString, description::AbstractString = "",
                        status::AbstractString = "Backlog", priority::AbstractString = "Medium",
                        story_points::Union{Int,Nothing} = nothing,
@@ -429,6 +434,7 @@ rank_issue!(store::RemoteBoardStore, id::AbstractString; position::Integer) =
     move_issue!(store, id; position = position)
 
 # ── Epics ─────────────────────────────────────────────────────────────────
+# `key=` override is FakeExec/test-only (see create_issue! note above).
 function create_epic!(store::RemoteBoardStore; name::AbstractString, color::AbstractString = "violet",
                       key::Union{AbstractString,Nothing} = nothing,
                       project_id::Union{AbstractString,Nothing} = nothing)::Epic

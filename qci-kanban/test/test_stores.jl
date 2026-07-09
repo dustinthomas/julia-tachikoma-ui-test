@@ -529,7 +529,9 @@ function _with_projects(inner = (s, p) -> Dict{String,Any}[];
             pid = String(params[1])
             return haskey(projects, pid) ? [copy(projects[pid])] : Dict{String,Any}[]
         elseif occursin("FROM projects WHERE archived = 0", s)
-            return [copy(d) for d in values(projects) if !(d["archived"] in (1, true))]
+            # Match production `ORDER BY key` (include-archived path already sorted).
+            rows = [copy(d) for d in values(projects) if !(d["archived"] in (1, true))]
+            return sort(rows; by = d -> String(d["key"]))
         elseif occursin("FROM projects ORDER BY key", s)
             return [copy(d) for d in sort(collect(values(projects)); by = d -> String(d["key"]))]
         elseif occursin("INSERT INTO projects", s)
@@ -784,10 +786,14 @@ end
                 return [Dict{String,Any}("key" => d["key"]) for d in values(epics)]
             elseif occursin("COUNT(*) AS c FROM issues", s)
                 return [Dict{String,Any}("c" => count(d -> d["status"] == p[1], values(issues)))]
-            elseif occursin("FROM sprints WHERE project_id", s) && occursin("state = 'active'", s)
+            # Filtered active: production uses `state = 'active' AND project_id = $1`
+            # (archive check uses `project_id = $1 AND state = 'active'`). Both put
+            # project_id as $1. Match before the bare unfiltered active query.
+            elseif occursin("state = 'active'", s) && occursin("project_id", s)
                 rows = [copy(d) for d in values(sprints) if d["project_id"] == p[1] && d["state"] == "active"]
                 return isempty(rows) ? Dict{String,Any}[] : [first(rows)]
-            elseif occursin("FROM sprints WHERE state = 'active'", s)
+            elseif occursin("FROM sprints WHERE state = 'active'", s) ||
+                   (occursin("state = 'active'", s) && occursin("FROM sprints", s))
                 rows = [copy(d) for d in values(sprints) if d["state"] == "active"]
                 return isempty(rows) ? Dict{String,Any}[] : [first(rows)]
             elseif occursin("SELECT * FROM sprints WHERE id", s)
@@ -808,6 +814,8 @@ end
                 return [copy(d) for d in values(issues) if d["project_id"] == p[1]]
             elseif occursin("SELECT * FROM issues", s)
                 return [copy(d) for d in values(issues)]
+            elseif occursin("SELECT * FROM epics WHERE id", s)
+                return haskey(epics, String(p[1])) ? [copy(epics[String(p[1])])] : Dict{String,Any}[]
             elseif occursin("SELECT * FROM epics WHERE project_id", s)
                 return [copy(d) for d in values(epics) if d["project_id"] == p[1]]
             elseif occursin("SELECT * FROM epics", s)
@@ -832,6 +840,8 @@ end
         la = S.create_project!(bs; key = "LA", name = "Line A", description = "site", color = "teal")
         @test la.key == "LA" && la.name == "Line A" && !la.archived
         @test length(S.list_projects(bs)) == 2
+        # list_projects ORDER BY key (non-archived harness sorts)
+        @test [p.key for p in S.list_projects(bs)] == ["LA", "QCI"]
         @test_throws ArgumentError S.create_project!(bs; key = "LA", name = "Dup")
         @test_throws ArgumentError S.create_project!(bs; key = "bad", name = "X")
         @test_throws ArgumentError S.create_project!(bs; key = "OK", name = "  ")
@@ -861,15 +871,53 @@ end
         @test startswith(k1, "LA-") && startswith(k2, "LA-")
         @test parse(Int, split(k2, '-')[end]) == parse(Int, split(k1, '-')[end]) + 1
 
+        # filtered active_sprint: production SQL is
+        # `WHERE state = 'active' AND project_id = $1` — harness must not fall through
+        # to the unfiltered active branch. Seed two actives directly (PR-M1 still
+        # enforces global single-active via start_sprint!, so API can't dual-start).
+        sprints["s-def-act"] = Dict{String,Any}("id" => "s-def-act", "name" => "DefWin",
+            "goal" => "", "state" => "active", "project_id" => def.id)
+        sprints["s-la-act"] = Dict{String,Any}("id" => "s-la-act", "name" => "LAWin",
+            "goal" => "", "state" => "active", "project_id" => la.id)
+        @test S.active_sprint(bs; project_id = la.id).id == "s-la-act"
+        @test S.active_sprint(bs; project_id = def.id).id == "s-def-act"
+        # cleanup seeded actives so archive_project! on LA is not blocked by s-la-act
+        delete!(sprints, "s-def-act"); delete!(sprints, "s-la-act")
+
         S.start_sprint!(bs, sp.id)
         @test_throws ArgumentError S.archive_project!(bs, la.id)  # active sprint blocks
         S.close_sprint!(bs, sp.id)
+        # create entities on LA before archive for write-guard tests (SQLite parity)
+        sp2 = S.create_sprint!(bs; name = "Win2", project_id = la.id)
+        i_la_upd = S.create_issue!(bs; title = "upd target", project_id = la.id)
+        e_la_upd = S.create_epic!(bs; name = "ArchEpic", project_id = la.id)
+        lbl_la = S.create_label!(bs; name = "LArch", project_id = la.id)
         arch = S.archive_project!(bs, la.id)
         @test arch.archived
         @test length(S.list_projects(bs)) == 1
         @test length(S.list_projects(bs; include_archived = true)) == 2
         @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id)
         @test_throws ArgumentError S.archive_project!(bs, "missing")
+        # archive write guards (mirror SQLite Issue 2 / Issue 8)
+        @test_throws ArgumentError S.update_issue!(bs, i_la_upd.id; title = "nope")
+        @test_throws ArgumentError S.start_sprint!(bs, sp2.id)
+        @test_throws ArgumentError S.move_issue!(bs, i_la_upd.id; status = "To Do")
+        @test_throws ArgumentError S.rank_issue!(bs, i_la_upd.id; position = 0)
+        @test_throws ArgumentError S.delete_issue!(bs, i_la_upd.id)
+        @test_throws ArgumentError S.set_labels!(bs, i_la_upd.id, [lbl_la.id])
+        @test_throws ArgumentError S.update_epic!(bs, e_la_upd.id; name = "nope")
+        @test_throws ArgumentError S.update_sprint!(bs, sp2.id; name = "nope")
+        @test_throws ArgumentError S.delete_epic!(bs, e_la_upd.id)
+
+        # Default archived: omit / empty project_id creates throw; other project works
+        other = S.create_project!(bs; key = "LINE2", name = "Line 2")
+        S.archive_project!(bs, def.id)
+        @test_throws ArgumentError S.create_issue!(bs; title = "into archived default")
+        @test_throws ArgumentError S.create_issue!(bs; title = "empty str", project_id = "")
+        @test_throws ArgumentError S.create_epic!(bs; name = "into archived default")
+        @test_throws ArgumentError S.create_sprint!(bs; name = "into archived default")
+        ok = S.create_issue!(bs; title = "on LINE2", project_id = other.id)
+        @test ok.project_id == other.id && startswith(ok.key, "LINE2-")
     end
 end
 
