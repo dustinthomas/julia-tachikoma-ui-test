@@ -256,6 +256,11 @@ function migrate_board_schema!(db::SQLite.DB)::Int
         v = 5
     end
 
+    # BOARD_SCHEMA_TARGET is the highest version this migrator applies (PR-M1 = 5;
+    # PR-M4 will raise the target when it registers v6). Allow v > target if a
+    # newer migrator already ran on this file.
+    v < BOARD_SCHEMA_TARGET &&
+        error("board schema migration incomplete: version $v < $BOARD_SCHEMA_TARGET")
     v
 end
 
@@ -320,7 +325,13 @@ end
 
 # ═══════════════════════════ BOARD STORE ══════════════════════════════════
 _str_or_empty(x) = (x === missing || x === nothing) ? "" : String(x)
-_str_or_nothing(x) = (x === missing || x === nothing) ? nothing : String(x)
+
+# List filters: `nothing` *and* empty string mean unfiltered (same as create's
+# "omit → Default" empty-string handling on the write path, but lists do not
+# invent a Default filter).
+_norm_project_filter(project_id::Nothing) = nothing
+_norm_project_filter(project_id::AbstractString) =
+    isempty(String(project_id)) ? nothing : String(project_id)
 
 function _project_from(r, i)::Project
     color = _str_or_empty(r.color[i])
@@ -346,17 +357,15 @@ function _issue_from(r, i)::Issue
           project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing))
 end
 
-# C10: bump a monotonic per-prefix counter. On first use the counter seeds from
-# the current MAX (so it never collides with pre-existing rows), then only ever
-# increases — deleting the highest-numbered issue can never recycle its key.
+# C10: bump a monotonic per-prefix counter. Seeds from max(stored key_seq,
+# existing_max, 99) so a stale key_seq.last below the true row MAX cannot
+# collide; then only ever increases — deleted numbers are never recycled.
 function _next_seq!(db, prefix::AbstractString, existing_max::Union{Nothing,Missing,Integer})::Int
     row = _query(db, "SELECT last FROM key_seq WHERE prefix = ? LIMIT 1", [prefix])
-    last = if isempty(row.last)
-        emax = (existing_max === nothing || existing_max === missing) ? 99 : Int(existing_max)
-        max(99, emax)   # base is 100 → base-1 == 99
-    else
-        Int(row.last[1])
-    end
+    emax = (existing_max === nothing || existing_max === missing) ? nothing : Int(existing_max)
+    stored = isempty(row.last) ? nothing : Int(row.last[1])
+    # base is 100 → floor 99; always honour row MAX when provided.
+    last = max(99, something(stored, 99), something(emax, 99))
     n = last + 1
     _exec(db, """
         INSERT INTO key_seq (prefix, last) VALUES (?, ?)
@@ -457,6 +466,8 @@ end
 function _resolve_project_id(db::SQLite.DB, project_id::Union{AbstractString,Nothing})::Tuple{String,String}
     if project_id === nothing || isempty(String(project_id))
         p = _default_project(db)
+        # Archive semantics apply to Default too — omit/empty must not bypass.
+        p.archived && throw(ArgumentError("project is archived: $(p.id)"))
         return (p.id, p.key)
     end
     r = _query(db, "SELECT * FROM projects WHERE id = ? LIMIT 1", [project_id])
@@ -464,6 +475,15 @@ function _resolve_project_id(db::SQLite.DB, project_id::Union{AbstractString,Not
     p = _project_from(r, 1)
     p.archived && throw(ArgumentError("project is archived: $project_id"))
     (p.id, p.key)
+end
+
+"""Throw if `project_id` names an archived project (no-op for empty/missing id)."""
+function _assert_project_writable!(store::SQLiteBoardStore, project_id::AbstractString)
+    isempty(project_id) && return nothing
+    p = get_project(store, project_id)
+    p === nothing && return nothing
+    p.archived && throw(ArgumentError("project is archived: $project_id"))
+    nothing
 end
 
 function create_issue!(store::SQLiteBoardStore; title::AbstractString, description::AbstractString = "",
@@ -516,6 +536,7 @@ end
 function list_issues(store::SQLiteBoardStore;
                      status::Union{AbstractString,Nothing} = nothing,
                      project_id::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
+    project_id = _norm_project_filter(project_id)
     r = if project_id === nothing && status === nothing
         _query(store.db, "SELECT * FROM issues ORDER BY status, position, key")
     elseif project_id === nothing
@@ -535,6 +556,9 @@ const _ISSUE_UPDATE_FIELDS = (:title, :description, :status, :priority, :story_p
     :epic_id, :sprint_id, :assignee_id, :reporter_id, :start_date, :due_date, :position)
 
 function update_issue!(store::SQLiteBoardStore, id::AbstractString; kwargs...)
+    # Archive write guard (design § archive semantics): block updates on archived projects.
+    iss0 = get_issue(store, id)
+    iss0 !== nothing && _assert_project_writable!(store, iss0.project_id)
     move_status = nothing; move_pos = nothing
     fields = String[]; vals = Any[]
     for (k, v) in kwargs
@@ -645,6 +669,7 @@ function get_epic(store::SQLiteBoardStore, id::AbstractString)
 end
 function list_epics(store::SQLiteBoardStore;
                     project_id::Union{AbstractString,Nothing} = nothing)::Vector{Epic}
+    project_id = _norm_project_filter(project_id)
     r = project_id === nothing ?
         _query(store.db, "SELECT * FROM epics ORDER BY key") :
         _query(store.db, "SELECT * FROM epics WHERE project_id = ? ORDER BY key", [project_id])
@@ -690,6 +715,7 @@ function get_sprint(store::SQLiteBoardStore, id::AbstractString)
 end
 function list_sprints(store::SQLiteBoardStore;
                       project_id::Union{AbstractString,Nothing} = nothing)::Vector{Sprint}
+    project_id = _norm_project_filter(project_id)
     r = project_id === nothing ?
         _query(store.db, "SELECT * FROM sprints ORDER BY name") :
         _query(store.db, "SELECT * FROM sprints WHERE project_id = ? ORDER BY name", [project_id])
@@ -721,6 +747,8 @@ function start_sprint!(store::SQLiteBoardStore, id::AbstractString)::Sprint
     SQLite.transaction(store.db) do
         s = get_sprint(store, id)
         s === nothing && throw(ArgumentError("no such sprint: $id"))
+        # Archive write guard: cannot start a planning window on an archived project.
+        _assert_project_writable!(store, s.project_id)
         active_sprint(store) === nothing || throw(ArgumentError("another sprint is already active"))
         s2 = transition(s, :active)
         _exec(store.db, "UPDATE sprints SET state = 'active' WHERE id = ? AND state = 'future'", [id])
@@ -740,6 +768,7 @@ end
 function active_sprint(store::SQLiteBoardStore;
                        project_id::Union{AbstractString,Nothing} = nothing)
     # PR-M1: optional project_id filter; without kw stays global (compat).
+    project_id = _norm_project_filter(project_id)
     r = project_id === nothing ?
         _query(store.db, "SELECT * FROM sprints WHERE state = 'active' ORDER BY name, id LIMIT 1") :
         _query(store.db,
@@ -760,6 +789,7 @@ function create_label!(store::SQLiteBoardStore; name::AbstractString, color::Abs
 end
 function list_labels(store::SQLiteBoardStore;
                      project_id::Union{AbstractString,Nothing} = nothing)::Vector{Label}
+    project_id = _norm_project_filter(project_id)
     r = project_id === nothing ?
         _query(store.db, "SELECT * FROM labels ORDER BY name") :
         _query(store.db, "SELECT * FROM labels WHERE project_id = ? ORDER BY name", [project_id])
@@ -818,6 +848,7 @@ function issues_for_sprint(store::SQLiteBoardStore, sprint_id::AbstractString)::
 end
 function backlog_issues(store::SQLiteBoardStore;
                         project_id::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
+    project_id = _norm_project_filter(project_id)
     r = project_id === nothing ?
         _query(store.db, "SELECT * FROM issues WHERE sprint_id IS NULL ORDER BY status, position, key") :
         _query(store.db,

@@ -23,6 +23,8 @@ export pg_placeholders, pg_conninfo
 struct RemoteUserStore <: AbstractUserStore
     exec::Any
 end
+# Project CRUD + optional `project_id` kwargs are SQLite-first (PR-M1).
+# RemoteBoardStore parity (project table, project_id columns, kwargs) is PR-M1b.
 struct RemoteBoardStore <: AbstractBoardStore
     exec::Any
 end

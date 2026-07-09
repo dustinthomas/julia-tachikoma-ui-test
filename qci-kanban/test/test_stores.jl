@@ -355,16 +355,56 @@ end
     k2 = S.create_issue!(bs; title = "k2", project_id = la.id).key
     n1 = parse(Int, split(k1, '-')[end]); n2 = parse(Int, split(k2, '-')[end])
     @test n2 == n1 + 1
+
+    # empty-string list filter ≡ unfiltered (same footgun as something(id, ""))
+    @test length(S.list_issues(bs; project_id = "")) == length(S.list_issues(bs))
+    @test length(S.list_epics(bs; project_id = "")) == length(S.list_epics(bs))
+    @test length(S.list_sprints(bs; project_id = "")) == length(S.list_sprints(bs))
+    @test length(S.list_labels(bs; project_id = "")) == length(S.list_labels(bs))
+    @test length(S.backlog_issues(bs; project_id = "")) == length(S.backlog_issues(bs))
+
     # archive
     @test_throws ArgumentError S.archive_project!(bs, "missing")
     S.start_sprint!(bs, sp.id)
     @test_throws ArgumentError S.archive_project!(bs, la.id)  # active sprint blocks
     S.close_sprint!(bs, sp.id)
+    # create a fresh future sprint on LA before archive for start_sprint! guard test
+    sp2 = S.create_sprint!(bs; name = "Win2", project_id = la.id)
+    i_la_upd = S.create_issue!(bs; title = "upd target", project_id = la.id)
     arch = S.archive_project!(bs, la.id)
     @test arch.archived
     @test length(S.list_projects(bs)) == 1  # Default only
     @test length(S.list_projects(bs; include_archived = true)) == 2
     @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id)  # archived
+    # update_issue! / start_sprint! blocked on archived project (Issue 2)
+    @test_throws ArgumentError S.update_issue!(bs, i_la_upd.id; title = "nope")
+    @test_throws ArgumentError S.start_sprint!(bs, sp2.id)
+
+    # Default path also respects archive (Issue 1): omit project_id after archiving Default
+    # Keep LA archived; create a replacement writable project first, then archive Default.
+    other = S.create_project!(bs; key = "LINE2", name = "Line 2")
+    S.archive_project!(bs, def.id)
+    @test_throws ArgumentError S.create_issue!(bs; title = "into archived default")
+    @test_throws ArgumentError S.create_issue!(bs; title = "empty str", project_id = "")
+    # explicit other still works
+    ok = S.create_issue!(bs; title = "on LINE2", project_id = other.id)
+    @test ok.project_id == other.id && startswith(ok.key, "LINE2-")
+end
+
+@testset "Stores: _next_seq! honours row MAX over stale key_seq" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    def = only(S.list_projects(bs))
+    # Insert a high-numbered legacy-style issue and seed key_seq artificially low.
+    now = string(Dates.now(UTC))
+    DBInterface.execute(bs.db,
+        "INSERT INTO issues (id, key, title, description, status, priority, position, created, updated, project_id)
+         VALUES ('hi', 'QCI-250', 'High', '', 'Backlog', 'Medium', 0, ?, ?, ?)",
+        [now, now, def.id])
+    DBInterface.execute(bs.db,
+        "INSERT INTO key_seq (prefix, last) VALUES ('QCI', 50)
+         ON CONFLICT(prefix) DO UPDATE SET last = 50")
+    nxt = S.create_issue!(bs; title = "after stale seq")
+    @test nxt.key == "QCI-251"  # max(stored=50, row_max=250, 99)+1
 end
 
 @testset "Stores: on-disk pre-v1 migration fixture → v5" begin
