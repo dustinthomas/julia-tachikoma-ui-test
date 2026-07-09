@@ -1,12 +1,13 @@
 # ═══════════════════════════════════════════════════════════════════════
-# gfx/charts.jl — Phase 5 board stats strip + sprint burndown.
+# gfx/charts.jl — Phase 5 board stats strip + sprint burndown + velocity.
 #
 #   • Board stats strip (toggle with `t`): per-column issue counts as a
 #     Sparkline + a WIP Gauge for the In Progress column. Rendered at the top
 #     of the board view.
-#   • Sprint burndown (backlog view footer): `burndown_series` is a PURE
-#     function computing (ideal, remaining) unit series across the sprint
-#     window; `render_burndown!` draws the remaining series as a Sparkline.
+#   • Sprint burndown (backlog view footer when a window is active): pure
+#     `burndown_series` + `render_burndown!` Sparkline.
+#   • Velocity spark (backlog footer when no active window): pure
+#     `velocity_series` over last ≤8 closed `sprint_metrics` rows + avg line.
 #
 # The WIP Gauge is passed `tick=m.tick` so it shimmers when animations are on;
 # with animations off it renders identically (Tachikoma gates the shimmer).
@@ -120,4 +121,67 @@ function render_burndown!(m::AppModel, buf::Buffer, area::Rect)
                    max_val = max(1.0, Float64(series.total)))
     render(sp, Rect(area.x, area.y + 1, area.width, max(1, area.height - 1)), buf)
     area.height
+end
+
+# ── Velocity (closed-window throughput) ────────────────────────────────────
+"""
+    velocity_series(metrics; unit=:points) -> Vector{Float64}
+
+Pure chronological series from `SprintMetrics` rows. When `unit == :points`
+uses `completed_units`; when `unit == :count` uses `completed_count`. Does
+**not** filter by `unit_kind` — both numbers are always on the row.
+"""
+function velocity_series(metrics; unit::Symbol = :points)::Vector{Float64}
+    unit === :count ?
+        Float64[Float64(m.completed_count) for m in metrics] :
+        Float64[Float64(m.completed_units) for m in metrics]
+end
+
+"Active dated sprint only (no fallback to future/closed) for footer choice."
+function _active_dated_sprint(m::AppModel)
+    asp = Stores.active_sprint(m.boardstore; project_id = _scope(m))
+    (asp !== nothing && asp.start_date !== nothing && asp.end_date !== nothing) ?
+        asp : nothing
+end
+
+"""
+    render_velocity!(m, buf, area) -> Int
+
+Render last ≤8 closed-window velocity spark + avg for the active project.
+Returns rows used (`0` when the area is too small).
+"""
+function render_velocity!(m::AppModel, buf::Buffer, area::Rect)
+    (area.width < 12 || area.height < 2) && return 0
+    metrics = Stores.list_sprint_metrics(m.boardstore; project_id = _scope(m), limit = 8)
+    unit = m.config.velocity_unit
+    series = velocity_series(metrics; unit = unit)
+    if isempty(series)
+        set_string!(buf, area.x, area.y,
+                    _short("VELOCITY — no closed windows yet", area.width),
+                    Style(; fg = col_text_dim()))
+        return area.height
+    end
+    avg = sum(series) / length(series)
+    avg_i = round(Int, avg)
+    unit_tag = unit === :count ? "issues" : "pts"
+    hdr = "VEL avg=$(avg_i) $(unit_tag) (n=$(length(series)))"
+    set_string!(buf, area.x, area.y, _short(hdr, area.width),
+                Style(; fg = col_primary(), bold = true))
+    mx = max(1.0, maximum(series))
+    sp = Sparkline(series; style = Style(; fg = col_primary_hi()), max_val = mx)
+    render(sp, Rect(area.x, area.y + 1, area.width, max(1, area.height - 1)), buf)
+    area.height
+end
+
+"""
+    render_backlog_footer!(m, buf, area) -> Int
+
+Backlog bottom strip: active dated sprint → burndown; else velocity spark of
+recent closed windows for the active project.
+"""
+function render_backlog_footer!(m::AppModel, buf::Buffer, area::Rect)
+    if _active_dated_sprint(m) !== nothing
+        return render_burndown!(m, buf, area)
+    end
+    render_velocity!(m, buf, area)
 end

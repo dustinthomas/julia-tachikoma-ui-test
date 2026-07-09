@@ -152,14 +152,53 @@ end
         @test s1.ideal[1] == 4.0 && s1.ideal[end] == 0.0
     end
 
-    @testset "backlog view renders a burndown footer for the seeded sprint" begin
+    @testset "velocity_series is pure chronological completed units/counts" begin
+        t0 = DateTime(2026, 1, 1)
+        mets = [
+            Q.Domain.SprintMetrics(; sprint_id = "a", project_id = "p",
+                                   completed_units = 5, completed_count = 2, closed_at = t0),
+            Q.Domain.SprintMetrics(; sprint_id = "b", project_id = "p",
+                                   completed_units = 8, completed_count = 3,
+                                   closed_at = t0 + Day(7)),
+        ]
+        @test Q.velocity_series(mets; unit = :points) == Float64[5, 8]
+        @test Q.velocity_series(mets; unit = :count) == Float64[2, 3]
+        @test Q.velocity_series(Q.Domain.SprintMetrics[]; unit = :points) == Float64[]
+        # unit_kind on rows is ignored for series pick
+        mets2 = [Q.Domain.SprintMetrics(; sprint_id = "c", project_id = "p",
+                                        completed_units = 10, completed_count = 4,
+                                        unit_kind = :count)]
+        @test Q.velocity_series(mets2; unit = :points) == Float64[10]
+        @test Q.velocity_series(mets2; unit = :count) == Float64[4]
+    end
+
+    @testset "backlog footer: burndown when sprint active; velocity when closed" begin
         m = gfx_model()
         T.update!(m, T.KeyEvent('C'))          # leave board (K = rank-up there)
         T.update!(m, T.KeyEvent('K'))          # backlog view
         @test m.view == :backlog
-        tb = app_tb(m; w = 90, h = 26)
-        @test T.find_text(tb, "BURNDOWN") !== nothing
-        @test T.find_text(tb, "Sprint 1") !== nothing   # list still present
+        # Seeded Sprint 1 is future → no active window → velocity empty state
+        tb0 = app_tb(m; w = 90, h = 26)
+        @test T.find_text(tb0, "VELOCITY") !== nothing || T.find_text(tb0, "VEL") !== nothing
+        @test T.find_text(tb0, "Sprint 1") !== nothing   # list still present
+
+        # Start sprint → burndown footer
+        T.update!(m, T.KeyEvent('S'))
+        tb1 = app_tb(m; w = 90, h = 26)
+        @test T.find_text(tb1, "BURNDOWN") !== nothing
+        @test T.find_text(tb1, "Sprint 1") !== nothing
+
+        # Close sprint → velocity spark with avg line
+        sissues = Q.Stores.issues_for_sprint(m.boardstore,
+            Q.Stores.active_sprint(m.boardstore; project_id = m.active_project_id).id)
+        for iss in sissues
+            Q.Stores.move_issue!(m.boardstore, iss.id; status = "Done")
+        end
+        T.update!(m, T.KeyEvent('X'))
+        T.update!(m, T.KeyEvent('y'))
+        tb2 = app_tb(m; w = 90, h = 26)
+        @test T.find_text(tb2, "VEL") !== nothing
+        @test T.find_text(tb2, "avg=") !== nothing || any(occursin("avg=", r) for r in app_rows(m; w = 90, h = 26))
     end
 
     @testset "render_burndown! no-ops when no dated sprint exists" begin
@@ -170,6 +209,9 @@ end
         # a date-less sprint is skipped (loop iterates, still falls through to nothing)
         Q.Stores.create_sprint!(m.boardstore; name = "No Dates")
         @test Q._burndown_sprint(m) === nothing
+        # velocity empty-state still draws a footer line
+        @test Q.render_velocity!(m, T.TestBackend(60, 8).buf, T.Rect(1, 1, 40, 3)) > 0
+        @test Q.render_velocity!(m, T.TestBackend(60, 8).buf, T.Rect(1, 1, 8, 1)) == 0
     end
 
     @testset "keymap: `t` → :toggle_stats, surfaced in board help" begin

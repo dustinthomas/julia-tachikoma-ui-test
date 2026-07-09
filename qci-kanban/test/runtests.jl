@@ -68,6 +68,8 @@ include("features/multi_project.jl")
 
 # Production seed controls (PR-M3): seed_demo config, ops labels, empty board.
 include("features/seed_config.jl")
+# Velocity / sprint metrics (PR-M4): close snapshots + backlog velocity footer.
+include("features/velocity.jl")
 
 # Phase 4 — Calendar + Gantt: month grid, due marks, drill-down; timeline bars.
 include("test_calendar_view.jl")

@@ -79,6 +79,25 @@ const D = QciKanban.Domain
         @test_throws ArgumentError D.Comment(; id = "c", issue_id = "i", author_id = "u", body = "")
     end
 
+    @testset "SprintMetrics + sum_units" begin
+        sm = D.SprintMetrics(; sprint_id = "s1", project_id = "p1",
+                             planned_units = 13, completed_units = 8,
+                             completed_count = 2, incomplete_count = 1)
+        @test sm.unit_kind == :points && sm.planned_units == 13
+        @test sm.completed_count == 2 && sm.incomplete_count == 1
+        @test_throws ArgumentError D.SprintMetrics(; sprint_id = "s", project_id = "p",
+                                                   planned_units = -1)
+        @test_throws ArgumentError D.SprintMetrics(; sprint_id = "s", project_id = "p",
+                                                   unit_kind = :hours)
+        iss = [
+            D.Issue(; id = "1", key = "QCI-1", title = "a", story_points = 5),
+            D.Issue(; id = "2", key = "QCI-2", title = "b", story_points = nothing),
+            D.Issue(; id = "3", key = "QCI-3", title = "c", story_points = 3),
+        ]
+        @test D.sum_units(iss) == 8
+        @test D.sum_units(D.Issue[]) == 0
+    end
+
     @testset "ActivityEvent" begin
         a = D.ActivityEvent(; id = "a1", issue_id = "i1", kind = :created)
         @test a.actor_id === nothing && a.detail == ""

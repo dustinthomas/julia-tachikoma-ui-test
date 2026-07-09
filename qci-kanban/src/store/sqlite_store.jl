@@ -78,7 +78,7 @@ end
 # safe because only Default has data right after migrate.
 const DEFAULT_PROJECT_KEY = "QCI"
 const DEFAULT_PROJECT_NAME = "Default"
-const BOARD_SCHEMA_TARGET = 5   # PR-M1 stops at v5; v6 (metrics backfill) is PR-M4
+const BOARD_SCHEMA_TARGET = 6   # PR-M4: v6 sprint_metrics historical backfill
 
 function init_board_schema!(db::SQLite.DB)
     _exec(db, """
@@ -162,8 +162,9 @@ end
 """
     migrate_board_schema!(db) -> Int
 
-Apply board migrations v1–v5 (transaction per version). Returns the version after
-migrate. Does **not** run v6 (sprint_metrics backfill — owned by PR-M4).
+Apply board migrations v1–v6 (transaction per version). Returns the version after
+migrate. v6 is a best-effort `sprint_metrics` backfill for historically closed
+sprints (approximate: only Done issues remain after rollback; undercounts planned).
 """
 function migrate_board_schema!(db::SQLite.DB)::Int
     v = _schema_version(db)
@@ -194,7 +195,7 @@ function migrate_board_schema!(db::SQLite.DB)::Int
                     created TEXT NOT NULL
                 )
             """)
-            # Empty shell for PR-M4 velocity; no rows until metrics land.
+            # Velocity metrics table (rows filled on close + v6 historical backfill).
             _exec(db, """
                 CREATE TABLE IF NOT EXISTS sprint_metrics (
                     sprint_id TEXT PRIMARY KEY,
@@ -256,9 +257,48 @@ function migrate_board_schema!(db::SQLite.DB)::Int
         v = 5
     end
 
-    # BOARD_SCHEMA_TARGET is the highest version this migrator applies (PR-M1 = 5;
-    # PR-M4 will raise the target when it registers v6). Allow v > target if a
-    # newer migrator already ran on this file.
+    if v < 6
+        # Best-effort historical velocity for closed sprints that never got a live
+        # snapshot. Incomplete membership is lost after rollback, so planned ==
+        # completed and incomplete_count = 0. Skip rows that already exist
+        # (idempotent re-run / live close before migrate).
+        SQLite.transaction(db) do
+            closed = _query(db, """
+                SELECT id, project_id FROM sprints WHERE state = 'closed'
+            """)
+            now_s = _dt_str(Dates.now(UTC))
+            for i in eachindex(closed.id)
+                sid = String(closed.id[i])
+                existing = _query(db,
+                    "SELECT sprint_id FROM sprint_metrics WHERE sprint_id = ? LIMIT 1", [sid])
+                isempty(existing.sprint_id) || continue
+                pid_raw = hasproperty(closed, :project_id) ? closed.project_id[i] : nothing
+                pid = (pid_raw === nothing || pid_raw === missing ||
+                       (pid_raw isa AbstractString && isempty(String(pid_raw)))) ?
+                      _default_project(db).id : String(pid_raw)
+                pts = _query(db,
+                    "SELECT story_points FROM issues WHERE sprint_id = ?", [sid])
+                units = 0
+                n = length(pts.story_points)
+                for j in 1:n
+                    sp = pts.story_points[j]
+                    (sp === nothing || sp === missing) && continue
+                    units += Int(sp)
+                end
+                _exec(db, """
+                    INSERT INTO sprint_metrics
+                        (sprint_id, project_id, planned_units, completed_units,
+                         completed_count, incomplete_count, unit_kind, closed_at)
+                    VALUES (?, ?, ?, ?, ?, 0, 'points', ?)
+                """, [sid, pid, units, units, n, now_s])
+            end
+            _record_migration!(db, 6)
+        end
+        v = 6
+    end
+
+    # BOARD_SCHEMA_TARGET is the highest version this migrator applies.
+    # Allow v > target if a newer migrator already ran on this file.
     v < BOARD_SCHEMA_TARGET &&
         error("board schema migration incomplete: version $v < $BOARD_SCHEMA_TARGET")
     v
@@ -846,6 +886,69 @@ function active_sprint(store::SQLiteBoardStore;
                [project_id])
     isempty(r.id) && return nothing
     _sprint_from(r, 1)
+end
+
+# ── Sprint metrics (velocity) ──────────────────────────────────────────────
+"""
+    record_sprint_metrics!(store, m::SprintMetrics) -> SprintMetrics
+
+Persist a velocity snapshot. App close path is the sole writer (not `close_sprint!`).
+Idempotent on re-close of the same sprint_id (REPLACE keeps the latest row).
+"""
+function record_sprint_metrics!(store::SQLiteBoardStore, m::SprintMetrics)::SprintMetrics
+    _exec(store.db, """
+        INSERT INTO sprint_metrics
+            (sprint_id, project_id, planned_units, completed_units,
+             completed_count, incomplete_count, unit_kind, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sprint_id) DO UPDATE SET
+            project_id = excluded.project_id,
+            planned_units = excluded.planned_units,
+            completed_units = excluded.completed_units,
+            completed_count = excluded.completed_count,
+            incomplete_count = excluded.incomplete_count,
+            unit_kind = excluded.unit_kind,
+            closed_at = excluded.closed_at
+    """, [m.sprint_id, m.project_id, m.planned_units, m.completed_units,
+          m.completed_count, m.incomplete_count, String(m.unit_kind), _dt_str(m.closed_at)])
+    m
+end
+
+"""
+    list_sprint_metrics(store; project_id, limit=8) -> Vector{SprintMetrics}
+
+Most recent `limit` closed-window metrics for a project, in chronological order
+(oldest → newest) so `velocity_series` can plot them directly.
+"""
+function list_sprint_metrics(store::SQLiteBoardStore;
+                             project_id::Union{AbstractString,Nothing} = nothing,
+                             limit::Integer = 8)::Vector{SprintMetrics}
+    lim = max(0, Int(limit))
+    lim == 0 && return SprintMetrics[]
+    project_id = _norm_project_filter(project_id)
+    # Newest first via DESC + LIMIT, then reverse for chronological series.
+    r = project_id === nothing ?
+        _query(store.db, """
+            SELECT * FROM sprint_metrics
+            ORDER BY closed_at DESC, sprint_id DESC
+            LIMIT ?
+        """, [lim]) :
+        _query(store.db, """
+            SELECT * FROM sprint_metrics WHERE project_id = ?
+            ORDER BY closed_at DESC, sprint_id DESC
+            LIMIT ?
+        """, [project_id, lim])
+    rows = [SprintMetrics(;
+        sprint_id = String(r.sprint_id[i]),
+        project_id = String(r.project_id[i]),
+        planned_units = Int(r.planned_units[i]),
+        completed_units = Int(r.completed_units[i]),
+        completed_count = Int(r.completed_count[i]),
+        incomplete_count = Int(r.incomplete_count[i]),
+        unit_kind = Symbol(String(r.unit_kind[i])),
+        closed_at = parse_dt(r.closed_at[i])) for i in eachindex(r.sprint_id)]
+    reverse!(rows)
+    rows
 end
 
 # ── Labels ─────────────────────────────────────────────────────────────────

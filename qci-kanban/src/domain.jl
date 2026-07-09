@@ -17,10 +17,12 @@ const NOTIFICATION_KINDS = (:assigned, :status_changed, :comment_added, :due_soo
 const PROJECT_KEY_RE = r"^[A-Z][A-Z0-9]{1,7}$"
 
 export User, Issue, Epic, Sprint, Label, Comment, ActivityEvent, NotificationEvent, Project
+export SprintMetrics
 export PRIORITIES, STATUSES, SPRINT_STATES, NOTIFICATION_KINDS, PROJECT_KEY_RE
 export valid_email, valid_priority, valid_status, valid_sprint_state, valid_notification_kind
 export valid_project_key
 export can_transition, transition
+export sum_units
 
 # ── Validators ──────────────────────────────────────────────────────────
 valid_email(s::AbstractString)::Bool = occursin(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s)
@@ -151,6 +153,45 @@ end
 Sprint(; id, name, goal = "", start_date = nothing, end_date = nothing,
        state::Symbol = :future, project_id::AbstractString = "") =
     Sprint(id, name, goal, start_date, end_date, state, project_id)
+
+# ── SprintMetrics (velocity snapshot at planning-window close) ───────────
+"""
+Snapshot of capacity/throughput for a closed sprint (planning window).
+
+Captured by the app close path **before** incomplete issues roll back to the
+backlog. `unit_kind` tags the sum columns (`planned_units` / `completed_units`);
+count columns are always filled. Velocity charts pick series by config unit,
+not by filtering on `unit_kind`.
+"""
+struct SprintMetrics
+    sprint_id::String
+    project_id::String
+    planned_units::Int       # sum story_points of all in-sprint issues at close
+    completed_units::Int     # sum story_points of Done issues at close
+    completed_count::Int     # count of Done issues at close
+    incomplete_count::Int    # count of non-Done at close (before rollback)
+    unit_kind::Symbol        # :points | :count (describes sum columns)
+    closed_at::DateTime
+    function SprintMetrics(sprint_id, project_id, planned_units, completed_units,
+                           completed_count, incomplete_count, unit_kind, closed_at)
+        planned_units >= 0 || throw(ArgumentError("planned_units must be >= 0"))
+        completed_units >= 0 || throw(ArgumentError("completed_units must be >= 0"))
+        completed_count >= 0 || throw(ArgumentError("completed_count must be >= 0"))
+        incomplete_count >= 0 || throw(ArgumentError("incomplete_count must be >= 0"))
+        unit_kind in (:points, :count) ||
+            throw(ArgumentError("unit_kind must be :points or :count"))
+        new(String(sprint_id), String(project_id), Int(planned_units), Int(completed_units),
+            Int(completed_count), Int(incomplete_count), Symbol(unit_kind), closed_at)
+    end
+end
+SprintMetrics(; sprint_id, project_id, planned_units::Int = 0, completed_units::Int = 0,
+              completed_count::Int = 0, incomplete_count::Int = 0,
+              unit_kind::Symbol = :points, closed_at::DateTime = Dates.now(UTC)) =
+    SprintMetrics(sprint_id, project_id, planned_units, completed_units,
+                  completed_count, incomplete_count, unit_kind, closed_at)
+
+"""Sum of `story_points` over issues (missing → 0). Pure helper for velocity."""
+sum_units(issues)::Int = sum(i -> something(i.story_points, 0), issues; init = 0)
 
 # Sprint state machine: future → active → closed (no other transitions).
 can_transition(from::Symbol, to::Symbol)::Bool =

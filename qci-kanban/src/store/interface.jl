@@ -25,6 +25,7 @@ export enqueue_outbox!, pending_outbox, mark_sent!
 export seed_demo!, seed_ops_template!
 export create_project!, list_projects, get_project, archive_project!
 export board_schema_version
+export record_sprint_metrics!, list_sprint_metrics
 
 abstract type AbstractUserStore end
 abstract type AbstractBoardStore end
@@ -80,6 +81,8 @@ function list_projects end
 function get_project end
 function archive_project! end
 function board_schema_version end
+function record_sprint_metrics! end
+function list_sprint_metrics end
 
 # ── Shared helpers (pure) ─────────────────────────────────────────────────
 new_id() = string(uuid4())

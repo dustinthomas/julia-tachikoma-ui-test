@@ -47,6 +47,9 @@ Base.@kwdef mutable struct AppConfig
     # After each successful create_project! the app layer may seed ops labels
     # (PM/CM/Safety/Critical) when this is true. Store create stays pure.
     seed_ops_labels::Bool = true
+    # Velocity chart series: :count (issue count) | :points (story_points sum).
+    # Default :count until PR-M5 burndown unit mode prefers :points for ops.
+    velocity_unit::Symbol = :count
     smtp::SmtpConfig = SmtpConfig()
     postgres::PostgresConfig = PostgresConfig()
 end
@@ -97,6 +100,7 @@ Missing file → defaults only. ENV always wins over the file.
 Recognized ENV keys: `QCI_BACKEND`, `QCI_USERS_DB`, `QCI_BOARD_DB`,
 `QCI_JWT_SECRET`, `QCI_JWT_SECRET_PATH`, `QCI_SESSION_TOKEN_PATH`,
 `QCI_TOKEN_TTL`, `QCI_SEED_DEMO`, `QCI_SMTP_ENABLED`, `QCI_SMTP_HOST`,
+`QCI_TOKEN_TTL`, `QCI_VELOCITY_UNIT`, `QCI_SMTP_ENABLED`, `QCI_SMTP_HOST`,
 `QCI_SMTP_PORT`, `QCI_SMTP_USER`, `QCI_SMTP_PASSWORD`, `QCI_SMTP_FROM`,
 `QCI_PG_HOST`, `QCI_PG_PORT`, `QCI_PG_DBNAME`, `QCI_PG_USER`, `QCI_PG_PASSWORD`.
 """
@@ -113,6 +117,7 @@ function load_config(path::Union{AbstractString,Nothing} = nothing; env = ENV)::
         haskey(t, "token_ttl_seconds") && (cfg.token_ttl_seconds = _as_int(t["token_ttl_seconds"]))
         haskey(t, "seed_demo") && (cfg.seed_demo = _as_bool(t["seed_demo"]))
         haskey(t, "seed_ops_labels") && (cfg.seed_ops_labels = _as_bool(t["seed_ops_labels"]))
+        haskey(t, "velocity_unit") && (cfg.velocity_unit = Symbol(t["velocity_unit"]))
         if haskey(t, "smtp")
             s = t["smtp"]
             haskey(s, "enabled") && (cfg.smtp.enabled = _as_bool(s["enabled"]))
@@ -141,6 +146,7 @@ function load_config(path::Union{AbstractString,Nothing} = nothing; env = ENV)::
     haskey(env, "QCI_SESSION_TOKEN_PATH") && (cfg.session_token_path = String(env["QCI_SESSION_TOKEN_PATH"]))
     haskey(env, "QCI_TOKEN_TTL") && (cfg.token_ttl_seconds = _as_int(env["QCI_TOKEN_TTL"]))
     haskey(env, "QCI_SEED_DEMO") && (cfg.seed_demo = _as_bool(env["QCI_SEED_DEMO"]))
+    haskey(env, "QCI_VELOCITY_UNIT") && (cfg.velocity_unit = Symbol(env["QCI_VELOCITY_UNIT"]))
     haskey(env, "QCI_SMTP_ENABLED") && (cfg.smtp.enabled = _as_bool(env["QCI_SMTP_ENABLED"]))
     haskey(env, "QCI_SMTP_HOST") && (cfg.smtp.host = String(env["QCI_SMTP_HOST"]))
     haskey(env, "QCI_SMTP_PORT") && (cfg.smtp.port = _as_int(env["QCI_SMTP_PORT"]))

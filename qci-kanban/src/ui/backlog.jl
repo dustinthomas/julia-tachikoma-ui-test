@@ -91,11 +91,31 @@ function _request_close_sprint!(m::AppModel)
     m
 end
 
-"Close a sprint: incomplete (non-Done) issues roll back to the backlog first."
+"""
+Close a sprint: snapshot velocity metrics **before** incomplete (non-Done)
+issues roll back to the backlog, then mark the sprint closed.
+
+Metrics live in the app close path only — not inside `Stores.close_sprint!`.
+"""
 function _do_close_sprint!(m::AppModel, sprint_id)
     sprint_id === nothing && return m
-    for iss in Stores.issues_for_sprint(m.boardstore, sprint_id)
-        iss.status == "Done" && continue
+    issues = Stores.issues_for_sprint(m.boardstore, sprint_id)
+    done = filter(i -> i.status == "Done", issues)
+    incomplete = filter(i -> i.status != "Done", issues)
+    sp = Stores.get_sprint(m.boardstore, sprint_id)
+    if sp !== nothing
+        # Dual storage: always fill both unit sums and counts (unit_kind tags sums).
+        Stores.record_sprint_metrics!(m.boardstore, Domain.SprintMetrics(;
+            sprint_id = sprint_id,
+            project_id = sp.project_id,
+            planned_units = Domain.sum_units(issues),
+            completed_units = Domain.sum_units(done),
+            completed_count = length(done),
+            incomplete_count = length(incomplete),
+            unit_kind = :points,
+            closed_at = Dates.now(UTC)))
+    end
+    for iss in incomplete
         Stores.update_issue!(m.boardstore, iss.id; sprint_id = nothing)
         Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
                              kind = :sprint_changed, detail = "rolled back to backlog")
@@ -108,11 +128,12 @@ end
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
 function render_backlog!(m::AppModel, buf::Buffer, area::Rect)
     (area.width < 20 || area.height < 5) && return
-    # Reserve a bottom strip for the sprint burndown when there's room.
+    # Reserve a bottom strip for burndown (active) or velocity (closed history).
     bd_h = area.height >= 9 ? 3 : 0
     list_area = Rect(area.x, area.y, area.width, area.height - bd_h)
     _render_backlog_list!(m, buf, list_area)
-    bd_h > 0 && render_burndown!(m, buf, Rect(area.x, area.y + area.height - bd_h, area.width, bd_h))
+    bd_h > 0 && render_backlog_footer!(m, buf,
+        Rect(area.x, area.y + area.height - bd_h, area.width, bd_h))
     return
 end
 

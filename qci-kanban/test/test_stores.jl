@@ -120,7 +120,7 @@ end
 
 @testset "Stores: SQLite board store CRUD" begin
     bs = S.SQLiteBoardStore(":memory:")
-    @test S.board_schema_version(bs) == 5
+    @test S.board_schema_version(bs) == 6
     @testset "issues" begin
         i = S.create_issue!(bs; title = "First", status = "Backlog", priority = "High")
         @test startswith(i.key, "QCI-") && i.position == 0
@@ -503,7 +503,7 @@ end
     @test nxt.key == "QCI-251"  # max(stored=50, row_max=250, 99)+1
 end
 
-@testset "Stores: on-disk pre-v1 migration fixture → v5" begin
+@testset "Stores: on-disk pre-v1 migration fixture → v6" begin
     # Build a board.db with the *old* CREATE (no project_id, no migrations),
     # seed rows, then open via SQLiteBoardStore so migrate_board_schema! runs.
     mktempdir() do dir
@@ -568,13 +568,28 @@ end
         DBInterface.execute(raw,
             "INSERT INTO sprints (id, name, goal, start_date, end_date, state)
              VALUES ('sp1', 'S1', '', NULL, NULL, 'future')")
+        # Closed sprint + Done issues still attached → v6 approximate metrics row.
+        DBInterface.execute(raw,
+            "INSERT INTO sprints (id, name, goal, start_date, end_date, state)
+             VALUES ('sp-closed', 'Old Closed', '', NULL, NULL, 'closed')")
+        DBInterface.execute(raw,
+            "INSERT INTO issues (id, key, title, description, status, priority, story_points,
+             sprint_id, position, created, updated)
+             VALUES ('iss-done', 'QCI-101', 'Done WO', '', 'Done', 'Medium', 5,
+             'sp-closed', 0, ?, ?)",
+            [now, now])
+        DBInterface.execute(raw,
+            "INSERT INTO issues (id, key, title, description, status, priority, story_points,
+             sprint_id, position, created, updated)
+             VALUES ('iss-done2', 'QCI-102', 'Done WO2', '', 'Done', 'High', 3,
+             'sp-closed', 1, ?, ?)",
+            [now, now])
         DBInterface.execute(raw,
             "INSERT INTO labels (id, name, color) VALUES ('lb1', 'bug', 'red')")
         SQLite.close(raw)
 
         bs = S.SQLiteBoardStore(path)
-        @test S.board_schema_version(bs) == 5
-        @test S.board_schema_version(bs) <= 5  # PR-M1 does not apply v6
+        @test S.board_schema_version(bs) == 6
         projs = S.list_projects(bs)
         @test length(projs) == 1 && projs[1].key == "QCI" && projs[1].name == "Default"
         pid = projs[1].id
@@ -583,15 +598,29 @@ end
         @test S.get_epic(bs, "ep1").project_id == pid
         @test S.get_sprint(bs, "sp1").project_id == pid
         @test only(S.list_labels(bs)).project_id == pid
+        # v6 backfill: one approximate metrics row for the closed sprint
+        mets = S.list_sprint_metrics(bs; project_id = pid, limit = 8)
+        @test length(mets) == 1
+        m0 = only(mets)
+        @test m0.sprint_id == "sp-closed"
+        @test m0.project_id == pid
+        @test m0.planned_units == 8 && m0.completed_units == 8
+        @test m0.completed_count == 2 && m0.incomplete_count == 0
+        @test m0.unit_kind == :points
+        # re-open store: v6 is idempotent (still one metrics row)
+        S.close!(bs)
+        bs2 = S.SQLiteBoardStore(path)
+        @test S.board_schema_version(bs2) == 6
+        @test length(S.list_sprint_metrics(bs2; project_id = pid)) == 1
         # create under a new project after migrate
-        p2 = S.create_project!(bs; key = "CAPEX", name = "Capex")
-        ni = S.create_issue!(bs; title = "Post-migrate", project_id = p2.id)
+        p2 = S.create_project!(bs2; key = "CAPEX", name = "Capex")
+        ni = S.create_issue!(bs2; title = "Post-migrate", project_id = p2.id)
         @test startswith(ni.key, "CAPEX-") && ni.project_id == p2.id
         # Default project continues QCI-n past legacy max
-        n2 = S.create_issue!(bs; title = "Next QCI")
+        n2 = S.create_issue!(bs2; title = "Next QCI")
         @test startswith(n2.key, "QCI-")
-        @test parse(Int, split(n2.key, '-')[end]) >= 101
-        S.close!(bs)
+        @test parse(Int, split(n2.key, '-')[end]) >= 103
+        S.close!(bs2)
     end
 end
 
@@ -635,6 +664,37 @@ function _with_projects(inner = (s, p) -> Dict{String,Any}[];
             return inner(sql, params)
         end
     end
+@testset "Stores: record_sprint_metrics! + list_sprint_metrics" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    def = only(S.list_projects(bs))
+    t0 = DateTime(2026, 1, 1, 12)
+    t1 = DateTime(2026, 1, 8, 12)
+    m1 = Dm.SprintMetrics(; sprint_id = "sa", project_id = def.id,
+                          planned_units = 10, completed_units = 8,
+                          completed_count = 3, incomplete_count = 1,
+                          unit_kind = :points, closed_at = t0)
+    m2 = Dm.SprintMetrics(; sprint_id = "sb", project_id = def.id,
+                          planned_units = 12, completed_units = 12,
+                          completed_count = 4, incomplete_count = 0,
+                          unit_kind = :points, closed_at = t1)
+    S.record_sprint_metrics!(bs, m1)
+    S.record_sprint_metrics!(bs, m2)
+    listed = S.list_sprint_metrics(bs; project_id = def.id, limit = 8)
+    @test length(listed) == 2
+    @test listed[1].sprint_id == "sa" && listed[2].sprint_id == "sb"  # chronological
+    @test listed[1].completed_units == 8 && listed[2].completed_count == 4
+    # limit trims oldest
+    @test length(S.list_sprint_metrics(bs; project_id = def.id, limit = 1)) == 1
+    @test only(S.list_sprint_metrics(bs; project_id = def.id, limit = 1)).sprint_id == "sb"
+    # other project is empty
+    other = S.create_project!(bs; key = "OTH", name = "Other")
+    @test isempty(S.list_sprint_metrics(bs; project_id = other.id))
+    # close_sprint! does NOT write metrics (app path owns snapshots)
+    sp = S.create_sprint!(bs; name = "Live")
+    S.start_sprint!(bs, sp.id)
+    S.close_sprint!(bs, sp.id)
+    @test isempty(filter(x -> x.sprint_id == sp.id,
+                         S.list_sprint_metrics(bs; project_id = def.id, limit = 20)))
 end
 
 @testset "Stores: Remote (Postgres) via FakeExec" begin
