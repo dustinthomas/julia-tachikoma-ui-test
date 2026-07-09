@@ -687,6 +687,8 @@ function _with_projects(inner = (s, p) -> Dict{String,Any}[];
             return inner(sql, params)
         end
     end
+end
+
 @testset "Stores: record_sprint_metrics! + list_sprint_metrics" begin
     bs = S.SQLiteBoardStore(":memory:")
     def = only(S.list_projects(bs))
@@ -948,7 +950,10 @@ end
                     "status" => p[5], "priority" => p[6], "story_points" => p[7], "epic_id" => p[8],
                     "sprint_id" => p[9], "assignee_id" => p[10], "reporter_id" => p[11],
                     "start_date" => p[12], "due_date" => p[13], "position" => p[14],
-                    "created" => p[15], "updated" => p[16], "project_id" => p[17])
+                    "created" => p[15], "updated" => p[16], "project_id" => p[17],
+                    "asset_tag" => length(p) >= 18 ? p[18] : nothing,
+                    "location" => length(p) >= 19 ? p[19] : nothing,
+                    "work_type" => length(p) >= 20 ? p[20] : nothing)
                 issues[String(p[1])] = d
                 return Dict{String,Any}[]
             elseif occursin("INSERT INTO epics", s)
@@ -1186,12 +1191,17 @@ function InMemPG()
 end
 const _ISSUE_COLS = ["id","key","title","description","status","priority","story_points",
     "epic_id","sprint_id","assignee_id","reporter_id","start_date","due_date","position",
-    "created","updated","project_id"]
+    "created","updated","project_id","asset_tag","location","work_type"]
 function (db::InMemPG)(sql::AbstractString, params::AbstractVector)
     s = String(sql)
     _sortkey(r) = (r["position"], r["key"])
     if occursin("INSERT INTO issues", s)
-        push!(db.issues, Dict{String,Any}(_ISSUE_COLS[i] => params[i] for i in eachindex(_ISSUE_COLS)))
+        n = min(length(_ISSUE_COLS), length(params))
+        row = Dict{String,Any}(_ISSUE_COLS[i] => params[i] for i in 1:n)
+        for col in _ISSUE_COLS
+            haskey(row, col) || (row[col] = nothing)
+        end
+        push!(db.issues, row)
         return Dict{String,Any}[]
     elseif occursin("FROM projects WHERE key =", s)
         k = String(params[1])

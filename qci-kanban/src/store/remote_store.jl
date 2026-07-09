@@ -99,8 +99,6 @@ function remote_row_to_issue(d::AbstractDict)::Issue
           position = Int(something(_get(d, "position"), 0)), labels = String[],
           created = parse_dt(something(_get(d, "created"), Dates.now(UTC))),
           updated = parse_dt(something(_get(d, "updated"), Dates.now(UTC))),
-          project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end)
-          # PR-M1b will plumb project_id fully; default keeps FakeExec mappers green.
           project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end,
           asset_tag = _remote_opt_text(_get(d, "asset_tag")),
           location = _remote_opt_text(_get(d, "location")),
@@ -324,15 +322,13 @@ function create_issue!(store::RemoteBoardStore; title::AbstractString, descripti
                        due_date::Union{Date,Nothing} = nothing,
                        key::Union{AbstractString,Nothing} = nothing,
                        position::Union{Integer,Nothing} = nothing,
-                       project_id::Union{AbstractString,Nothing} = nothing)::Issue
-    valid_status(status) || throw(ArgumentError("invalid status: $status"))
-    valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
-    pid, pkey = _remote_resolve_project_id(store, project_id)
+                       project_id::Union{AbstractString,Nothing} = nothing,
                        asset_tag::Union{AbstractString,Nothing} = nothing,
                        location::Union{AbstractString,Nothing} = nothing,
                        work_type::Union{AbstractString,Nothing} = nothing)::Issue
     valid_status(status) || throw(ArgumentError("invalid status: $status"))
     valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
+    pid, pkey = _remote_resolve_project_id(store, project_id)
     at = _remote_opt_text(asset_tag)
     loc = _remote_opt_text(location)
     wt = _remote_opt_text(work_type)
@@ -341,22 +337,14 @@ function create_issue!(store::RemoteBoardStore; title::AbstractString, descripti
     # C2: MAX+1 sequential key (not random) and append-position (count in status).
     k = key === nothing ? _remote_generate_issue_key(store, pkey) : String(key)
     pos = position === nothing ? _remote_status_count(store, status) : Int(position)
-    store.exec("INSERT INTO issues (id, key, title, description, status, priority, story_points, epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position, created, updated, project_id) VALUES ($(pg_placeholders(17)))",
+    store.exec("INSERT INTO issues (id, key, title, description, status, priority, story_points, epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position, created, updated, project_id, asset_tag, location, work_type) VALUES ($(pg_placeholders(20)))",
                Any[id, k, title, description, status, priority, story_points, epic_id, sprint_id,
                    assignee_id, reporter_id, _date_str(start_date), _date_str(due_date),
-                   pos, _dt_str(now), _dt_str(now), pid])
+                   pos, _dt_str(now), _dt_str(now), pid, at, loc, wt])
     Issue(; id = id, key = k, title = title, description = description, status = status,
           priority = priority, story_points = story_points, epic_id = epic_id, sprint_id = sprint_id,
           assignee_id = assignee_id, reporter_id = reporter_id, start_date = start_date,
-          due_date = due_date, position = pos, created = now, updated = now, project_id = pid)
-    store.exec("INSERT INTO issues (id, key, title, description, status, priority, story_points, epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position, created, updated, asset_tag, location, work_type) VALUES ($(pg_placeholders(19)))",
-               Any[id, k, title, description, status, priority, story_points, epic_id, sprint_id,
-                   assignee_id, reporter_id, _date_str(start_date), _date_str(due_date),
-                   pos, _dt_str(now), _dt_str(now), at, loc, wt])
-    Issue(; id = id, key = k, title = title, description = description, status = status,
-          priority = priority, story_points = story_points, epic_id = epic_id, sprint_id = sprint_id,
-          assignee_id = assignee_id, reporter_id = reporter_id, start_date = start_date,
-          due_date = due_date, position = pos, created = now, updated = now,
+          due_date = due_date, position = pos, created = now, updated = now, project_id = pid,
           asset_tag = at, location = loc, work_type = wt)
 end
 
