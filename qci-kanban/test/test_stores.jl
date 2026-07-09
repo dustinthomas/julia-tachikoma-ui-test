@@ -508,6 +508,46 @@ end
     end
 end
 
+# Shared FakeExec helpers for remote project parity (PR-M1b).
+_def_project_row(; id = "proj-default", key = "QCI", name = "Default", archived = 0) =
+    Dict{String,Any}("id" => id, "key" => key, "name" => name, "description" => "",
+                     "color" => "blue", "archived" => archived, "created" => string(now(UTC)))
+
+"""Route project SELECTs to Default (or `projects` map); otherwise call `inner`."""
+function _with_projects(inner = (s, p) -> Dict{String,Any}[];
+                        projects = Dict{String,Dict{String,Any}}(
+                            "proj-default" => _def_project_row()))
+    (sql, params) -> begin
+        s = String(sql)
+        if occursin("FROM projects WHERE key =", s)
+            k = String(params[1])
+            for d in values(projects)
+                String(d["key"]) == k && return [copy(d)]
+            end
+            return Dict{String,Any}[]
+        elseif occursin("FROM projects WHERE id =", s)
+            pid = String(params[1])
+            return haskey(projects, pid) ? [copy(projects[pid])] : Dict{String,Any}[]
+        elseif occursin("FROM projects WHERE archived = 0", s)
+            return [copy(d) for d in values(projects) if !(d["archived"] in (1, true))]
+        elseif occursin("FROM projects ORDER BY key", s)
+            return [copy(d) for d in sort(collect(values(projects)); by = d -> String(d["key"]))]
+        elseif occursin("INSERT INTO projects", s)
+            d = Dict{String,Any}("id" => params[1], "key" => params[2], "name" => params[3],
+                "description" => params[4], "color" => params[5], "archived" => params[6],
+                "created" => params[7])
+            projects[String(params[1])] = d
+            return Dict{String,Any}[]
+        elseif occursin("UPDATE projects SET archived", s)
+            pid = String(params[1])
+            haskey(projects, pid) && (projects[pid]["archived"] = 1)
+            return Dict{String,Any}[]
+        else
+            return inner(sql, params)
+        end
+    end
+end
+
 @testset "Stores: Remote (Postgres) via FakeExec" begin
     @testset "pg_placeholders + row mappers" begin
         @test S.pg_placeholders(3) == "\$1, \$2, \$3"
@@ -520,20 +560,26 @@ end
             "priority" => "Medium", "story_points" => 3, "epic_id" => "e", "sprint_id" => "s",
             "assignee_id" => "a", "reporter_id" => "r", "start_date" => "2026-01-01",
             "due_date" => "2026-01-02", "position" => 2, "description" => "d",
-            "created" => string(now(UTC)), "updated" => string(now(UTC))))
+            "created" => string(now(UTC)), "updated" => string(now(UTC)), "project_id" => "p1"))
         @test iss.story_points == 3 && iss.due_date == Date(2026, 1, 2) && iss.position == 2
+        @test iss.project_id == "p1"
         iss2 = S.remote_row_to_issue(Dict("id" => "i", "key" => "k", "title" => "T", "status" => "Backlog", "priority" => "Low"))
         @test iss2.description == "" && iss2.epic_id === nothing && iss2.story_points === nothing
-        ep = S.remote_row_to_epic(Dict("id" => "e", "key" => "EPIC-1", "name" => "N", "color" => "teal"))
-        @test ep.name == "N"
-        sp = S.remote_row_to_sprint(Dict("id" => "s", "name" => "S", "state" => "future"))
-        @test sp.state == :future && sp.goal == ""
+        @test iss2.project_id == ""
+        ep = S.remote_row_to_epic(Dict("id" => "e", "key" => "EPIC-1", "name" => "N", "color" => "teal", "project_id" => "p1"))
+        @test ep.name == "N" && ep.project_id == "p1"
+        sp = S.remote_row_to_sprint(Dict("id" => "s", "name" => "S", "state" => "future", "project_id" => "p1"))
+        @test sp.state == :future && sp.goal == "" && sp.project_id == "p1"
         cm = S.remote_row_to_comment(Dict("id" => "c", "issue_id" => "i", "author_id" => "u", "body" => "b"))
         @test cm.body == "b"
-        lb = S.remote_row_to_label(Dict("id" => "l", "name" => "bug", "color" => "red"))
-        @test lb.color == "red"
+        lb = S.remote_row_to_label(Dict("id" => "l", "name" => "bug", "color" => "red", "project_id" => "p1"))
+        @test lb.color == "red" && lb.project_id == "p1"
         ac = S.remote_row_to_activity(Dict("id" => "a", "issue_id" => "i", "kind" => "moved"))
         @test ac.kind == :moved && ac.actor_id === nothing && ac.detail == ""
+        pr = S.remote_row_to_project(_def_project_row())
+        @test pr.key == "QCI" && pr.name == "Default" && !pr.archived
+        pr2 = S.remote_row_to_project(Dict("id" => "p", "key" => "LA", "name" => "Line", "archived" => 1))
+        @test pr2.archived && pr2.color == "blue" && pr2.description == ""
     end
 
     @testset "remote user store" begin
@@ -561,19 +607,21 @@ end
     end
 
     @testset "remote board store" begin
-        issue_row(; id = "i", key = "QCI-1", status = "Backlog", pos = 0) = Dict{String,Any}(
+        issue_row(; id = "i", key = "QCI-1", status = "Backlog", pos = 0, project_id = "") = Dict{String,Any}(
             "id" => id, "key" => key, "title" => "T", "status" => status, "priority" => "Medium",
-            "description" => "d", "position" => pos)
-        # create with explicit + default key
-        fx = S.FakeExec()
+            "description" => "d", "position" => pos, "project_id" => project_id)
+        # create with explicit + default key (resolves Default project)
+        fx = S.FakeExec(_with_projects())
         bs = S.RemoteBoardStore(fx)
         i = S.create_issue!(bs; title = "T", key = "QCI-9", status = "To Do", priority = "High",
                             story_points = 2, epic_id = "e", sprint_id = "s", assignee_id = "a",
                             reporter_id = "r", start_date = Date(2026, 1, 1), due_date = Date(2026, 1, 2), position = 4)
         @test i.key == "QCI-9" && i.position == 4 && i.story_points == 2
+        @test i.project_id == "proj-default"
         @test occursin("INSERT INTO issues", fx.calls[end][1])
+        @test occursin("project_id", fx.calls[end][1])
         idflt = S.create_issue!(bs; title = "T2")
-        @test startswith(idflt.key, "QCI-")
+        @test startswith(idflt.key, "QCI-") && idflt.project_id == "proj-default"
         @test_throws ArgumentError S.create_issue!(bs; title = "x", status = "Nope")
         @test_throws ArgumentError S.create_issue!(bs; title = "x", priority = "Nope")
 
@@ -581,6 +629,11 @@ end
         @test S.get_issue(bs, "missing") === nothing
         @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row(), issue_row(id = "i2")])))) == 2
         @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()])); status = "Backlog")) == 1
+        @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()]));
+                                   project_id = "proj-default")) == 1
+        @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()]));
+                                   project_id = "proj-default", status = "Backlog")) == 1
+        @test length(S.list_issues(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()])); project_id = "")) == 1
 
         fx_u = S.FakeExec((s, p) -> [issue_row()])
         bs_u = S.RemoteBoardStore(fx_u)
@@ -599,22 +652,26 @@ end
         @test_throws ArgumentError S.move_issue!(bs_m, "i"; status = "Nope")
         @test S.rank_issue!(bs_m, "i"; position = 0) !== nothing
 
-        # epics
-        fx_e = S.FakeExec((s, p) -> [Dict("id" => "e", "key" => "EPIC-1", "name" => "N", "color" => "teal")])
+        # epics (Default project + {KEY}-E-n keys)
+        fx_e = S.FakeExec(_with_projects((s, p) -> [Dict("id" => "e", "key" => "QCI-E-1", "name" => "N",
+                                                        "color" => "teal", "project_id" => "proj-default")]))
         bs_e = S.RemoteBoardStore(fx_e)
-        @test S.create_epic!(bs_e; name = "N", key = "EPIC-3").key == "EPIC-3"
-        @test startswith(S.create_epic!(bs_e; name = "N").key, "EPIC-")
+        @test S.create_epic!(bs_e; name = "N", key = "QCI-E-3").key == "QCI-E-3"
+        @test startswith(S.create_epic!(bs_e; name = "N").key, "QCI-E-")
         @test S.get_epic(bs_e, "e").name == "N"
         @test S.get_epic(bs, "missing") === nothing
         @test length(S.list_epics(bs_e)) == 1
+        @test length(S.list_epics(bs_e; project_id = "proj-default")) == 1
         @test S.update_epic!(bs_e, "e"; name = "M", color = "red").name == "N"
         @test S.update_epic!(bs_e, "e").name == "N"  # no-op
         @test S.delete_epic!(bs_e, "e")
 
         # sprints — stateful responder so start/close reflect UPDATEs
-        sprint_row(state) = [Dict{String,Any}("id" => "s", "name" => "S", "goal" => "g", "state" => state)]
+        sprint_row(state; project_id = "proj-default") =
+            [Dict{String,Any}("id" => "s", "name" => "S", "goal" => "g", "state" => state,
+                              "project_id" => project_id)]
         sprint_state = Ref("future")
-        fx_s = S.FakeExec((sql, p) -> begin
+        fx_s = S.FakeExec(_with_projects((sql, p) -> begin
             if occursin("UPDATE sprints SET state", sql)
                 sprint_state[] = String(p[1]); Dict{String,Any}[]
             elseif occursin("state = 'active'", sql)
@@ -622,29 +679,38 @@ end
             else
                 sprint_row(sprint_state[])
             end
-        end)
+        end))
         bs_s = S.RemoteBoardStore(fx_s)
         @test S.create_sprint!(bs_s; name = "S", start_date = Date(2026, 1, 1), end_date = Date(2026, 1, 14)).state == :future
         @test S.get_sprint(bs_s, "s").name == "S"
         @test S.get_sprint(bs, "missing") === nothing
         @test length(S.list_sprints(bs_s)) == 1
+        @test length(S.list_sprints(bs_s; project_id = "proj-default")) == 1
         @test S.active_sprint(bs_s) === nothing
         @test S.start_sprint!(bs_s, "s").state == :active
         @test S.active_sprint(bs_s) !== nothing
+        @test S.active_sprint(bs_s; project_id = "proj-default") !== nothing
         @test_throws ArgumentError S.start_sprint!(bs, "missing")
         @test_throws ArgumentError S.close_sprint!(bs, "missing")
         @test S.close_sprint!(bs_s, "s").state == :closed
         @test S.update_sprint!(bs_s, "s"; name = "S!", goal = "g2", start_date = Date(2026, 2, 1), end_date = Date(2026, 2, 2)).name == "S"
         @test S.update_sprint!(bs_s, "s").name == "S"  # no-op
         # single-active rejection when an active exists
-        fx_active = S.FakeExec((sql, p) -> sprint_row(occursin("state = 'active'", sql) ? "active" : "future"))
+        fx_active = S.FakeExec(_with_projects((sql, p) ->
+            sprint_row(occursin("state = 'active'", sql) ? "active" : "future")))
         @test_throws ArgumentError S.start_sprint!(S.RemoteBoardStore(fx_active), "s")
 
         # labels
-        fx_l = S.FakeExec((s, p) -> [Dict("id" => "l", "name" => "bug", "color" => "red")])
+        fx_l = S.FakeExec(_with_projects((s, p) -> begin
+            # set_labels! probes the issue for archive guard — missing issue → no assert.
+            occursin("FROM issues", String(s)) && return Dict{String,Any}[]
+            [Dict{String,Any}("id" => "l", "name" => "bug", "color" => "red",
+                              "project_id" => "proj-default")]
+        end))
         bs_l = S.RemoteBoardStore(fx_l)
         @test S.create_label!(bs_l; name = "bug").name == "bug"
         @test length(S.list_labels(bs_l)) == 1
+        @test length(S.list_labels(bs_l; project_id = "proj-default")) == 1
         @test S.set_labels!(bs_l, "i", ["l1", "l2"]) == ["l1", "l2"]
         fx_lf = S.FakeExec((s, p) -> [Dict("label_id" => "l1"), Dict("label_id" => "l2")])
         @test S.labels_for_issue(S.RemoteBoardStore(fx_lf), "i") == ["l1", "l2"]
@@ -665,6 +731,7 @@ end
         bs_mem = S.RemoteBoardStore(fx_mem)
         @test length(S.issues_for_sprint(bs_mem, "s")) == 1
         @test length(S.backlog_issues(bs_mem)) == 1
+        @test length(S.backlog_issues(bs_mem; project_id = "proj-default")) == 1
 
         # outbox
         obrow = [Dict{String,Any}("id" => "o", "event_kind" => "assigned", "recipient_email" => "a@b.co",
@@ -674,6 +741,135 @@ end
         @test !isempty(S.enqueue_outbox!(bs_o; event_kind = :assigned, recipient_email = "a@b.co", subject = "s", body = "b"))
         @test S.pending_outbox(bs_o)[1]["id"] == "o"
         @test S.mark_sent!(bs_o, "o")
+    end
+
+    @testset "remote project CRUD + optional project_id" begin
+        projects = Dict{String,Dict{String,Any}}("proj-default" => _def_project_row())
+        sprints = Dict{String,Dict{String,Any}}()
+        issues = Dict{String,Dict{String,Any}}()
+        epics = Dict{String,Dict{String,Any}}()
+        labels = Dict{String,Dict{String,Any}}()
+        seq = Dict{Any,Int}()
+        fx = S.FakeExec(_with_projects((sql, p) -> begin
+            s = String(sql)
+            if occursin("INSERT INTO sprints", s)
+                d = Dict{String,Any}("id" => p[1], "name" => p[2], "goal" => p[3],
+                    "start_date" => p[4], "end_date" => p[5], "state" => p[6], "project_id" => p[7])
+                sprints[String(p[1])] = d
+                return Dict{String,Any}[]
+            elseif occursin("INSERT INTO issues", s)
+                d = Dict{String,Any}("id" => p[1], "key" => p[2], "title" => p[3], "description" => p[4],
+                    "status" => p[5], "priority" => p[6], "story_points" => p[7], "epic_id" => p[8],
+                    "sprint_id" => p[9], "assignee_id" => p[10], "reporter_id" => p[11],
+                    "start_date" => p[12], "due_date" => p[13], "position" => p[14],
+                    "created" => p[15], "updated" => p[16], "project_id" => p[17])
+                issues[String(p[1])] = d
+                return Dict{String,Any}[]
+            elseif occursin("INSERT INTO epics", s)
+                d = Dict{String,Any}("id" => p[1], "key" => p[2], "name" => p[3], "color" => p[4],
+                    "created" => p[5], "project_id" => p[6])
+                epics[String(p[1])] = d
+                return Dict{String,Any}[]
+            elseif occursin("INSERT INTO labels", s)
+                d = Dict{String,Any}("id" => p[1], "name" => p[2], "color" => p[3], "project_id" => p[4])
+                labels[String(p[1])] = d
+                return Dict{String,Any}[]
+            elseif occursin("SELECT last FROM key_seq", s)
+                return haskey(seq, p[1]) ? [Dict{String,Any}("last" => seq[p[1]])] : Dict{String,Any}[]
+            elseif occursin("INSERT INTO key_seq", s)
+                seq[p[1]] = p[2]; return Dict{String,Any}[]
+            elseif occursin("SELECT key FROM issues WHERE key LIKE", s)
+                return [Dict{String,Any}("key" => d["key"]) for d in values(issues)]
+            elseif occursin("SELECT key FROM epics WHERE key LIKE", s)
+                return [Dict{String,Any}("key" => d["key"]) for d in values(epics)]
+            elseif occursin("COUNT(*) AS c FROM issues", s)
+                return [Dict{String,Any}("c" => count(d -> d["status"] == p[1], values(issues)))]
+            elseif occursin("FROM sprints WHERE project_id", s) && occursin("state = 'active'", s)
+                rows = [copy(d) for d in values(sprints) if d["project_id"] == p[1] && d["state"] == "active"]
+                return isempty(rows) ? Dict{String,Any}[] : [first(rows)]
+            elseif occursin("FROM sprints WHERE state = 'active'", s)
+                rows = [copy(d) for d in values(sprints) if d["state"] == "active"]
+                return isempty(rows) ? Dict{String,Any}[] : [first(rows)]
+            elseif occursin("SELECT * FROM sprints WHERE id", s)
+                return haskey(sprints, String(p[1])) ? [copy(sprints[String(p[1])])] : Dict{String,Any}[]
+            elseif occursin("SELECT * FROM sprints", s) && occursin("project_id", s)
+                return [copy(d) for d in values(sprints) if d["project_id"] == p[1]]
+            elseif occursin("SELECT * FROM sprints", s)
+                return [copy(d) for d in values(sprints)]
+            elseif occursin("UPDATE sprints SET state", s)
+                sid = String(p[2])
+                haskey(sprints, sid) && (sprints[sid]["state"] = p[1])
+                return Dict{String,Any}[]
+            elseif occursin("SELECT * FROM issues WHERE id", s)
+                return haskey(issues, String(p[1])) ? [copy(issues[String(p[1])])] : Dict{String,Any}[]
+            elseif occursin("SELECT * FROM issues WHERE project_id", s) && occursin("AND status", s)
+                return [copy(d) for d in values(issues) if d["project_id"] == p[1] && d["status"] == p[2]]
+            elseif occursin("SELECT * FROM issues WHERE project_id", s)
+                return [copy(d) for d in values(issues) if d["project_id"] == p[1]]
+            elseif occursin("SELECT * FROM issues", s)
+                return [copy(d) for d in values(issues)]
+            elseif occursin("SELECT * FROM epics WHERE project_id", s)
+                return [copy(d) for d in values(epics) if d["project_id"] == p[1]]
+            elseif occursin("SELECT * FROM epics", s)
+                return [copy(d) for d in values(epics)]
+            elseif occursin("SELECT * FROM labels WHERE project_id", s)
+                return [copy(d) for d in values(labels) if d["project_id"] == p[1]]
+            elseif occursin("SELECT * FROM labels", s)
+                return [copy(d) for d in values(labels)]
+            elseif occursin("MAX(version)", s)
+                return [Dict{String,Any}("v" => 5)]
+            end
+            return Dict{String,Any}[]
+        end; projects = projects))
+        bs = S.RemoteBoardStore(fx)
+
+        def = only(S.list_projects(bs))
+        @test def.key == "QCI" && def.id == "proj-default"
+        @test S.get_project(bs, def.id).key == "QCI"
+        @test S.get_project(bs, "nope") === nothing
+        @test S.board_schema_version(bs) == 5
+
+        la = S.create_project!(bs; key = "LA", name = "Line A", description = "site", color = "teal")
+        @test la.key == "LA" && la.name == "Line A" && !la.archived
+        @test length(S.list_projects(bs)) == 2
+        @test_throws ArgumentError S.create_project!(bs; key = "LA", name = "Dup")
+        @test_throws ArgumentError S.create_project!(bs; key = "bad", name = "X")
+        @test_throws ArgumentError S.create_project!(bs; key = "OK", name = "  ")
+
+        i_def = S.create_issue!(bs; title = "On Default")
+        @test i_def.project_id == def.id && startswith(i_def.key, "QCI-")
+        i_la = S.create_issue!(bs; title = "On LA", project_id = la.id)
+        @test i_la.project_id == la.id && startswith(i_la.key, "LA-")
+        @test length(S.list_issues(bs; project_id = la.id)) == 1
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = "missing")
+
+        e_def = S.create_epic!(bs; name = "Def Epic")
+        @test startswith(e_def.key, "QCI-E-") && e_def.project_id == def.id
+        e_la = S.create_epic!(bs; name = "LA Epic", project_id = la.id)
+        @test startswith(e_la.key, "LA-E-") && e_la.project_id == la.id
+        @test length(S.list_epics(bs; project_id = la.id)) == 1
+
+        sp = S.create_sprint!(bs; name = "Win", project_id = la.id)
+        @test sp.project_id == la.id
+        @test length(S.list_sprints(bs; project_id = la.id)) == 1
+        lbl = S.create_label!(bs; name = "PM", project_id = la.id)
+        @test lbl.project_id == la.id
+        @test length(S.list_labels(bs; project_id = la.id)) == 1
+
+        k1 = S.create_issue!(bs; title = "k1", project_id = la.id).key
+        k2 = S.create_issue!(bs; title = "k2", project_id = la.id).key
+        @test startswith(k1, "LA-") && startswith(k2, "LA-")
+        @test parse(Int, split(k2, '-')[end]) == parse(Int, split(k1, '-')[end]) + 1
+
+        S.start_sprint!(bs, sp.id)
+        @test_throws ArgumentError S.archive_project!(bs, la.id)  # active sprint blocks
+        S.close_sprint!(bs, sp.id)
+        arch = S.archive_project!(bs, la.id)
+        @test arch.archived
+        @test length(S.list_projects(bs)) == 1
+        @test length(S.list_projects(bs; include_archived = true)) == 2
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id)
+        @test_throws ArgumentError S.archive_project!(bs, "missing")
     end
 end
 
@@ -749,24 +945,40 @@ end
 # board store emits, so C2/C3/C4/C10 semantics are verified (not string-matched).
 mutable struct InMemPG
     issues::Vector{Dict{String,Any}}
+    projects::Dict{String,Dict{String,Any}}
     seq::Dict{Any,Int}
 end
-InMemPG() = InMemPG(Dict{String,Any}[], Dict{Any,Int}())
+function InMemPG()
+    def = _def_project_row()
+    InMemPG(Dict{String,Any}[], Dict{String,Dict{String,Any}}(String(def["id"]) => def), Dict{Any,Int}())
+end
 const _ISSUE_COLS = ["id","key","title","description","status","priority","story_points",
-    "epic_id","sprint_id","assignee_id","reporter_id","start_date","due_date","position","created","updated"]
+    "epic_id","sprint_id","assignee_id","reporter_id","start_date","due_date","position",
+    "created","updated","project_id"]
 function (db::InMemPG)(sql::AbstractString, params::AbstractVector)
     s = String(sql)
     _sortkey(r) = (r["position"], r["key"])
     if occursin("INSERT INTO issues", s)
         push!(db.issues, Dict{String,Any}(_ISSUE_COLS[i] => params[i] for i in eachindex(_ISSUE_COLS)))
         return Dict{String,Any}[]
+    elseif occursin("FROM projects WHERE key =", s)
+        k = String(params[1])
+        for d in values(db.projects)
+            String(d["key"]) == k && return [copy(d)]
+        end
+        return Dict{String,Any}[]
+    elseif occursin("FROM projects WHERE id =", s)
+        pid = String(params[1])
+        return haskey(db.projects, pid) ? [copy(db.projects[pid])] : Dict{String,Any}[]
     elseif occursin("SELECT last FROM key_seq", s)
         return haskey(db.seq, params[1]) ? [Dict{String,Any}("last" => db.seq[params[1]])] : Dict{String,Any}[]
     elseif occursin("INSERT INTO key_seq", s)
         db.seq[params[1]] = params[2]; return Dict{String,Any}[]
-    elseif occursin("MAX(CAST(substr(key, 5)", s)
-        nums = [parse(Int, r["key"][5:end]) for r in db.issues if startswith(r["key"], "QCI-")]
-        return [Dict{String,Any}("m" => isempty(nums) ? nothing : maximum(nums))]
+    elseif occursin("SELECT key FROM issues WHERE key LIKE", s)
+        # LIKE pattern e.g. "QCI-%" — return matching keys for max-suffix parse.
+        pat = String(params[1])
+        pref = endswith(pat, "%") ? pat[1:end-1] : pat
+        return [Dict{String,Any}("key" => r["key"]) for r in db.issues if startswith(String(r["key"]), pref)]
     elseif occursin("COUNT(*) AS c FROM issues", s)
         return [Dict{String,Any}("c" => count(r -> r["status"] == params[1], db.issues))]
     elseif occursin("SELECT * FROM issues WHERE id", s)
@@ -778,6 +990,13 @@ function (db::InMemPG)(sql::AbstractString, params::AbstractVector)
     elseif occursin("SELECT id FROM issues WHERE status", s)
         rows = sort([r for r in db.issues if r["status"] == params[1]], by = _sortkey)
         return [Dict{String,Any}("id" => r["id"]) for r in rows]
+    elseif occursin("SELECT * FROM issues WHERE project_id", s) && occursin("AND status", s)
+        rows = sort([r for r in db.issues if r["project_id"] == params[1] && r["status"] == params[2]], by = _sortkey)
+        return [copy(r) for r in rows]
+    elseif occursin("SELECT * FROM issues WHERE project_id", s)
+        rows = sort([r for r in db.issues if r["project_id"] == params[1]],
+                    by = r -> (r["status"], r["position"], r["key"]))
+        return [copy(r) for r in rows]
     elseif occursin("SELECT * FROM issues WHERE status", s)
         rows = sort([r for r in db.issues if r["status"] == params[1]], by = _sortkey)
         return [copy(r) for r in rows]

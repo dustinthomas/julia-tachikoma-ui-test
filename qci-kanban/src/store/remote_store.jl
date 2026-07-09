@@ -16,15 +16,14 @@ using Dates
 export RemoteUserStore, RemoteBoardStore, FakeExec
 export remote_row_to_user, remote_row_to_issue, remote_row_to_epic,
        remote_row_to_sprint, remote_row_to_comment, remote_row_to_label,
-       remote_row_to_activity
+       remote_row_to_activity, remote_row_to_project
 export pg_placeholders, pg_conninfo
 
 # ── Store types (exec is injectable) ─────────────────────────────────────
 struct RemoteUserStore <: AbstractUserStore
     exec::Any
 end
-# Project CRUD + optional `project_id` kwargs are SQLite-first (PR-M1).
-# RemoteBoardStore parity (project table, project_id columns, kwargs) is PR-M1b.
+# PR-M1b: project CRUD + optional `project_id` kwargs on create/list (FakeExec path).
 struct RemoteBoardStore <: AbstractBoardStore
     exec::Any
 end
@@ -75,6 +74,15 @@ function remote_row_to_user(d::AbstractDict)::User
          created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
 end
 
+function remote_row_to_project(d::AbstractDict)::Project
+    color = let x = _get(d, "color"); x === nothing || isempty(String(x)) ? "blue" : String(x) end
+    Project(; id = String(_get(d, "id")), key = String(_get(d, "key")), name = String(_get(d, "name")),
+            description = let x = _get(d, "description"); x === nothing ? "" : String(x) end,
+            color = color,
+            archived = let a = _get(d, "archived"); a === nothing ? false : (a == 1 || a === true) end,
+            created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
+end
+
 function remote_row_to_issue(d::AbstractDict)::Issue
     Issue(; id = String(_get(d, "id")), key = String(_get(d, "key")),
           title = String(_get(d, "title")),
@@ -89,7 +97,6 @@ function remote_row_to_issue(d::AbstractDict)::Issue
           position = Int(something(_get(d, "position"), 0)), labels = String[],
           created = parse_dt(something(_get(d, "created"), Dates.now(UTC))),
           updated = parse_dt(something(_get(d, "updated"), Dates.now(UTC))),
-          # PR-M1b will plumb project_id fully; default keeps FakeExec mappers green.
           project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end)
 end
 
@@ -171,26 +178,128 @@ end
 function _remote_next_seq!(store, prefix::AbstractString, existing_max)::Int
     rows = store.exec("SELECT last FROM key_seq WHERE prefix = \$1 LIMIT 1", Any[prefix])
     cur = isempty(rows) ? nothing : _get(rows[1], "last")
-    last = cur === nothing ? max(99, existing_max === nothing ? 99 : Int(existing_max)) : Int(cur)
+    emax = existing_max === nothing ? nothing : Int(existing_max)
+    stored = cur === nothing ? nothing : Int(cur)
+    last = max(99, something(stored, 99), something(emax, 99))
     n = last + 1
     store.exec("INSERT INTO key_seq (prefix, last) VALUES (\$1, \$2) ON CONFLICT(prefix) DO UPDATE SET last = \$3",
                Any[prefix, n, n])
     n
 end
-function _remote_generate_issue_key(store)::String
-    rows = store.exec("SELECT MAX(CAST(substr(key, 5) AS INTEGER)) AS m FROM issues WHERE key LIKE 'QCI-%'", Any[])
-    emax = isempty(rows) ? nothing : _get(rows[1], "m")
-    "QCI-$(_remote_next_seq!(store, "QCI", emax))"
+
+"""Max numeric suffix for issue keys `{project_key}-{n}` (reject multi-hyphen)."""
+function _remote_max_issue_num(store, project_key::AbstractString)
+    rows = store.exec("SELECT key FROM issues WHERE key LIKE \$1", Any[project_key * "-%"])
+    maxn = nothing
+    re = Regex("^" * project_key * "-(\\d+)\$")
+    for d in rows
+        m = match(re, String(_get(d, "key")))
+        m === nothing && continue
+        n = parse(Int, m.captures[1])
+        maxn = maxn === nothing ? n : max(maxn, n)
+    end
+    maxn
 end
-function _remote_generate_epic_key(store)::String
-    rows = store.exec("SELECT MAX(CAST(substr(key, 6) AS INTEGER)) AS m FROM epics WHERE key LIKE 'EPIC-%'", Any[])
-    emax = isempty(rows) ? nothing : _get(rows[1], "m")
-    "EPIC-$(_remote_next_seq!(store, "EPIC", emax))"
+
+"""Max numeric suffix for epic keys `{project_key}-E-{n}`."""
+function _remote_max_epic_num(store, project_key::AbstractString)
+    rows = store.exec("SELECT key FROM epics WHERE key LIKE \$1", Any[project_key * "-E-%"])
+    maxn = nothing
+    re = Regex("^" * project_key * "-E-(\\d+)\$")
+    for d in rows
+        m = match(re, String(_get(d, "key")))
+        m === nothing && continue
+        n = parse(Int, m.captures[1])
+        maxn = maxn === nothing ? n : max(maxn, n)
+    end
+    maxn
+end
+
+function _remote_generate_issue_key(store, project_key::AbstractString)::String
+    n = _remote_next_seq!(store, project_key, _remote_max_issue_num(store, project_key))
+    "$(project_key)-$(n)"
+end
+function _remote_generate_epic_key(store, project_key::AbstractString)::String
+    n = _remote_next_seq!(store, "$(project_key)#EPIC", _remote_max_epic_num(store, project_key))
+    "$(project_key)-E-$(n)"
 end
 _remote_status_count(store, status)::Int =
     let rows = store.exec("SELECT COUNT(*) AS c FROM issues WHERE status = \$1", Any[status])
         isempty(rows) ? 0 : Int(something(_get(rows[1], "c"), 0))
     end
+
+# ── Projects ──────────────────────────────────────────────────────────────
+function create_project!(store::RemoteBoardStore; key::AbstractString, name::AbstractString,
+                         description::AbstractString = "",
+                         color::AbstractString = "blue")::Project
+    valid_project_key(key) || throw(ArgumentError("invalid project key: $key"))
+    isempty(strip(name)) && throw(ArgumentError("project name must not be empty"))
+    existing = store.exec("SELECT id FROM projects WHERE key = \$1 LIMIT 1", Any[key])
+    isempty(existing) || throw(ArgumentError("project key already exists: $key"))
+    id = new_id(); created = Dates.now(UTC)
+    store.exec("INSERT INTO projects (id, key, name, description, color, archived, created) VALUES ($(pg_placeholders(7)))",
+               Any[id, key, name, description, color, 0, _dt_str(created)])
+    Project(; id = id, key = key, name = name, description = description,
+            color = color, archived = false, created = created)
+end
+
+function get_project(store::RemoteBoardStore, id::AbstractString)
+    rows = store.exec("SELECT * FROM projects WHERE id = \$1 LIMIT 1", Any[id])
+    isempty(rows) && return nothing
+    remote_row_to_project(rows[1])
+end
+
+function list_projects(store::RemoteBoardStore; include_archived::Bool = false)::Vector{Project}
+    rows = include_archived ?
+        store.exec("SELECT * FROM projects ORDER BY key", Any[]) :
+        store.exec("SELECT * FROM projects WHERE archived = 0 ORDER BY key", Any[])
+    [remote_row_to_project(d) for d in rows]
+end
+
+function archive_project!(store::RemoteBoardStore, id::AbstractString)::Project
+    p = get_project(store, id)
+    p === nothing && throw(ArgumentError("no such project: $id"))
+    p.archived && return p
+    act = store.exec(
+        "SELECT id FROM sprints WHERE project_id = \$1 AND state = 'active' LIMIT 1", Any[id])
+    isempty(act) || throw(ArgumentError("cannot archive project with an active sprint"))
+    store.exec("UPDATE projects SET archived = 1 WHERE id = \$1", Any[id])
+    get_project(store, id)
+end
+
+function _remote_default_project(store)::Project
+    rows = store.exec("SELECT * FROM projects WHERE key = \$1 LIMIT 1", Any[DEFAULT_PROJECT_KEY])
+    isempty(rows) && throw(ErrorException("Default project missing — run migrations"))
+    remote_row_to_project(rows[1])
+end
+
+"""Resolve optional project_id to a real non-archived project id (Default if omitted)."""
+function _remote_resolve_project_id(store, project_id::Union{AbstractString,Nothing})::Tuple{String,String}
+    if project_id === nothing || isempty(String(project_id))
+        p = _remote_default_project(store)
+        p.archived && throw(ArgumentError("project is archived: $(p.id)"))
+        return (p.id, p.key)
+    end
+    p = get_project(store, project_id)
+    p === nothing && throw(ArgumentError("no such project: $project_id"))
+    p.archived && throw(ArgumentError("project is archived: $project_id"))
+    (p.id, p.key)
+end
+
+"""Throw if `project_id` names an archived project (no-op for empty/missing id)."""
+function _remote_assert_project_writable!(store::RemoteBoardStore, project_id::AbstractString)
+    isempty(project_id) && return nothing
+    p = get_project(store, project_id)
+    p === nothing && return nothing
+    p.archived && throw(ArgumentError("project is archived: $project_id"))
+    nothing
+end
+
+function board_schema_version(store::RemoteBoardStore)::Int
+    rows = store.exec("SELECT MAX(version) AS v FROM schema_migrations", Any[])
+    isempty(rows) && return 0
+    Int(something(_get(rows[1], "v"), 0))
+end
 
 function create_issue!(store::RemoteBoardStore; title::AbstractString, description::AbstractString = "",
                        status::AbstractString = "Backlog", priority::AbstractString = "Medium",
@@ -202,21 +311,23 @@ function create_issue!(store::RemoteBoardStore; title::AbstractString, descripti
                        start_date::Union{Date,Nothing} = nothing,
                        due_date::Union{Date,Nothing} = nothing,
                        key::Union{AbstractString,Nothing} = nothing,
-                       position::Union{Integer,Nothing} = nothing)::Issue
+                       position::Union{Integer,Nothing} = nothing,
+                       project_id::Union{AbstractString,Nothing} = nothing)::Issue
     valid_status(status) || throw(ArgumentError("invalid status: $status"))
     valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
+    pid, pkey = _remote_resolve_project_id(store, project_id)
     id = new_id(); now = Dates.now(UTC)
     # C2: MAX+1 sequential key (not random) and append-position (count in status).
-    k = key === nothing ? _remote_generate_issue_key(store) : String(key)
+    k = key === nothing ? _remote_generate_issue_key(store, pkey) : String(key)
     pos = position === nothing ? _remote_status_count(store, status) : Int(position)
-    store.exec("INSERT INTO issues (id, key, title, description, status, priority, story_points, epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position, created, updated) VALUES ($(pg_placeholders(16)))",
+    store.exec("INSERT INTO issues (id, key, title, description, status, priority, story_points, epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position, created, updated, project_id) VALUES ($(pg_placeholders(17)))",
                Any[id, k, title, description, status, priority, story_points, epic_id, sprint_id,
                    assignee_id, reporter_id, _date_str(start_date), _date_str(due_date),
-                   pos, _dt_str(now), _dt_str(now)])
+                   pos, _dt_str(now), _dt_str(now), pid])
     Issue(; id = id, key = k, title = title, description = description, status = status,
           priority = priority, story_points = story_points, epic_id = epic_id, sprint_id = sprint_id,
           assignee_id = assignee_id, reporter_id = reporter_id, start_date = start_date,
-          due_date = due_date, position = pos, created = now, updated = now)
+          due_date = due_date, position = pos, created = now, updated = now, project_id = pid)
 end
 
 function get_issue(store::RemoteBoardStore, id::AbstractString)
@@ -225,12 +336,27 @@ function get_issue(store::RemoteBoardStore, id::AbstractString)
     remote_row_to_issue(rows[1])
 end
 
-list_issues(store::RemoteBoardStore; status::Union{AbstractString,Nothing} = nothing)::Vector{Issue} =
-    status === nothing ?
-        [remote_row_to_issue(d) for d in store.exec("SELECT * FROM issues ORDER BY status, position, key", Any[])] :
-        [remote_row_to_issue(d) for d in store.exec("SELECT * FROM issues WHERE status = \$1 ORDER BY position, key", Any[status])]
+function list_issues(store::RemoteBoardStore;
+                     status::Union{AbstractString,Nothing} = nothing,
+                     project_id::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
+    project_id = _norm_project_filter(project_id)
+    rows = if project_id === nothing && status === nothing
+        store.exec("SELECT * FROM issues ORDER BY status, position, key", Any[])
+    elseif project_id === nothing
+        store.exec("SELECT * FROM issues WHERE status = \$1 ORDER BY position, key", Any[status])
+    elseif status === nothing
+        store.exec("SELECT * FROM issues WHERE project_id = \$1 ORDER BY status, position, key",
+                   Any[project_id])
+    else
+        store.exec("SELECT * FROM issues WHERE project_id = \$1 AND status = \$2 ORDER BY position, key",
+                   Any[project_id, status])
+    end
+    [remote_row_to_issue(d) for d in rows]
+end
 
 function update_issue!(store::RemoteBoardStore, id::AbstractString; kwargs...)
+    iss0 = get_issue(store, id)
+    iss0 !== nothing && _remote_assert_project_writable!(store, iss0.project_id)
     move_status = nothing; move_pos = nothing
     fields = String[]; vals = Any[]; i = 1
     for (k, v) in kwargs
@@ -268,6 +394,7 @@ end
 function delete_issue!(store::RemoteBoardStore, id::AbstractString)::Bool
     iss = get_issue(store, id)
     iss === nothing && return false
+    _remote_assert_project_writable!(store, iss.project_id)
     store.exec("DELETE FROM issue_labels WHERE issue_id = \$1", Any[id])
     store.exec("DELETE FROM issues WHERE id = \$1", Any[id])
     _remote_reindex_status!(store, iss.status)   # C3: keep positions dense after delete
@@ -280,6 +407,7 @@ function move_issue!(store::RemoteBoardStore, id::AbstractString;
                      position::Union{Integer,Nothing} = nothing)
     iss = get_issue(store, id)
     iss === nothing && return nothing
+    _remote_assert_project_writable!(store, iss.project_id)
     old_status = iss.status
     new_status = status === nothing ? old_status : String(status)
     valid_status(new_status) || throw(ArgumentError("invalid status: $new_status"))
@@ -302,68 +430,102 @@ rank_issue!(store::RemoteBoardStore, id::AbstractString; position::Integer) =
 
 # ── Epics ─────────────────────────────────────────────────────────────────
 function create_epic!(store::RemoteBoardStore; name::AbstractString, color::AbstractString = "violet",
-                      key::Union{AbstractString,Nothing} = nothing)::Epic
-    id = new_id(); created = Dates.now(UTC); k = key === nothing ? _remote_generate_epic_key(store) : String(key)
-    store.exec("INSERT INTO epics (id, key, name, color, created) VALUES ($(pg_placeholders(5)))",
-               Any[id, k, name, color, _dt_str(created)])
-    Epic(; id = id, key = k, name = name, color = color, created = created)
+                      key::Union{AbstractString,Nothing} = nothing,
+                      project_id::Union{AbstractString,Nothing} = nothing)::Epic
+    pid, pkey = _remote_resolve_project_id(store, project_id)
+    id = new_id(); created = Dates.now(UTC)
+    k = key === nothing ? _remote_generate_epic_key(store, pkey) : String(key)
+    store.exec("INSERT INTO epics (id, key, name, color, created, project_id) VALUES ($(pg_placeholders(6)))",
+               Any[id, k, name, color, _dt_str(created), pid])
+    Epic(; id = id, key = k, name = name, color = color, created = created, project_id = pid)
 end
 function get_epic(store::RemoteBoardStore, id::AbstractString)
     rows = store.exec("SELECT * FROM epics WHERE id = \$1 LIMIT 1", Any[id])
     isempty(rows) && return nothing
     remote_row_to_epic(rows[1])
 end
-list_epics(store::RemoteBoardStore)::Vector{Epic} =
-    [remote_row_to_epic(d) for d in store.exec("SELECT * FROM epics ORDER BY key", Any[])]
+function list_epics(store::RemoteBoardStore;
+                    project_id::Union{AbstractString,Nothing} = nothing)::Vector{Epic}
+    project_id = _norm_project_filter(project_id)
+    rows = project_id === nothing ?
+        store.exec("SELECT * FROM epics ORDER BY key", Any[]) :
+        store.exec("SELECT * FROM epics WHERE project_id = \$1 ORDER BY key", Any[project_id])
+    [remote_row_to_epic(d) for d in rows]
+end
 function update_epic!(store::RemoteBoardStore, id::AbstractString; name = nothing, color = nothing)
+    ep = get_epic(store, id)
+    ep === nothing && return nothing
     fields = String[]; vals = Any[]; i = 1
     name === nothing || (push!(fields, "name = \$$(i)"); push!(vals, name); i += 1)
     color === nothing || (push!(fields, "color = \$$(i)"); push!(vals, color); i += 1)
-    isempty(fields) && return get_epic(store, id)
+    isempty(fields) && return ep
+    _remote_assert_project_writable!(store, ep.project_id)
     push!(vals, id)
     store.exec("UPDATE epics SET $(join(fields, ", ")) WHERE id = \$$(i)", vals)
     get_epic(store, id)
 end
 function delete_epic!(store::RemoteBoardStore, id::AbstractString)::Bool
+    ep = get_epic(store, id)
+    ep === nothing && return false
+    _remote_assert_project_writable!(store, ep.project_id)
     store.exec("DELETE FROM epics WHERE id = \$1", Any[id]); true
 end
 
 # ── Sprints ─────────────────────────────────────────────────────────────────
 function create_sprint!(store::RemoteBoardStore; name::AbstractString, goal::AbstractString = "",
                         start_date::Union{Date,Nothing} = nothing,
-                        end_date::Union{Date,Nothing} = nothing)::Sprint
+                        end_date::Union{Date,Nothing} = nothing,
+                        project_id::Union{AbstractString,Nothing} = nothing)::Sprint
+    pid, _ = _remote_resolve_project_id(store, project_id)
     id = new_id()
-    store.exec("INSERT INTO sprints (id, name, goal, start_date, end_date, state) VALUES ($(pg_placeholders(6)))",
-               Any[id, name, goal, _date_str(start_date), _date_str(end_date), "future"])
-    Sprint(; id = id, name = name, goal = goal, start_date = start_date, end_date = end_date, state = :future)
+    store.exec("INSERT INTO sprints (id, name, goal, start_date, end_date, state, project_id) VALUES ($(pg_placeholders(7)))",
+               Any[id, name, goal, _date_str(start_date), _date_str(end_date), "future", pid])
+    Sprint(; id = id, name = name, goal = goal, start_date = start_date, end_date = end_date,
+           state = :future, project_id = pid)
 end
 function get_sprint(store::RemoteBoardStore, id::AbstractString)
     rows = store.exec("SELECT * FROM sprints WHERE id = \$1 LIMIT 1", Any[id])
     isempty(rows) && return nothing
     remote_row_to_sprint(rows[1])
 end
-list_sprints(store::RemoteBoardStore)::Vector{Sprint} =
-    [remote_row_to_sprint(d) for d in store.exec("SELECT * FROM sprints ORDER BY name", Any[])]
+function list_sprints(store::RemoteBoardStore;
+                      project_id::Union{AbstractString,Nothing} = nothing)::Vector{Sprint}
+    project_id = _norm_project_filter(project_id)
+    rows = project_id === nothing ?
+        store.exec("SELECT * FROM sprints ORDER BY name", Any[]) :
+        store.exec("SELECT * FROM sprints WHERE project_id = \$1 ORDER BY name", Any[project_id])
+    [remote_row_to_sprint(d) for d in rows]
+end
 function update_sprint!(store::RemoteBoardStore, id::AbstractString;
                         name = nothing, goal = nothing, start_date = nothing, end_date = nothing)
+    sp = get_sprint(store, id)
+    sp === nothing && return nothing
     fields = String[]; vals = Any[]; i = 1
     name === nothing || (push!(fields, "name = \$$(i)"); push!(vals, name); i += 1)
     goal === nothing || (push!(fields, "goal = \$$(i)"); push!(vals, goal); i += 1)
     start_date === nothing || (push!(fields, "start_date = \$$(i)"); push!(vals, string(start_date)); i += 1)
     end_date === nothing || (push!(fields, "end_date = \$$(i)"); push!(vals, string(end_date)); i += 1)
-    isempty(fields) && return get_sprint(store, id)
+    isempty(fields) && return sp
+    _remote_assert_project_writable!(store, sp.project_id)
     push!(vals, id)
     store.exec("UPDATE sprints SET $(join(fields, ", ")) WHERE id = \$$(i)", vals)
     get_sprint(store, id)
 end
-function active_sprint(store::RemoteBoardStore)
-    rows = store.exec("SELECT * FROM sprints WHERE state = 'active' ORDER BY name LIMIT 1", Any[])
+function active_sprint(store::RemoteBoardStore;
+                       project_id::Union{AbstractString,Nothing} = nothing)
+    # PR-M1: optional project_id filter; without kw stays global (compat).
+    project_id = _norm_project_filter(project_id)
+    rows = project_id === nothing ?
+        store.exec("SELECT * FROM sprints WHERE state = 'active' ORDER BY name, id LIMIT 1", Any[]) :
+        store.exec("SELECT * FROM sprints WHERE state = 'active' AND project_id = \$1 ORDER BY name, id LIMIT 1",
+                   Any[project_id])
     isempty(rows) && return nothing
     remote_row_to_sprint(rows[1])
 end
 function start_sprint!(store::RemoteBoardStore, id::AbstractString)::Sprint
     s = get_sprint(store, id)
     s === nothing && throw(ArgumentError("no such sprint: $id"))
+    _remote_assert_project_writable!(store, s.project_id)
     active_sprint(store) === nothing || throw(ArgumentError("another sprint is already active"))
     s2 = transition(s, :active)
     # C8: guard the write at the DB level so the single-active invariant holds.
@@ -379,14 +541,25 @@ function close_sprint!(store::RemoteBoardStore, id::AbstractString)::Sprint
 end
 
 # ── Labels ─────────────────────────────────────────────────────────────────
-function create_label!(store::RemoteBoardStore; name::AbstractString, color::AbstractString = "blue")::Label
+function create_label!(store::RemoteBoardStore; name::AbstractString, color::AbstractString = "blue",
+                       project_id::Union{AbstractString,Nothing} = nothing)::Label
+    pid, _ = _remote_resolve_project_id(store, project_id)
     id = new_id()
-    store.exec("INSERT INTO labels (id, name, color) VALUES ($(pg_placeholders(3)))", Any[id, name, color])
-    Label(; id = id, name = name, color = color)
+    store.exec("INSERT INTO labels (id, name, color, project_id) VALUES ($(pg_placeholders(4)))",
+               Any[id, name, color, pid])
+    Label(; id = id, name = name, color = color, project_id = pid)
 end
-list_labels(store::RemoteBoardStore)::Vector{Label} =
-    [remote_row_to_label(d) for d in store.exec("SELECT * FROM labels ORDER BY name", Any[])]
+function list_labels(store::RemoteBoardStore;
+                     project_id::Union{AbstractString,Nothing} = nothing)::Vector{Label}
+    project_id = _norm_project_filter(project_id)
+    rows = project_id === nothing ?
+        store.exec("SELECT * FROM labels ORDER BY name", Any[]) :
+        store.exec("SELECT * FROM labels WHERE project_id = \$1 ORDER BY name", Any[project_id])
+    [remote_row_to_label(d) for d in rows]
+end
 function set_labels!(store::RemoteBoardStore, issue_id::AbstractString, label_ids::Vector{String})
+    iss = get_issue(store, issue_id)
+    iss !== nothing && _remote_assert_project_writable!(store, iss.project_id)
     store.exec("DELETE FROM issue_labels WHERE issue_id = \$1", Any[issue_id])
     for lid in label_ids
         store.exec("INSERT INTO issue_labels (issue_id, label_id) VALUES ($(pg_placeholders(2)))", Any[issue_id, lid])
@@ -424,10 +597,15 @@ list_activity(store::RemoteBoardStore, issue_id::AbstractString)::Vector{Activit
 issues_for_sprint(store::RemoteBoardStore, sprint_id::AbstractString)::Vector{Issue} =
     [remote_row_to_issue(d) for d in
      store.exec("SELECT * FROM issues WHERE sprint_id = \$1 ORDER BY status, position, key", Any[sprint_id])]
-backlog_issues(store::RemoteBoardStore)::Vector{Issue} =
-    [remote_row_to_issue(d) for d in
-     store.exec("SELECT * FROM issues WHERE sprint_id IS NULL ORDER BY status, position, key", Any[])]
-
+function backlog_issues(store::RemoteBoardStore;
+                        project_id::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
+    project_id = _norm_project_filter(project_id)
+    rows = project_id === nothing ?
+        store.exec("SELECT * FROM issues WHERE sprint_id IS NULL ORDER BY status, position, key", Any[]) :
+        store.exec("SELECT * FROM issues WHERE sprint_id IS NULL AND project_id = \$1 ORDER BY status, position, key",
+                   Any[project_id])
+    [remote_row_to_issue(d) for d in rows]
+end
 # ── Outbox ─────────────────────────────────────────────────────────────────
 function enqueue_outbox!(store::RemoteBoardStore; event_kind::Symbol, recipient_email::AbstractString,
                          subject::AbstractString, body::AbstractString)::String

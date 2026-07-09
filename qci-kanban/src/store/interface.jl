@@ -72,9 +72,7 @@ function enqueue_outbox! end
 function pending_outbox end
 function mark_sent! end
 function seed_demo! end
-# Project APIs + optional `project_id` kwargs on list/create are implemented on
-# SQLiteBoardStore (PR-M1). RemoteBoardStore parity is PR-M1b — calling these on
-# Remote (or passing `project_id=` to Remote list/create) will MethodError until then.
+# Project APIs + optional `project_id` kwargs: SQLite (PR-M1) + Remote/FakeExec (PR-M1b).
 function create_project! end
 function list_projects end
 function get_project end
