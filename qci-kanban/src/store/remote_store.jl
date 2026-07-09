@@ -86,18 +86,23 @@ function remote_row_to_issue(d::AbstractDict)::Issue
           start_date = parse_date(_get(d, "start_date")), due_date = parse_date(_get(d, "due_date")),
           position = Int(something(_get(d, "position"), 0)), labels = String[],
           created = parse_dt(something(_get(d, "created"), Dates.now(UTC))),
-          updated = parse_dt(something(_get(d, "updated"), Dates.now(UTC))))
+          updated = parse_dt(something(_get(d, "updated"), Dates.now(UTC))),
+          # PR-M1b will plumb project_id fully; default keeps FakeExec mappers green.
+          project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end)
 end
 
 remote_row_to_epic(d::AbstractDict)::Epic =
     Epic(; id = String(_get(d, "id")), key = String(_get(d, "key")), name = String(_get(d, "name")),
-         color = String(_get(d, "color")), created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
+         color = String(_get(d, "color")),
+         created = parse_dt(something(_get(d, "created"), Dates.now(UTC))),
+         project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end)
 
 remote_row_to_sprint(d::AbstractDict)::Sprint =
     Sprint(; id = String(_get(d, "id")), name = String(_get(d, "name")),
            goal = let x = _get(d, "goal"); x === nothing ? "" : String(x) end,
            start_date = parse_date(_get(d, "start_date")), end_date = parse_date(_get(d, "end_date")),
-           state = Symbol(_get(d, "state")))
+           state = Symbol(_get(d, "state")),
+           project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end)
 
 remote_row_to_comment(d::AbstractDict)::Comment =
     Comment(; id = String(_get(d, "id")), issue_id = String(_get(d, "issue_id")),
@@ -105,7 +110,8 @@ remote_row_to_comment(d::AbstractDict)::Comment =
             created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
 
 remote_row_to_label(d::AbstractDict)::Label =
-    Label(; id = String(_get(d, "id")), name = String(_get(d, "name")), color = String(_get(d, "color")))
+    Label(; id = String(_get(d, "id")), name = String(_get(d, "name")), color = String(_get(d, "color")),
+          project_id = let x = _get(d, "project_id"); x === nothing ? "" : String(x) end)
 
 remote_row_to_activity(d::AbstractDict)::ActivityEvent =
     ActivityEvent(; id = String(_get(d, "id")), issue_id = String(_get(d, "issue_id")),

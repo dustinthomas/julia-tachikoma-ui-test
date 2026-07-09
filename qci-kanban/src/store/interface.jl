@@ -23,6 +23,8 @@ export add_comment!, list_comments, log_activity!, list_activity
 export rank_issue!, move_issue!, issues_for_sprint, backlog_issues
 export enqueue_outbox!, pending_outbox, mark_sent!
 export seed_demo!
+export create_project!, list_projects, get_project, archive_project!
+export board_schema_version
 
 abstract type AbstractUserStore end
 abstract type AbstractBoardStore end
@@ -70,6 +72,11 @@ function enqueue_outbox! end
 function pending_outbox end
 function mark_sent! end
 function seed_demo! end
+function create_project! end
+function list_projects end
+function get_project end
+function archive_project! end
+function board_schema_version end
 
 # ── Shared helpers (pure) ─────────────────────────────────────────────────
 new_id() = string(uuid4())

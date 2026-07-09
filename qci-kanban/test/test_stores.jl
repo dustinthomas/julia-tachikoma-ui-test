@@ -1,6 +1,8 @@
 # Unit tests for QciKanban.Config, QciKanban.Stores (SQLite + Remote/fake exec).
 using Test
 using Dates
+using SQLite
+using DBInterface
 const S = QciKanban.Stores
 const C = QciKanban.Config
 const P = QciKanban.Passwords
@@ -111,9 +113,13 @@ end
 
 @testset "Stores: SQLite board store CRUD" begin
     bs = S.SQLiteBoardStore(":memory:")
+    @test S.board_schema_version(bs) == 5
     @testset "issues" begin
         i = S.create_issue!(bs; title = "First", status = "Backlog", priority = "High")
         @test startswith(i.key, "QCI-") && i.position == 0
+        @test !isempty(i.project_id)  # defaults to Default project
+        def = only(S.list_projects(bs))
+        @test def.key == "QCI" && i.project_id == def.id
         i2 = S.create_issue!(bs; title = "Second", status = "Backlog")
         @test i2.position == 1  # dense append
         @test i2.key != i.key
@@ -122,6 +128,8 @@ end
         @test length(S.list_issues(bs)) == 2
         @test length(S.list_issues(bs; status = "Backlog")) == 2
         @test isempty(S.list_issues(bs; status = "Done"))
+        @test length(S.list_issues(bs; project_id = def.id)) == 2
+        @test isempty(S.list_issues(bs; project_id = "missing-proj"))
         upd = S.update_issue!(bs, i.id; title = "First!", priority = "Low", due_date = Date(2026, 5, 1), story_points = 8)
         @test upd.title == "First!" && upd.priority == "Low" && upd.due_date == Date(2026, 5, 1) && upd.story_points == 8
         @test S.update_issue!(bs, i.id).title == "First!"          # empty kwargs no-op
@@ -181,7 +189,8 @@ end
 
     @testset "epics" begin
         e = S.create_epic!(bs; name = "Onboarding", color = "teal")
-        @test startswith(e.key, "EPIC-")
+        @test startswith(e.key, "QCI-E-")   # multi-project format {KEY}-E-{n}
+        @test !isempty(e.project_id)
         @test S.get_epic(bs, e.id).name == "Onboarding"
         @test S.get_epic(bs, "nope") === nothing
         S.create_epic!(bs; name = "Core")
@@ -303,6 +312,151 @@ end
     @test us isa S.SQLiteUserStore && bs isa S.SQLiteBoardStore
     S.close!(us); S.close!(bs)
     @test true
+end
+
+@testset "Stores: project CRUD + optional project_id + keys" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    def = only(S.list_projects(bs))
+    @test def.key == "QCI" && def.name == "Default" && !def.archived
+    @test S.get_project(bs, def.id).key == "QCI"
+    @test S.get_project(bs, "nope") === nothing
+
+    la = S.create_project!(bs; key = "LA", name = "Line A", description = "site", color = "teal")
+    @test la.key == "LA" && la.name == "Line A" && la.color == "teal"
+    @test length(S.list_projects(bs)) == 2
+    @test_throws ArgumentError S.create_project!(bs; key = "LA", name = "Dup")
+    @test_throws ArgumentError S.create_project!(bs; key = "bad", name = "X")
+    @test_throws ArgumentError S.create_project!(bs; key = "OK", name = "  ")
+
+    # creates without project_id → Default; with project_id → that project
+    i_def = S.create_issue!(bs; title = "On default")
+    @test i_def.project_id == def.id && startswith(i_def.key, "QCI-")
+    i_la = S.create_issue!(bs; title = "On LA", project_id = la.id)
+    @test i_la.project_id == la.id && startswith(i_la.key, "LA-")
+    @test length(S.list_issues(bs)) == 2
+    @test length(S.list_issues(bs; project_id = la.id)) == 1
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = "missing")
+
+    e_def = S.create_epic!(bs; name = "DefEpic")
+    @test startswith(e_def.key, "QCI-E-") && e_def.project_id == def.id
+    e_la = S.create_epic!(bs; name = "LA Epic", project_id = la.id)
+    @test startswith(e_la.key, "LA-E-") && e_la.project_id == la.id
+    @test length(S.list_epics(bs; project_id = la.id)) == 1
+
+    sp = S.create_sprint!(bs; name = "Win", project_id = la.id)
+    @test sp.project_id == la.id
+    @test length(S.list_sprints(bs; project_id = la.id)) == 1
+    lbl = S.create_label!(bs; name = "PM", project_id = la.id)
+    @test lbl.project_id == la.id
+    @test length(S.list_labels(bs; project_id = la.id)) == 1
+
+    # key generator: MAX then _next_seq!; deleted numbers never recycled
+    k1 = S.create_issue!(bs; title = "k1", project_id = la.id).key
+    k2 = S.create_issue!(bs; title = "k2", project_id = la.id).key
+    n1 = parse(Int, split(k1, '-')[end]); n2 = parse(Int, split(k2, '-')[end])
+    @test n2 == n1 + 1
+    # archive
+    @test_throws ArgumentError S.archive_project!(bs, "missing")
+    S.start_sprint!(bs, sp.id)
+    @test_throws ArgumentError S.archive_project!(bs, la.id)  # active sprint blocks
+    S.close_sprint!(bs, sp.id)
+    arch = S.archive_project!(bs, la.id)
+    @test arch.archived
+    @test length(S.list_projects(bs)) == 1  # Default only
+    @test length(S.list_projects(bs; include_archived = true)) == 2
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id)  # archived
+end
+
+@testset "Stores: on-disk pre-v1 migration fixture → v5" begin
+    # Build a board.db with the *old* CREATE (no project_id, no migrations),
+    # seed rows, then open via SQLiteBoardStore so migrate_board_schema! runs.
+    mktempdir() do dir
+        path = joinpath(dir, "board.db")
+        raw = SQLite.DB(path)
+        DBInterface.execute(raw, """
+            CREATE TABLE issues (
+                id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+                description TEXT, status TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'Medium',
+                story_points INTEGER, epic_id TEXT, sprint_id TEXT, assignee_id TEXT,
+                reporter_id TEXT, start_date TEXT, due_date TEXT, position INTEGER NOT NULL DEFAULT 0,
+                created TEXT NOT NULL, updated TEXT NOT NULL
+            )
+        """)
+        DBInterface.execute(raw, "CREATE INDEX idx_issues_status_pos ON issues(status, position)")
+        DBInterface.execute(raw, "CREATE TABLE key_seq (prefix TEXT PRIMARY KEY, last INTEGER NOT NULL)")
+        DBInterface.execute(raw, """
+            CREATE TABLE epics (
+                id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL, color TEXT NOT NULL, created TEXT NOT NULL
+            )
+        """)
+        DBInterface.execute(raw, """
+            CREATE TABLE sprints (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, goal TEXT,
+                start_date TEXT, end_date TEXT, state TEXT NOT NULL
+            )
+        """)
+        DBInterface.execute(raw, "CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL)")
+        DBInterface.execute(raw, """
+            CREATE TABLE issue_labels (
+                issue_id TEXT NOT NULL, label_id TEXT NOT NULL, PRIMARY KEY (issue_id, label_id)
+            )
+        """)
+        DBInterface.execute(raw, """
+            CREATE TABLE comments (
+                id TEXT PRIMARY KEY, issue_id TEXT NOT NULL,
+                author_id TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL
+            )
+        """)
+        DBInterface.execute(raw, """
+            CREATE TABLE activity (
+                id TEXT PRIMARY KEY, issue_id TEXT NOT NULL, actor_id TEXT,
+                kind TEXT NOT NULL, detail TEXT, created TEXT NOT NULL
+            )
+        """)
+        DBInterface.execute(raw, """
+            CREATE TABLE outbox (
+                id TEXT PRIMARY KEY, event_kind TEXT NOT NULL,
+                recipient_email TEXT NOT NULL, subject TEXT NOT NULL,
+                body TEXT NOT NULL, created TEXT NOT NULL, sent_at TEXT
+            )
+        """)
+        now = string(Dates.now(UTC))
+        DBInterface.execute(raw,
+            "INSERT INTO issues (id, key, title, description, status, priority, position, created, updated)
+             VALUES ('iss1', 'QCI-100', 'Legacy', '', 'Backlog', 'Medium', 0, ?, ?)",
+            [now, now])
+        DBInterface.execute(raw,
+            "INSERT INTO epics (id, key, name, color, created) VALUES ('ep1', 'EPIC-100', 'OldEpic', 'violet', ?)",
+            [now])
+        DBInterface.execute(raw,
+            "INSERT INTO sprints (id, name, goal, start_date, end_date, state)
+             VALUES ('sp1', 'S1', '', NULL, NULL, 'future')")
+        DBInterface.execute(raw,
+            "INSERT INTO labels (id, name, color) VALUES ('lb1', 'bug', 'red')")
+        SQLite.close(raw)
+
+        bs = S.SQLiteBoardStore(path)
+        @test S.board_schema_version(bs) == 5
+        @test S.board_schema_version(bs) <= 5  # PR-M1 does not apply v6
+        projs = S.list_projects(bs)
+        @test length(projs) == 1 && projs[1].key == "QCI" && projs[1].name == "Default"
+        pid = projs[1].id
+        iss = S.get_issue(bs, "iss1")
+        @test iss !== nothing && iss.project_id == pid && iss.key == "QCI-100"
+        @test S.get_epic(bs, "ep1").project_id == pid
+        @test S.get_sprint(bs, "sp1").project_id == pid
+        @test only(S.list_labels(bs)).project_id == pid
+        # create under a new project after migrate
+        p2 = S.create_project!(bs; key = "CAPEX", name = "Capex")
+        ni = S.create_issue!(bs; title = "Post-migrate", project_id = p2.id)
+        @test startswith(ni.key, "CAPEX-") && ni.project_id == p2.id
+        # Default project continues QCI-n past legacy max
+        n2 = S.create_issue!(bs; title = "Next QCI")
+        @test startswith(n2.key, "QCI-")
+        @test parse(Int, split(n2.key, '-')[end]) >= 101
+        S.close!(bs)
+    end
 end
 
 @testset "Stores: Remote (Postgres) via FakeExec" begin

@@ -18,6 +18,21 @@ const D = QciKanban.Domain
         @test !D.valid_sprint_state(:paused)
         @test D.valid_notification_kind(:assigned) && D.valid_notification_kind(:mentioned)
         @test !D.valid_notification_kind(:bogus)
+        @test D.valid_project_key("QCI") && D.valid_project_key("LA") && D.valid_project_key("LINE2")
+        @test D.valid_project_key("MAINT") && D.valid_project_key("A1") && D.valid_project_key("ABCDEFGH")
+        @test !D.valid_project_key("") && !D.valid_project_key("A") && !D.valid_project_key("abcdefgh")
+        @test !D.valid_project_key("qci") && !D.valid_project_key("QC-1") && !D.valid_project_key("ABCDEFGHI")
+    end
+
+    @testset "Project" begin
+        p = D.Project(; id = "p1", key = "QCI", name = "Default")
+        @test p.key == "QCI" && p.name == "Default" && p.archived == false
+        @test p.description == "" && p.color == "blue"
+        p2 = D.Project(; id = "p2", key = "LA", name = "Line A", description = "plant",
+                       color = "teal", archived = true)
+        @test p2.archived && p2.color == "teal"
+        @test_throws ArgumentError D.Project(; id = "p", key = "bad", name = "n")
+        @test_throws ArgumentError D.Project(; id = "p", key = "QCI", name = "  ")
     end
 
     @testset "User" begin
@@ -34,12 +49,14 @@ const D = QciKanban.Domain
         i = D.Issue(; id = "i1", key = "QCI-1", title = "T")
         @test i.status == "Backlog" && i.priority == "Medium"
         @test i.story_points === nothing && i.labels == String[]
+        @test i.project_id == ""
         i2 = D.Issue(; id = "i2", key = "QCI-2", title = "T2", status = "Done",
                      priority = "High", story_points = 5, epic_id = "e", sprint_id = "s",
                      assignee_id = "a", reporter_id = "r", start_date = Date(2026, 1, 1),
-                     due_date = Date(2026, 1, 2), position = 3, labels = ["l1"])
+                     due_date = Date(2026, 1, 2), position = 3, labels = ["l1"],
+                     project_id = "p1")
         @test i2.story_points == 5 && i2.epic_id == "e" && i2.labels == ["l1"]
-        @test i2.due_date == Date(2026, 1, 2) && i2.position == 3
+        @test i2.due_date == Date(2026, 1, 2) && i2.position == 3 && i2.project_id == "p1"
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "  ")
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", status = "Nope")
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", priority = "Nope")
@@ -47,11 +64,15 @@ const D = QciKanban.Domain
     end
 
     @testset "Epic / Label / Comment" begin
-        e = D.Epic(; id = "e1", key = "EPIC-1", name = "Onboarding")
-        @test e.color == "violet"
+        e = D.Epic(; id = "e1", key = "QCI-E-1", name = "Onboarding")
+        @test e.color == "violet" && e.project_id == ""
+        e2 = D.Epic(; id = "e2", key = "LA-E-1", name = "Line", project_id = "p1")
+        @test e2.project_id == "p1"
         @test_throws ArgumentError D.Epic(; id = "e", key = "k", name = "")
         l = D.Label(; id = "l1", name = "bug")
-        @test l.color == "blue"
+        @test l.color == "blue" && l.project_id == ""
+        l2 = D.Label(; id = "l2", name = "PM", project_id = "p1")
+        @test l2.project_id == "p1"
         @test_throws ArgumentError D.Label(; id = "l", name = " ")
         c = D.Comment(; id = "c1", issue_id = "i1", author_id = "u1", body = "hi")
         @test c.body == "hi"
@@ -75,7 +96,9 @@ const D = QciKanban.Domain
 
     @testset "Sprint + state machine" begin
         s = D.Sprint(; id = "s1", name = "Sprint 1")
-        @test s.state == :future && s.goal == ""
+        @test s.state == :future && s.goal == "" && s.project_id == ""
+        s_p = D.Sprint(; id = "s2", name = "S2", project_id = "p1")
+        @test s_p.project_id == "p1"
         @test_throws ArgumentError D.Sprint(; id = "s", name = "")
         @test_throws ArgumentError D.Sprint(; id = "s", name = "n", state = :bogus)
 
@@ -86,7 +109,9 @@ const D = QciKanban.Domain
         @test !D.can_transition(:active, :future)
 
         active = D.transition(s, :active)
-        @test active.state == :active && active.id == s.id
+        @test active.state == :active && active.id == s.id && active.project_id == s.project_id
+        active_p = D.transition(s_p, :active)
+        @test active_p.project_id == "p1"
         closed = D.transition(active, :closed)
         @test closed.state == :closed
         @test_throws ArgumentError D.transition(s, :closed)

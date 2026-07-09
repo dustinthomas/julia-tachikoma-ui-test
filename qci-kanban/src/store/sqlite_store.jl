@@ -44,7 +44,10 @@ function _open_db(path::AbstractString)::SQLite.DB
         dir = dirname(path)
         isempty(dir) || isdir(dir) || mkpath(dir)
     end
-    SQLite.DB(path)
+    db = SQLite.DB(path)
+    # PRAGMA foreign_keys must be set per connection (SQLite default is OFF).
+    DBInterface.execute(db, "PRAGMA foreign_keys = ON")
+    db
 end
 
 _exec(db, sql) = DBInterface.execute(db, sql)
@@ -68,6 +71,14 @@ function init_user_schema!(db::SQLite.DB)
         )
     """)
 end
+
+# Base board tables (pre-multi-project). Migrations v1–v5 add projects,
+# nullable project_id columns, Default backfill, and the proj-status index.
+# Ranking remains global (per status only) until PR-M2 — temporary debt that is
+# safe because only Default has data right after migrate.
+const DEFAULT_PROJECT_KEY = "QCI"
+const DEFAULT_PROJECT_NAME = "Default"
+const BOARD_SCHEMA_TARGET = 5   # PR-M1 stops at v5; v6 (metrics backfill) is PR-M4
 
 function init_board_schema!(db::SQLite.DB)
     _exec(db, """
@@ -131,6 +142,121 @@ function init_board_schema!(db::SQLite.DB)
             body TEXT NOT NULL, created TEXT NOT NULL, sent_at TEXT
         )
     """)
+    migrate_board_schema!(db)
+end
+
+function _schema_version(db::SQLite.DB)::Int
+    tables = _query(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+    isempty(tables.name) && return 0
+    r = _query(db, "SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations")
+    Int(r.v[1])
+end
+
+board_schema_version(store::SQLiteBoardStore)::Int = _schema_version(store.db)
+
+function _record_migration!(db::SQLite.DB, version::Int)
+    _exec(db, "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+          [version, _dt_str(Dates.now(UTC))])
+end
+
+"""
+    migrate_board_schema!(db) -> Int
+
+Apply board migrations v1–v5 (transaction per version). Returns the version after
+migrate. Does **not** run v6 (sprint_metrics backfill — owned by PR-M4).
+"""
+function migrate_board_schema!(db::SQLite.DB)::Int
+    v = _schema_version(db)
+
+    if v < 1
+        SQLite.transaction(db) do
+            _exec(db, """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+            """)
+            _record_migration!(db, 1)
+        end
+        v = 1
+    end
+
+    if v < 2
+        SQLite.transaction(db) do
+            _exec(db, """
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    key TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    color TEXT NOT NULL DEFAULT 'blue',
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    created TEXT NOT NULL
+                )
+            """)
+            # Empty shell for PR-M4 velocity; no rows until metrics land.
+            _exec(db, """
+                CREATE TABLE IF NOT EXISTS sprint_metrics (
+                    sprint_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    planned_units INTEGER NOT NULL DEFAULT 0,
+                    completed_units INTEGER NOT NULL DEFAULT 0,
+                    completed_count INTEGER NOT NULL DEFAULT 0,
+                    incomplete_count INTEGER NOT NULL DEFAULT 0,
+                    unit_kind TEXT NOT NULL DEFAULT 'points',
+                    closed_at TEXT NOT NULL
+                )
+            """)
+            _record_migration!(db, 2)
+        end
+        v = 2
+    end
+
+    if v < 3
+        SQLite.transaction(db) do
+            # Nullable at DB level (SQLite cannot ALTER … SET NOT NULL later without rebuild).
+            _exec(db, "ALTER TABLE issues ADD COLUMN project_id TEXT")
+            _exec(db, "ALTER TABLE epics ADD COLUMN project_id TEXT")
+            _exec(db, "ALTER TABLE sprints ADD COLUMN project_id TEXT")
+            _exec(db, "ALTER TABLE labels ADD COLUMN project_id TEXT")
+            _record_migration!(db, 3)
+        end
+        v = 3
+    end
+
+    if v < 4
+        SQLite.transaction(db) do
+            existing = _query(db, "SELECT id FROM projects WHERE key = ? LIMIT 1", [DEFAULT_PROJECT_KEY])
+            pid = if isempty(existing.id)
+                id = new_id()
+                _exec(db, """
+                    INSERT INTO projects (id, key, name, description, color, archived, created)
+                    VALUES (?, ?, ?, '', 'blue', 0, ?)
+                """, [id, DEFAULT_PROJECT_KEY, DEFAULT_PROJECT_NAME, _dt_str(Dates.now(UTC))])
+                id
+            else
+                String(existing.id[1])
+            end
+            for tbl in ("issues", "epics", "sprints", "labels")
+                _exec(db, "UPDATE $(tbl) SET project_id = ? WHERE project_id IS NULL", [pid])
+            end
+            _record_migration!(db, 4)
+        end
+        v = 4
+    end
+
+    if v < 5
+        SQLite.transaction(db) do
+            _exec(db, """
+                CREATE INDEX IF NOT EXISTS idx_issues_proj_status_pos
+                ON issues(project_id, status, position)
+            """)
+            _record_migration!(db, 5)
+        end
+        v = 5
+    end
+
+    v
 end
 
 # ═══════════════════════════ USER STORE ═══════════════════════════════════
@@ -193,6 +319,18 @@ function deactivate_user!(store::SQLiteUserStore, id::AbstractString)::Bool
 end
 
 # ═══════════════════════════ BOARD STORE ══════════════════════════════════
+_str_or_empty(x) = (x === missing || x === nothing) ? "" : String(x)
+_str_or_nothing(x) = (x === missing || x === nothing) ? nothing : String(x)
+
+function _project_from(r, i)::Project
+    color = _str_or_empty(r.color[i])
+    isempty(color) && (color = "blue")
+    Project(; id = String(r.id[i]), key = String(r.key[i]), name = String(r.name[i]),
+            description = _str_or_empty(r.description[i]), color = color,
+            archived = let a = r.archived[i]; a === missing ? false : (a == 1 || a === true) end,
+            created = parse_dt(r.created[i]))
+end
+
 function _issue_from(r, i)::Issue
     Issue(; id = String(r.id[i]), key = String(r.key[i]), title = String(r.title[i]),
           description = r.description[i] === missing ? "" : String(r.description[i]),
@@ -204,7 +342,8 @@ function _issue_from(r, i)::Issue
           reporter_id = r.reporter_id[i] === missing ? nothing : String(r.reporter_id[i]),
           start_date = parse_date(r.start_date[i]), due_date = parse_date(r.due_date[i]),
           position = Int(r.position[i]), labels = String[],
-          created = parse_dt(r.created[i]), updated = parse_dt(r.updated[i]))
+          created = parse_dt(r.created[i]), updated = parse_dt(r.updated[i]),
+          project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing))
 end
 
 # C10: bump a monotonic per-prefix counter. On first use the counter seeds from
@@ -226,18 +365,106 @@ function _next_seq!(db, prefix::AbstractString, existing_max::Union{Nothing,Miss
     n
 end
 
-function _generate_issue_key(db)::String
-    row = _query(db, "SELECT MAX(CAST(substr(key, 5) AS INTEGER)) AS m FROM issues WHERE key LIKE 'QCI-%'")
-    n = _next_seq!(db, "QCI", isempty(row.m) ? nothing : row.m[1])
-    "QCI-$(n)"
+"""Max numeric suffix for issue keys `{project_key}-{n}` (reject multi-hyphen)."""
+function _max_issue_num(db, project_key::AbstractString)
+    r = _query(db, "SELECT key FROM issues WHERE key LIKE ?", [project_key * "-%"])
+    maxn = nothing
+    # project keys are [A-Z0-9]+ so a plain Regex is safe (no metacharacters).
+    re = Regex("^" * project_key * "-(\\d+)\$")
+    for k in r.key
+        m = match(re, String(k))
+        m === nothing && continue
+        n = parse(Int, m.captures[1])
+        maxn = maxn === nothing ? n : max(maxn, n)
+    end
+    maxn
 end
-function _generate_epic_key(db)::String
-    row = _query(db, "SELECT MAX(CAST(substr(key, 6) AS INTEGER)) AS m FROM epics WHERE key LIKE 'EPIC-%'")
-    n = _next_seq!(db, "EPIC", isempty(row.m) ? nothing : row.m[1])
-    "EPIC-$(n)"
+
+"""Max numeric suffix for epic keys `{project_key}-E-{n}`."""
+function _max_epic_num(db, project_key::AbstractString)
+    r = _query(db, "SELECT key FROM epics WHERE key LIKE ?", [project_key * "-E-%"])
+    maxn = nothing
+    re = Regex("^" * project_key * "-E-(\\d+)\$")
+    for k in r.key
+        m = match(re, String(k))
+        m === nothing && continue
+        n = parse(Int, m.captures[1])
+        maxn = maxn === nothing ? n : max(maxn, n)
+    end
+    maxn
+end
+
+function _generate_issue_key(db, project_key::AbstractString)::String
+    n = _next_seq!(db, project_key, _max_issue_num(db, project_key))
+    "$(project_key)-$(n)"
+end
+
+function _generate_epic_key(db, project_key::AbstractString)::String
+    n = _next_seq!(db, "$(project_key)#EPIC", _max_epic_num(db, project_key))
+    "$(project_key)-E-$(n)"
 end
 
 _status_count(db, status) = Int(_query(db, "SELECT COUNT(*) AS c FROM issues WHERE status = ?", [status]).c[1])
+
+# ── Projects ──────────────────────────────────────────────────────────────
+function create_project!(store::SQLiteBoardStore; key::AbstractString, name::AbstractString,
+                         description::AbstractString = "",
+                         color::AbstractString = "blue")::Project
+    valid_project_key(key) || throw(ArgumentError("invalid project key: $key"))
+    isempty(strip(name)) && throw(ArgumentError("project name must not be empty"))
+    existing = _query(store.db, "SELECT id FROM projects WHERE key = ? LIMIT 1", [key])
+    isempty(existing.id) || throw(ArgumentError("project key already exists: $key"))
+    id = new_id(); created = Dates.now(UTC)
+    _exec(store.db, """
+        INSERT INTO projects (id, key, name, description, color, archived, created)
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+    """, [id, key, name, description, color, _dt_str(created)])
+    Project(; id = id, key = key, name = name, description = description,
+            color = color, archived = false, created = created)
+end
+
+function get_project(store::SQLiteBoardStore, id::AbstractString)
+    r = _query(store.db, "SELECT * FROM projects WHERE id = ? LIMIT 1", [id])
+    isempty(r.id) && return nothing
+    _project_from(r, 1)
+end
+
+function list_projects(store::SQLiteBoardStore; include_archived::Bool = false)::Vector{Project}
+    r = include_archived ?
+        _query(store.db, "SELECT * FROM projects ORDER BY key") :
+        _query(store.db, "SELECT * FROM projects WHERE archived = 0 ORDER BY key")
+    [_project_from(r, i) for i in eachindex(r.id)]
+end
+
+function archive_project!(store::SQLiteBoardStore, id::AbstractString)::Project
+    p = get_project(store, id)
+    p === nothing && throw(ArgumentError("no such project: $id"))
+    p.archived && return p
+    act = _query(store.db,
+        "SELECT id FROM sprints WHERE project_id = ? AND state = 'active' LIMIT 1", [id])
+    isempty(act.id) || throw(ArgumentError("cannot archive project with an active sprint"))
+    _exec(store.db, "UPDATE projects SET archived = 1 WHERE id = ?", [id])
+    get_project(store, id)
+end
+
+function _default_project(db::SQLite.DB)::Project
+    r = _query(db, "SELECT * FROM projects WHERE key = ? LIMIT 1", [DEFAULT_PROJECT_KEY])
+    isempty(r.id) && throw(ErrorException("Default project missing — run migrations"))
+    _project_from(r, 1)
+end
+
+"""Resolve optional project_id to a real non-archived project id (Default if omitted)."""
+function _resolve_project_id(db::SQLite.DB, project_id::Union{AbstractString,Nothing})::Tuple{String,String}
+    if project_id === nothing || isempty(String(project_id))
+        p = _default_project(db)
+        return (p.id, p.key)
+    end
+    r = _query(db, "SELECT * FROM projects WHERE id = ? LIMIT 1", [project_id])
+    isempty(r.id) && throw(ArgumentError("no such project: $project_id"))
+    p = _project_from(r, 1)
+    p.archived && throw(ArgumentError("project is archived: $project_id"))
+    (p.id, p.key)
+end
 
 function create_issue!(store::SQLiteBoardStore; title::AbstractString, description::AbstractString = "",
                        status::AbstractString = "Backlog", priority::AbstractString = "Medium",
@@ -248,20 +475,23 @@ function create_issue!(store::SQLiteBoardStore; title::AbstractString, descripti
                        reporter_id::Union{AbstractString,Nothing} = nothing,
                        start_date::Union{Date,Nothing} = nothing,
                        due_date::Union{Date,Nothing} = nothing,
-                       labels::Vector{String} = String[])::Issue
+                       labels::Vector{String} = String[],
+                       project_id::Union{AbstractString,Nothing} = nothing)::Issue
     valid_status(status) || throw(ArgumentError("invalid status: $status"))
     valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
+    pid, pkey = _resolve_project_id(store.db, project_id)
     id = new_id()
-    key = _generate_issue_key(store.db)
+    key = _generate_issue_key(store.db, pkey)
     now = Dates.now(UTC)
-    position = _status_count(store.db, status)   # append → keeps 0..n dense
+    position = _status_count(store.db, status)   # append → keeps 0..n dense (global until PR-M2)
     _exec(store.db, """
         INSERT INTO issues (id, key, title, description, status, priority, story_points,
-            epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position, created, updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position,
+            created, updated, project_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [id, key, title, description, status, priority, story_points, epic_id, sprint_id,
           assignee_id, reporter_id, _date_str(start_date), _date_str(due_date), position,
-          _dt_str(now), _dt_str(now)])
+          _dt_str(now), _dt_str(now), pid])
     isempty(labels) || set_labels!(store, id, labels)
     get_issue(store, id)
 end
@@ -279,13 +509,25 @@ function _issue_with_labels(store, iss::Issue)::Issue
           status = iss.status, priority = iss.priority, story_points = iss.story_points,
           epic_id = iss.epic_id, sprint_id = iss.sprint_id, assignee_id = iss.assignee_id,
           reporter_id = iss.reporter_id, start_date = iss.start_date, due_date = iss.due_date,
-          position = iss.position, labels = lbls, created = iss.created, updated = iss.updated)
+          position = iss.position, labels = lbls, created = iss.created, updated = iss.updated,
+          project_id = iss.project_id)
 end
 
-function list_issues(store::SQLiteBoardStore; status::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
-    r = status === nothing ?
-        _query(store.db, "SELECT * FROM issues ORDER BY status, position, key") :
+function list_issues(store::SQLiteBoardStore;
+                     status::Union{AbstractString,Nothing} = nothing,
+                     project_id::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
+    r = if project_id === nothing && status === nothing
+        _query(store.db, "SELECT * FROM issues ORDER BY status, position, key")
+    elseif project_id === nothing
         _query(store.db, "SELECT * FROM issues WHERE status = ? ORDER BY position, key", [status])
+    elseif status === nothing
+        _query(store.db, "SELECT * FROM issues WHERE project_id = ? ORDER BY status, position, key",
+               [project_id])
+    else
+        _query(store.db,
+               "SELECT * FROM issues WHERE project_id = ? AND status = ? ORDER BY position, key",
+               [project_id, status])
+    end
     [_issue_with_labels(store, _issue_from(r, i)) for i in eachindex(r.id)]
 end
 
@@ -381,22 +623,32 @@ rank_issue!(store::SQLiteBoardStore, id::AbstractString; position::Integer) =
     move_issue!(store, id; position = position)
 
 # ── Epics ─────────────────────────────────────────────────────────────────
-function create_epic!(store::SQLiteBoardStore; name::AbstractString, color::AbstractString = "violet")::Epic
-    id = new_id(); key = _generate_epic_key(store.db); created = Dates.now(UTC)
-    _exec(store.db, "INSERT INTO epics (id, key, name, color, created) VALUES (?, ?, ?, ?, ?)",
-          [id, key, name, color, _dt_str(created)])
-    Epic(; id = id, key = key, name = name, color = color, created = created)
+function _epic_from(r, i)::Epic
+    Epic(; id = String(r.id[i]), key = String(r.key[i]), name = String(r.name[i]),
+         color = String(r.color[i]), created = parse_dt(r.created[i]),
+         project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing))
+end
+
+function create_epic!(store::SQLiteBoardStore; name::AbstractString, color::AbstractString = "violet",
+                      project_id::Union{AbstractString,Nothing} = nothing)::Epic
+    pid, pkey = _resolve_project_id(store.db, project_id)
+    id = new_id(); key = _generate_epic_key(store.db, pkey); created = Dates.now(UTC)
+    _exec(store.db,
+          "INSERT INTO epics (id, key, name, color, created, project_id) VALUES (?, ?, ?, ?, ?, ?)",
+          [id, key, name, color, _dt_str(created), pid])
+    Epic(; id = id, key = key, name = name, color = color, created = created, project_id = pid)
 end
 function get_epic(store::SQLiteBoardStore, id::AbstractString)
     r = _query(store.db, "SELECT * FROM epics WHERE id = ? LIMIT 1", [id])
     isempty(r.id) && return nothing
-    Epic(; id = String(r.id[1]), key = String(r.key[1]), name = String(r.name[1]),
-         color = String(r.color[1]), created = parse_dt(r.created[1]))
+    _epic_from(r, 1)
 end
-function list_epics(store::SQLiteBoardStore)::Vector{Epic}
-    r = _query(store.db, "SELECT * FROM epics ORDER BY key")
-    [Epic(; id = String(r.id[i]), key = String(r.key[i]), name = String(r.name[i]),
-          color = String(r.color[i]), created = parse_dt(r.created[i])) for i in eachindex(r.id)]
+function list_epics(store::SQLiteBoardStore;
+                    project_id::Union{AbstractString,Nothing} = nothing)::Vector{Epic}
+    r = project_id === nothing ?
+        _query(store.db, "SELECT * FROM epics ORDER BY key") :
+        _query(store.db, "SELECT * FROM epics WHERE project_id = ? ORDER BY key", [project_id])
+    [_epic_from(r, i) for i in eachindex(r.id)]
 end
 function update_epic!(store::SQLiteBoardStore, id::AbstractString; name = nothing, color = nothing)
     fields = String[]; vals = Any[]
@@ -414,25 +666,33 @@ end
 # ── Sprints ─────────────────────────────────────────────────────────────────
 function create_sprint!(store::SQLiteBoardStore; name::AbstractString, goal::AbstractString = "",
                         start_date::Union{Date,Nothing} = nothing,
-                        end_date::Union{Date,Nothing} = nothing)::Sprint
+                        end_date::Union{Date,Nothing} = nothing,
+                        project_id::Union{AbstractString,Nothing} = nothing)::Sprint
+    pid, _ = _resolve_project_id(store.db, project_id)
     id = new_id()
-    _exec(store.db, "INSERT INTO sprints (id, name, goal, start_date, end_date, state) VALUES (?, ?, ?, ?, ?, ?)",
-          [id, name, goal, _date_str(start_date), _date_str(end_date), "future"])
-    Sprint(; id = id, name = name, goal = goal, start_date = start_date, end_date = end_date, state = :future)
+    _exec(store.db,
+          "INSERT INTO sprints (id, name, goal, start_date, end_date, state, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [id, name, goal, _date_str(start_date), _date_str(end_date), "future", pid])
+    Sprint(; id = id, name = name, goal = goal, start_date = start_date, end_date = end_date,
+           state = :future, project_id = pid)
 end
 function _sprint_from(r, i)::Sprint
     Sprint(; id = String(r.id[i]), name = String(r.name[i]),
            goal = r.goal[i] === missing ? "" : String(r.goal[i]),
            start_date = parse_date(r.start_date[i]), end_date = parse_date(r.end_date[i]),
-           state = Symbol(r.state[i]))
+           state = Symbol(r.state[i]),
+           project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing))
 end
 function get_sprint(store::SQLiteBoardStore, id::AbstractString)
     r = _query(store.db, "SELECT * FROM sprints WHERE id = ? LIMIT 1", [id])
     isempty(r.id) && return nothing
     _sprint_from(r, 1)
 end
-function list_sprints(store::SQLiteBoardStore)::Vector{Sprint}
-    r = _query(store.db, "SELECT * FROM sprints ORDER BY name")
+function list_sprints(store::SQLiteBoardStore;
+                      project_id::Union{AbstractString,Nothing} = nothing)::Vector{Sprint}
+    r = project_id === nothing ?
+        _query(store.db, "SELECT * FROM sprints ORDER BY name") :
+        _query(store.db, "SELECT * FROM sprints WHERE project_id = ? ORDER BY name", [project_id])
     [_sprint_from(r, i) for i in eachindex(r.id)]
 end
 function update_sprint!(store::SQLiteBoardStore, id::AbstractString;
@@ -453,6 +713,8 @@ end
 Start a future sprint. C8: the check-and-set runs inside a transaction and the
 UPDATE is guarded (`AND state='future'`) so the single-active invariant is
 enforced at the DB level, not just check-then-act.
+
+PR-M1: still global one-active (not per-project). Per-project active is PR-M2.
 """
 function start_sprint!(store::SQLiteBoardStore, id::AbstractString)::Sprint
     local s2
@@ -475,21 +737,35 @@ function close_sprint!(store::SQLiteBoardStore, id::AbstractString)::Sprint
     end
     s2
 end
-function active_sprint(store::SQLiteBoardStore)
-    r = _query(store.db, "SELECT * FROM sprints WHERE state = 'active' ORDER BY name, id LIMIT 1")
+function active_sprint(store::SQLiteBoardStore;
+                       project_id::Union{AbstractString,Nothing} = nothing)
+    # PR-M1: optional project_id filter; without kw stays global (compat).
+    r = project_id === nothing ?
+        _query(store.db, "SELECT * FROM sprints WHERE state = 'active' ORDER BY name, id LIMIT 1") :
+        _query(store.db,
+               "SELECT * FROM sprints WHERE state = 'active' AND project_id = ? ORDER BY name, id LIMIT 1",
+               [project_id])
     isempty(r.id) && return nothing
     _sprint_from(r, 1)
 end
 
 # ── Labels ─────────────────────────────────────────────────────────────────
-function create_label!(store::SQLiteBoardStore; name::AbstractString, color::AbstractString = "blue")::Label
+function create_label!(store::SQLiteBoardStore; name::AbstractString, color::AbstractString = "blue",
+                       project_id::Union{AbstractString,Nothing} = nothing)::Label
+    pid, _ = _resolve_project_id(store.db, project_id)
     id = new_id()
-    _exec(store.db, "INSERT INTO labels (id, name, color) VALUES (?, ?, ?)", [id, name, color])
-    Label(; id = id, name = name, color = color)
+    _exec(store.db, "INSERT INTO labels (id, name, color, project_id) VALUES (?, ?, ?, ?)",
+          [id, name, color, pid])
+    Label(; id = id, name = name, color = color, project_id = pid)
 end
-function list_labels(store::SQLiteBoardStore)::Vector{Label}
-    r = _query(store.db, "SELECT * FROM labels ORDER BY name")
-    [Label(; id = String(r.id[i]), name = String(r.name[i]), color = String(r.color[i])) for i in eachindex(r.id)]
+function list_labels(store::SQLiteBoardStore;
+                     project_id::Union{AbstractString,Nothing} = nothing)::Vector{Label}
+    r = project_id === nothing ?
+        _query(store.db, "SELECT * FROM labels ORDER BY name") :
+        _query(store.db, "SELECT * FROM labels WHERE project_id = ? ORDER BY name", [project_id])
+    [Label(; id = String(r.id[i]), name = String(r.name[i]), color = String(r.color[i]),
+           project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing))
+     for i in eachindex(r.id)]
 end
 function set_labels!(store::SQLiteBoardStore, issue_id::AbstractString, label_ids::Vector{String})
     _exec(store.db, "DELETE FROM issue_labels WHERE issue_id = ?", [issue_id])
@@ -540,8 +816,13 @@ function issues_for_sprint(store::SQLiteBoardStore, sprint_id::AbstractString)::
     r = _query(store.db, "SELECT * FROM issues WHERE sprint_id = ? ORDER BY status, position, key", [sprint_id])
     [_issue_with_labels(store, _issue_from(r, i)) for i in eachindex(r.id)]
 end
-function backlog_issues(store::SQLiteBoardStore)::Vector{Issue}
-    r = _query(store.db, "SELECT * FROM issues WHERE sprint_id IS NULL ORDER BY status, position, key")
+function backlog_issues(store::SQLiteBoardStore;
+                        project_id::Union{AbstractString,Nothing} = nothing)::Vector{Issue}
+    r = project_id === nothing ?
+        _query(store.db, "SELECT * FROM issues WHERE sprint_id IS NULL ORDER BY status, position, key") :
+        _query(store.db,
+               "SELECT * FROM issues WHERE sprint_id IS NULL AND project_id = ? ORDER BY status, position, key",
+               [project_id])
     [_issue_with_labels(store, _issue_from(r, i)) for i in eachindex(r.id)]
 end
 
