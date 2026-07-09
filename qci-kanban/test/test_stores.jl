@@ -125,6 +125,7 @@ end
         i = S.create_issue!(bs; title = "First", status = "Backlog", priority = "High")
         @test startswith(i.key, "QCI-") && i.position == 0
         @test !isempty(i.project_id)  # defaults to Default project
+        @test i.asset_tag === nothing && i.location === nothing && i.work_type === nothing
         def = only(S.list_projects(bs))
         @test def.key == "QCI" && i.project_id == def.id
         i2 = S.create_issue!(bs; title = "Second", status = "Backlog")
@@ -145,6 +146,22 @@ end
         @test_throws ArgumentError S.update_issue!(bs, i.id; priority = "Nope")
         @test_throws ArgumentError S.create_issue!(bs; title = "x", status = "Nope")
         @test_throws ArgumentError S.create_issue!(bs; title = "x", priority = "Nope")
+    end
+
+    @testset "work-order fields (asset_tag / location / work_type)" begin
+        bw = S.SQLiteBoardStore(":memory:")
+        wo = S.create_issue!(bw; title = "PM pump", asset_tag = "PMP-12",
+                             location = "Line A Bay 3", work_type = "PM", story_points = 4)
+        @test wo.asset_tag == "PMP-12" && wo.location == "Line A Bay 3" && wo.work_type == "PM"
+        got = S.get_issue(bw, wo.id)
+        @test got.asset_tag == "PMP-12" && got.work_type == "PM"
+        upd = S.update_issue!(bw, wo.id; work_type = "CM", asset_tag = "  ", location = "Bay 4")
+        @test upd.work_type == "CM" && upd.asset_tag === nothing && upd.location == "Bay 4"
+        @test_throws ArgumentError S.create_issue!(bw; title = "bad", work_type = "Emergency")
+        @test_throws ArgumentError S.update_issue!(bw, wo.id; work_type = "bogus")
+        # blank work_type clears
+        cleared = S.update_issue!(bw, wo.id; work_type = nothing)
+        @test cleared.work_type === nothing
     end
 
     @testset "C4: update_issue! routes status/position through move (stays dense)" begin
@@ -595,6 +612,7 @@ end
         pid = projs[1].id
         iss = S.get_issue(bs, "iss1")
         @test iss !== nothing && iss.project_id == pid && iss.key == "QCI-100"
+        @test iss.asset_tag === nothing && iss.location === nothing && iss.work_type === nothing
         @test S.get_epic(bs, "ep1").project_id == pid
         @test S.get_sprint(bs, "sp1").project_id == pid
         @test only(S.list_labels(bs)).project_id == pid
@@ -789,6 +807,20 @@ end
         @test S.update_issue!(bs_u, "i"; title = "New", status = "Done", due_date = Date(2026, 3, 3)).title == "T"
         @test any(occursin("UPDATE issues SET", c[1]) for c in fx_u.calls)
         @test S.update_issue!(bs_u, "i").title == "T"  # empty kwargs
+        # PR-M6 work-order fields on remote create/update
+        iwo = S.create_issue!(bs; title = "WO", asset_tag = "CNC-1", location = "Bay", work_type = "PM")
+        @test iwo.asset_tag == "CNC-1" && iwo.location == "Bay" && iwo.work_type == "PM"
+        @test_throws ArgumentError S.create_issue!(bs; title = "x", work_type = "nope")
+        fx_wo = S.FakeExec((s, p) -> [merge(issue_row(), Dict("asset_tag" => "CNC-1", "work_type" => "CM",
+                                                              "location" => "Bay 2"))])
+        bs_wo = S.RemoteBoardStore(fx_wo)
+        @test S.update_issue!(bs_wo, "i"; asset_tag = "  ", location = "Bay 2", work_type = "CM").work_type == "CM"
+        @test any(occursin("work_type", c[1]) for c in fx_wo.calls)
+        @test_throws ArgumentError S.update_issue!(bs_wo, "i"; work_type = "bogus")
+        mapped = S.remote_row_to_issue(Dict("id" => "i", "key" => "k", "title" => "T", "status" => "Backlog",
+                                            "priority" => "Low", "asset_tag" => "A1", "location" => "",
+                                            "work_type" => "Safety"))
+        @test mapped.asset_tag == "A1" && mapped.location === nothing && mapped.work_type == "Safety"
         @test S.delete_issue!(S.RemoteBoardStore(S.FakeExec((s, p) -> [issue_row()])), "i")
         @test !S.delete_issue!(bs, "i")  # no row → false
 

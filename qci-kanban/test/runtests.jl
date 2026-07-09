@@ -70,6 +70,8 @@ include("features/multi_project.jl")
 include("features/seed_config.jl")
 # Velocity / sprint metrics (PR-M4): close snapshots + backlog velocity footer.
 include("features/velocity.jl")
+# Work-order fields (PR-M6): asset_tag, location, work_type + EditForm/chips/search.
+include("features/work_order_fields.jl")
 
 # Phase 4 — Calendar + Gantt: month grid, due marks, drill-down; timeline bars.
 include("test_calendar_view.jl")

@@ -136,7 +136,7 @@ end
     @testset "malformed due date → confirm warning, DB date untouched on decline" begin
         fw_key!(m, 'e')
         @test Qf.text(m.edit_form.due_input) == "2026-03-03"
-        Qf.focus_index!(m.focus, 9)                 # due field
+        Qf.focus_index!(m.focus, 13)                # due field (after WO fields §4.4)
         fw_type!(m, "x")                            # "2026-03-03x" — unparseable
         fw_key!(m, :ctrl, 's')                      # attempt save
         @test m.modal == :confirm

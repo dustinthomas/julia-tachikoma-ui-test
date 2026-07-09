@@ -67,7 +67,9 @@ function _passes_filters(m::AppModel, iss::Domain.Issue)
     q = strip(text(m.search_input))
     if !isempty(q)
         ql = lowercase(q)
-        hay = lowercase(join([iss.title, iss.key, iss.description, join(iss.labels, " ")], " "))
+        # Include asset_tag so shop-floor search by machine tag works (PR-M6).
+        asset = iss.asset_tag === nothing ? "" : iss.asset_tag
+        hay = lowercase(join([iss.title, iss.key, iss.description, asset, join(iss.labels, " ")], " "))
         occursin(ql, hay) || return false
     end
     true
@@ -424,7 +426,7 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
             set_string!(buf, r.x, r.y + i, ln, stl(; fg = col_text()))
         end
     end
-    # line 4: epic tag / labels / assignee / due
+    # line 4: epic / work_type / asset chips / labels / assignee / due
     if r.height >= 4
         y = r.y + 3
         x = r.x
@@ -432,6 +434,20 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
             tag = "◆" * _short(_epic_name(m, iss.epic_id), 7)
             x + length(tag) <= r.x + r.width && set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
             x += length(tag) + 1
+        end
+        if iss.work_type !== nothing
+            wt = "⟨" * iss.work_type * "⟩"
+            if x + textwidth(wt) <= r.x + r.width
+                set_string!(buf, x, y, wt, stl(; fg = col_warn()))
+                x += textwidth(wt) + 1
+            end
+        end
+        if iss.asset_tag !== nothing
+            at = "⚙" * _short(iss.asset_tag, 6)
+            if x + textwidth(at) <= r.x + r.width
+                set_string!(buf, x, y, at, stl(; fg = col_primary_hi()))
+                x += textwidth(at) + 1
+            end
         end
         for lid in iss.labels
             chip = "•"

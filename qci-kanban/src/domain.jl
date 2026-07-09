@@ -13,14 +13,16 @@ const PRIORITIES = ("Low", "Medium", "High")
 const STATUSES   = ("Backlog", "To Do", "In Progress", "Review", "Done")
 const SPRINT_STATES = (:future, :active, :closed)
 const NOTIFICATION_KINDS = (:assigned, :status_changed, :comment_added, :due_soon, :mentioned)
+# Work-order types (manufacturing ops; nullable on Issue).
+const WORK_TYPES = ("PM", "CM", "Improvement", "Safety", "Other")
 # Project keys: 2–8 chars, start with letter, A–Z / 0–9 only (no hyphen).
 const PROJECT_KEY_RE = r"^[A-Z][A-Z0-9]{1,7}$"
 
 export User, Issue, Epic, Sprint, Label, Comment, ActivityEvent, NotificationEvent, Project
 export SprintMetrics
-export PRIORITIES, STATUSES, SPRINT_STATES, NOTIFICATION_KINDS, PROJECT_KEY_RE
+export PRIORITIES, STATUSES, SPRINT_STATES, NOTIFICATION_KINDS, WORK_TYPES, PROJECT_KEY_RE
 export valid_email, valid_priority, valid_status, valid_sprint_state, valid_notification_kind
-export valid_project_key
+export valid_project_key, valid_work_type
 export can_transition, transition
 export sum_units
 
@@ -31,6 +33,8 @@ valid_status(s::AbstractString)::Bool = s in STATUSES
 valid_sprint_state(s::Symbol)::Bool = s in SPRINT_STATES
 valid_notification_kind(k::Symbol)::Bool = k in NOTIFICATION_KINDS
 valid_project_key(k::AbstractString)::Bool = occursin(PROJECT_KEY_RE, k)
+valid_work_type(::Nothing)::Bool = true
+valid_work_type(w::AbstractString)::Bool = w in WORK_TYPES
 
 # ── User ────────────────────────────────────────────────────────────────
 struct User
@@ -70,6 +74,8 @@ Project(; id, key, name, description = "", color = "blue", archived::Bool = fals
     Project(id, key, name, description, color, archived, created)
 
 # ── Issue ───────────────────────────────────────────────────────────────
+# Optional manufacturing work-order fields (PR-M6 / design §4.4):
+# asset_tag, location, work_type — all nullable; work_type constrained to WORK_TYPES.
 struct Issue
     id::String
     key::String
@@ -89,14 +95,22 @@ struct Issue
     created::DateTime
     updated::DateTime
     project_id::String   # required on store writes; "" allowed for pure test fixtures
+    asset_tag::Union{String,Nothing}
+    location::Union{String,Nothing}
+    work_type::Union{String,Nothing}
     function Issue(id, key, title, description, status, priority, story_points,
                    epic_id, sprint_id, assignee_id, reporter_id, start_date,
-                   due_date, position, labels, created, updated, project_id)
+                   due_date, position, labels, created, updated, project_id,
+                   asset_tag, location, work_type)
         isempty(strip(title)) && throw(ArgumentError("issue title must not be empty"))
         valid_status(status)  || throw(ArgumentError("invalid status: $status"))
         valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
         (story_points === nothing || story_points >= 0) ||
             throw(ArgumentError("story_points must be >= 0"))
+        at = _opt_field(asset_tag)
+        loc = _opt_field(location)
+        wt = _opt_field(work_type)
+        valid_work_type(wt) || throw(ArgumentError("invalid work_type: $work_type"))
         new(String(id), String(key), String(title), String(description), String(status),
             String(priority), story_points,
             epic_id === nothing ? nothing : String(epic_id),
@@ -104,18 +118,24 @@ struct Issue
             assignee_id === nothing ? nothing : String(assignee_id),
             reporter_id === nothing ? nothing : String(reporter_id),
             start_date, due_date, Int(position), Vector{String}(labels), created, updated,
-            String(project_id))
+            String(project_id), at, loc, wt)
     end
 end
+
+"Normalize optional free-text fields: nothing / missing / blank → nothing."
+_opt_field(::Nothing) = nothing
+_opt_field(s::AbstractString) = (t = strip(String(s)); isempty(t) ? nothing : t)
+
 function Issue(; id, key, title, description = "", status = "Backlog", priority = "Medium",
                story_points = nothing, epic_id = nothing, sprint_id = nothing,
                assignee_id = nothing, reporter_id = nothing, start_date = nothing,
                due_date = nothing, position = 0, labels = String[],
                created::DateTime = Dates.now(UTC), updated::DateTime = Dates.now(UTC),
-               project_id::AbstractString = "")
+               project_id::AbstractString = "",
+               asset_tag = nothing, location = nothing, work_type = nothing)
     Issue(id, key, title, description, status, priority, story_points, epic_id, sprint_id,
           assignee_id, reporter_id, start_date, due_date, position, labels, created, updated,
-          project_id)
+          project_id, asset_tag, location, work_type)
 end
 
 # ── Epic ────────────────────────────────────────────────────────────────

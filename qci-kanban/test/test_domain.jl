@@ -22,6 +22,10 @@ const D = QciKanban.Domain
         @test D.valid_project_key("MAINT") && D.valid_project_key("A1") && D.valid_project_key("ABCDEFGH")
         @test !D.valid_project_key("") && !D.valid_project_key("A") && !D.valid_project_key("abcdefgh")
         @test !D.valid_project_key("qci") && !D.valid_project_key("QC-1") && !D.valid_project_key("ABCDEFGHI")
+        @test D.valid_work_type(nothing) && D.valid_work_type("PM") && D.valid_work_type("CM")
+        @test D.valid_work_type("Improvement") && D.valid_work_type("Safety") && D.valid_work_type("Other")
+        @test !D.valid_work_type("Emergency") && !D.valid_work_type("pm")
+        @test D.WORK_TYPES == ("PM", "CM", "Improvement", "Safety", "Other")
     end
 
     @testset "Project" begin
@@ -50,17 +54,24 @@ const D = QciKanban.Domain
         @test i.status == "Backlog" && i.priority == "Medium"
         @test i.story_points === nothing && i.labels == String[]
         @test i.project_id == ""
+        @test i.asset_tag === nothing && i.location === nothing && i.work_type === nothing
         i2 = D.Issue(; id = "i2", key = "QCI-2", title = "T2", status = "Done",
                      priority = "High", story_points = 5, epic_id = "e", sprint_id = "s",
                      assignee_id = "a", reporter_id = "r", start_date = Date(2026, 1, 1),
                      due_date = Date(2026, 1, 2), position = 3, labels = ["l1"],
-                     project_id = "p1")
+                     project_id = "p1", asset_tag = "CNC-01", location = "Bay 2",
+                     work_type = "CM")
         @test i2.story_points == 5 && i2.epic_id == "e" && i2.labels == ["l1"]
         @test i2.due_date == Date(2026, 1, 2) && i2.position == 3 && i2.project_id == "p1"
+        @test i2.asset_tag == "CNC-01" && i2.location == "Bay 2" && i2.work_type == "CM"
+        # blank optional strings normalize to nothing
+        i3 = D.Issue(; id = "i3", key = "QCI-3", title = "T3", asset_tag = "  ", location = "")
+        @test i3.asset_tag === nothing && i3.location === nothing
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "  ")
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", status = "Nope")
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", priority = "Nope")
         @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", story_points = -1)
+        @test_throws ArgumentError D.Issue(; id = "i", key = "k", title = "t", work_type = "bogus")
     end
 
     @testset "Epic / Label / Comment" begin

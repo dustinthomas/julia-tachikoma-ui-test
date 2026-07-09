@@ -78,7 +78,7 @@ end
 # safe because only Default has data right after migrate.
 const DEFAULT_PROJECT_KEY = "QCI"
 const DEFAULT_PROJECT_NAME = "Default"
-const BOARD_SCHEMA_TARGET = 6   # PR-M4: v6 sprint_metrics historical backfill
+const BOARD_SCHEMA_TARGET = 7   # v6=metrics backfill (PR-M4); v7=WO columns (PR-M6)
 
 function init_board_schema!(db::SQLite.DB)
     _exec(db, """
@@ -163,8 +163,7 @@ end
     migrate_board_schema!(db) -> Int
 
 Apply board migrations v1–v6 (transaction per version). Returns the version after
-migrate. v6 is a best-effort `sprint_metrics` backfill for historically closed
-sprints (approximate: only Done issues remain after rollback; undercounts planned).
+migrate. v6 = sprint_metrics backfill (PR-M4); v7 = WO columns asset_tag/location/work_type (PR-M6).
 """
 function migrate_board_schema!(db::SQLite.DB)::Int
     v = _schema_version(db)
@@ -297,6 +296,17 @@ function migrate_board_schema!(db::SQLite.DB)::Int
         v = 6
     end
 
+    if v < 7
+        # PR-M6 work-order fields (design §4.4) — all nullable TEXT.
+        SQLite.transaction(db) do
+            _exec(db, "ALTER TABLE issues ADD COLUMN asset_tag TEXT")
+            _exec(db, "ALTER TABLE issues ADD COLUMN location TEXT")
+            _exec(db, "ALTER TABLE issues ADD COLUMN work_type TEXT")
+            _record_migration!(db, 7)
+        end
+        v = 7
+    end
+
     # BOARD_SCHEMA_TARGET is the highest version this migrator applies.
     # Allow v > target if a newer migrator already ran on this file.
     v < BOARD_SCHEMA_TARGET &&
@@ -382,6 +392,10 @@ function _project_from(r, i)::Project
             created = parse_dt(r.created[i]))
 end
 
+"""Optional TEXT column → nothing when missing / NULL / blank."""
+_opt_text(x) = (x === missing || x === nothing) ? nothing :
+               (t = strip(String(x)); isempty(t) ? nothing : t)
+
 function _issue_from(r, i)::Issue
     Issue(; id = String(r.id[i]), key = String(r.key[i]), title = String(r.title[i]),
           description = r.description[i] === missing ? "" : String(r.description[i]),
@@ -394,7 +408,10 @@ function _issue_from(r, i)::Issue
           start_date = parse_date(r.start_date[i]), due_date = parse_date(r.due_date[i]),
           position = Int(r.position[i]), labels = String[],
           created = parse_dt(r.created[i]), updated = parse_dt(r.updated[i]),
-          project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing))
+          project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[i] : nothing),
+          asset_tag = hasproperty(r, :asset_tag) ? _opt_text(r.asset_tag[i]) : nothing,
+          location = hasproperty(r, :location) ? _opt_text(r.location[i]) : nothing,
+          work_type = hasproperty(r, :work_type) ? _opt_text(r.work_type[i]) : nothing)
 end
 
 # C10: bump a monotonic per-prefix counter. Seeds from max(stored key_seq,
@@ -576,9 +593,16 @@ function create_issue!(store::SQLiteBoardStore; title::AbstractString, descripti
                        start_date::Union{Date,Nothing} = nothing,
                        due_date::Union{Date,Nothing} = nothing,
                        labels::Vector{String} = String[],
-                       project_id::Union{AbstractString,Nothing} = nothing)::Issue
+                       project_id::Union{AbstractString,Nothing} = nothing,
+                       asset_tag::Union{AbstractString,Nothing} = nothing,
+                       location::Union{AbstractString,Nothing} = nothing,
+                       work_type::Union{AbstractString,Nothing} = nothing)::Issue
     valid_status(status) || throw(ArgumentError("invalid status: $status"))
     valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
+    at = _opt_text(asset_tag)
+    loc = _opt_text(location)
+    wt = _opt_text(work_type)
+    valid_work_type(wt) || throw(ArgumentError("invalid work_type: $work_type"))
     pid, pkey = _resolve_project_id(store.db, project_id)
     _assert_issue_refs!(store, pid; epic_id = epic_id, sprint_id = sprint_id, labels = labels)
     id = new_id()
@@ -588,11 +612,11 @@ function create_issue!(store::SQLiteBoardStore; title::AbstractString, descripti
     _exec(store.db, """
         INSERT INTO issues (id, key, title, description, status, priority, story_points,
             epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position,
-            created, updated, project_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created, updated, project_id, asset_tag, location, work_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [id, key, title, description, status, priority, story_points, epic_id, sprint_id,
           assignee_id, reporter_id, _date_str(start_date), _date_str(due_date), position,
-          _dt_str(now), _dt_str(now), pid])
+          _dt_str(now), _dt_str(now), pid, at, loc, wt])
     isempty(labels) || set_labels!(store, id, labels)
     get_issue(store, id)
 end
@@ -611,7 +635,8 @@ function _issue_with_labels(store, iss::Issue)::Issue
           epic_id = iss.epic_id, sprint_id = iss.sprint_id, assignee_id = iss.assignee_id,
           reporter_id = iss.reporter_id, start_date = iss.start_date, due_date = iss.due_date,
           position = iss.position, labels = lbls, created = iss.created, updated = iss.updated,
-          project_id = iss.project_id)
+          project_id = iss.project_id, asset_tag = iss.asset_tag, location = iss.location,
+          work_type = iss.work_type)
 end
 
 function list_issues(store::SQLiteBoardStore;
@@ -634,7 +659,8 @@ function list_issues(store::SQLiteBoardStore;
 end
 
 const _ISSUE_UPDATE_FIELDS = (:title, :description, :status, :priority, :story_points,
-    :epic_id, :sprint_id, :assignee_id, :reporter_id, :start_date, :due_date, :position)
+    :epic_id, :sprint_id, :assignee_id, :reporter_id, :start_date, :due_date, :position,
+    :asset_tag, :location, :work_type)
 
 function update_issue!(store::SQLiteBoardStore, id::AbstractString; kwargs...)
     # Archive write guard (design § archive semantics): block updates on archived projects.
@@ -660,6 +686,12 @@ function update_issue!(store::SQLiteBoardStore, id::AbstractString; kwargs...)
             move_pos = v; continue
         elseif k === :priority
             valid_priority(v) || throw(ArgumentError("invalid priority: $v"))
+        elseif k === :work_type
+            wt = _opt_text(v)
+            valid_work_type(wt) || throw(ArgumentError("invalid work_type: $v"))
+            push!(fields, "work_type = ?"); push!(vals, wt); continue
+        elseif k in (:asset_tag, :location)
+            push!(fields, "$(k) = ?"); push!(vals, _opt_text(v)); continue
         end
         push!(fields, "$(k) = ?")
         push!(vals, (v isa Date) ? string(v) : v)

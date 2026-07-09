@@ -10,22 +10,29 @@ using .Theming
 using Dates
 
 # ── The card create/edit form (focus-routed fields) ────────────────────────
+# Field order (design §4.4): title → description → priority → est. hours
+# (story_points) → work_type → asset_tag → location → epic → sprint → labels
+# → assignee → start_date → due_date.
 mutable struct EditForm
     title_input::TextInput
     desc_area::TextArea
     priority_sel::Selector
     points_input::TextInput
+    work_type_sel::Selector
+    asset_input::TextInput
+    location_input::TextInput
     epic_sel::Selector
     sprint_sel::Selector
+    labels_ms::MultiSelect
     assignee_sel::Selector
     start_input::TextInput
     due_input::TextInput
-    labels_ms::MultiSelect
 end
 
 edit_editors(f::EditForm) = Any[f.title_input, f.desc_area, f.priority_sel, f.points_input,
-                                f.epic_sel, f.sprint_sel, f.assignee_sel, f.start_input,
-                                f.due_input, f.labels_ms]
+                                f.work_type_sel, f.asset_input, f.location_input,
+                                f.epic_sel, f.sprint_sel, f.labels_ms, f.assignee_sel,
+                                f.start_input, f.due_input]
 
 function _build_edit_form(m::AppModel, iss::Union{Domain.Issue,Nothing})
     pid = _scope(m)
@@ -36,6 +43,11 @@ function _build_edit_form(m::AppModel, iss::Union{Domain.Issue,Nothing})
 
     prio_opts = collect(Domain.PRIORITIES)
     prio_sel = iss === nothing ? 2 : something(findfirst(==(iss.priority), prio_opts), 2)
+
+    wt_opts = ["(none)"; collect(Domain.WORK_TYPES)]
+    wt_vals = Any[nothing; collect(Domain.WORK_TYPES)]
+    wt_sel = iss === nothing || iss.work_type === nothing ? 1 :
+             something(findfirst(==(iss.work_type), wt_vals), 1)
 
     epic_opts = ["(none)"; [e.name for e in epics]]
     epic_vals = Any[nothing; [e.id for e in epics]]
@@ -61,12 +73,15 @@ function _build_edit_form(m::AppModel, iss::Union{Domain.Issue,Nothing})
         _make_area(; text = iss === nothing ? "" : iss.description),
         Selector("Priority:", prio_opts, Any[prio_opts...]; selected = prio_sel),
         _make_input(; text = iss === nothing || iss.story_points === nothing ? "" : string(iss.story_points)),
+        Selector("Type:", wt_opts, wt_vals; selected = wt_sel),
+        _make_input(; text = iss === nothing || iss.asset_tag === nothing ? "" : iss.asset_tag),
+        _make_input(; text = iss === nothing || iss.location === nothing ? "" : iss.location),
         Selector("Epic:", epic_opts, epic_vals; selected = epic_sel),
         Selector("Sprint:", sprint_opts, sprint_vals; selected = sprint_sel),
+        MultiSelect("Labels:", label_opts, label_vals; checked = label_checked),
         Selector("Assignee:", user_opts, user_vals; selected = asg_sel),
         _make_input(; text = iss === nothing || iss.start_date === nothing ? "" : string(iss.start_date)),
         _make_input(; text = iss === nothing || iss.due_date === nothing ? "" : string(iss.due_date)),
-        MultiSelect("Labels:", label_opts, label_vals; checked = label_checked),
     )
 end
 
@@ -176,6 +191,9 @@ function _save_edit!(m::AppModel)
     end
     priority = String(sel_current_value(f.priority_sel))
     pts = _parse_points(text(f.points_input))
+    work_type = sel_current_value(f.work_type_sel)
+    asset_tag = let t = strip(text(f.asset_input)); isempty(t) ? nothing : String(t) end
+    location = let t = strip(text(f.location_input)); isempty(t) ? nothing : String(t) end
     epic_id = sel_current_value(f.epic_sel)
     sprint_id = sel_current_value(f.sprint_sel)
     assignee_id = sel_current_value(f.assignee_sel)
@@ -187,7 +205,8 @@ function _save_edit!(m::AppModel)
                                    priority = priority, story_points = pts,
                                    epic_id = epic_id, sprint_id = sprint_id,
                                    assignee_id = assignee_id, start_date = start_date, due_date = due_date,
-                                   project_id = _scope(m))
+                                   project_id = _scope(m),
+                                   asset_tag = asset_tag, location = location, work_type = work_type)
         Stores.set_labels!(m.boardstore, iss.id, label_ids)
         Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
                              kind = :created, detail = "created $(iss.key)")
@@ -198,7 +217,8 @@ function _save_edit!(m::AppModel)
         Stores.update_issue!(m.boardstore, m.card_issue_id; title = String(title), description = desc,
                              priority = priority, story_points = pts, epic_id = epic_id,
                              sprint_id = sprint_id, assignee_id = assignee_id,
-                             start_date = start_date, due_date = due_date)
+                             start_date = start_date, due_date = due_date,
+                             asset_tag = asset_tag, location = location, work_type = work_type)
         Stores.set_labels!(m.boardstore, m.card_issue_id, label_ids)
         iss = Stores.get_issue(m.boardstore, m.card_issue_id)
         Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
@@ -367,6 +387,13 @@ function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
            (iss.story_points === nothing ? "" : "$(iss.story_points)sp  ") *
            "Epic:$(_epic_name(m, iss.epic_id))"
     set_string!(buf, x, y, _short(meta, inner.width - 2), Style(; fg = col_text_dim())); y += 1
+    # Work-order block (design §4.4): ASSET / LOCATION / TYPE / EST HRS when any set.
+    if iss.asset_tag !== nothing || iss.location !== nothing || iss.work_type !== nothing ||
+       iss.story_points !== nothing
+        wo = "ASSET:$(something(iss.asset_tag, "—"))  LOCATION:$(something(iss.location, "—"))  " *
+             "TYPE:$(something(iss.work_type, "—"))  EST HRS:$(something(iss.story_points, "—"))"
+        set_string!(buf, x, y, _short(wo, inner.width - 2), Style(; fg = col_text_muted())); y += 1
+    end
     asg = iss.assignee_id === nothing ? "Unassigned" : _user_name(m, iss.assignee_id)
     due = iss.due_date === nothing ? "—" : string(iss.due_date)
     set_string!(buf, x, y, _short("Assignee:$(asg)  Due:$(due)", inner.width - 2), Style(; fg = col_text_dim())); y += 1
@@ -397,27 +424,39 @@ end
 function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     f = m.edit_form; f === nothing && return
     creating = m.card_issue_id === nothing
-    # Match card-detail: compact centered form rather than a near-fullscreen sheet.
+    # Taller form to fit work-order fields (design §4.4); still compact when possible.
     w = clamp(min(68, content_area.width - 10), 40, content_area.width)
-    h = clamp(min(16, content_area.height - 6), 14, content_area.height)
+    h = clamp(min(20, content_area.height - 4), 16, content_area.height)
     title = creating ? "NEW CARD — Tab fields, ^S/Enter save, Esc cancel" : "EDIT CARD — Tab fields, ^S/Enter save"
     inner = _modal_box(content_area, w, h, title, buf)
     x = inner.x + 1; y = inner.y + 1; iw = inner.width - 2
+    maxy = inner.y + inner.height - 1
     set_string!(buf, x, y, "Title:", f.title_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
     render(f.title_input, Rect(x + 7, y, iw - 7, 1), buf); y += 1
     set_string!(buf, x, y, "Desc:", f.desc_area.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
     render(f.desc_area, Rect(x + 7, y, iw - 7, 2), buf); y += 2
     render(f.priority_sel, Rect(x, y, iw, 1), buf); y += 1
-    set_string!(buf, x, y, "Points:", f.points_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
-    render(f.points_input, Rect(x + 8, y, 8, 1), buf); y += 1
-    render(f.epic_sel, Rect(x, y, iw, 1), buf); y += 1
-    render(f.sprint_sel, Rect(x, y, iw, 1), buf); y += 1
-    render(f.assignee_sel, Rect(x, y, iw, 1), buf); y += 1
-    set_string!(buf, x, y, "Start:", f.start_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
-    render(f.start_input, Rect(x + 7, y, 12, 1), buf)
-    set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
-    render(f.due_input, Rect(x + 27, y, 12, 1), buf); y += 1
-    render(f.labels_ms, Rect(x, y, iw, 1), buf)
+    set_string!(buf, x, y, "Hours:", f.points_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+    render(f.points_input, Rect(x + 7, y, 8, 1), buf); y += 1
+    y <= maxy && (render(f.work_type_sel, Rect(x, y, iw, 1), buf); y += 1)
+    if y <= maxy
+        set_string!(buf, x, y, "Asset:", f.asset_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+        render(f.asset_input, Rect(x + 7, y, max(8, iw - 7), 1), buf); y += 1
+    end
+    if y <= maxy
+        set_string!(buf, x, y, "Loc:", f.location_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+        render(f.location_input, Rect(x + 5, y, max(8, iw - 5), 1), buf); y += 1
+    end
+    y <= maxy && (render(f.epic_sel, Rect(x, y, iw, 1), buf); y += 1)
+    y <= maxy && (render(f.sprint_sel, Rect(x, y, iw, 1), buf); y += 1)
+    y <= maxy && (render(f.labels_ms, Rect(x, y, iw, 1), buf); y += 1)
+    y <= maxy && (render(f.assignee_sel, Rect(x, y, iw, 1), buf); y += 1)
+    if y <= maxy
+        set_string!(buf, x, y, "Start:", f.start_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+        render(f.start_input, Rect(x + 7, y, 12, 1), buf)
+        set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+        render(f.due_input, Rect(x + 27, y, 12, 1), buf)
+    end
 end
 
 function render_confirm!(m::AppModel, buf::Buffer, content_area::Rect)

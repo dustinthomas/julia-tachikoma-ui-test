@@ -274,7 +274,7 @@ end
         app_login_new(m; name = "Router R")
         iss = Qm.selected_issue(m)                 # unassigned
         k!(m, 'e')
-        Qm.focus_index!(m.focus, 7)                # assignee selector
+        Qm.focus_index!(m.focus, 11)               # assignee selector (after WO fields)
         k!(m, :right)                              # (none) → the one user
         @test Qm.sel_current_value(m.edit_form.assignee_sel) !== nothing
         k!(m, :enter)                              # save
@@ -339,8 +339,8 @@ end
     k!(m, 'n')
     @test m.modal == :card_edit
     typ!(m, "BadFormatDate")
-    # jump to start date field (editors: 1 title,2 desc,3 prio,4 points,5 epic,6 sprint,7 assignee,8 start,9 due)
-    Qm.focus_index!(m.focus, 8)
+    # jump to start date field (editors: 1 title… 12 start, 13 due — see design §4.4)
+    Qm.focus_index!(m.focus, 12)
     typ!(m, "not-a-valid-date")
     k!(m, :enter)   # trigger save attempt
     # Should show popup (confirm modal) with warning, not just status + block
