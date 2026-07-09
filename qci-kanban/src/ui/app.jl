@@ -241,6 +241,24 @@ function _project_switch_select!(m::AppModel)
     m
 end
 
+"""
+    create_project_with_defaults!(store, cfg; key, name, ...) -> Project
+
+App-layer project create (PR-M3 / design §4.4): store `create_project!` stays pure
+(no `AppConfig`). When `cfg.seed_ops_labels`, seeds ops labels via
+`seed_ops_template!` after a successful create. Used by the project-create modal
+(PR-M7) and callable from tests.
+"""
+function create_project_with_defaults!(store, cfg::Config.AppConfig;
+                                       key::AbstractString, name::AbstractString,
+                                       description::AbstractString = "",
+                                       color::AbstractString = "blue")
+    p = Stores.create_project!(store; key = key, name = name,
+                               description = description, color = color)
+    cfg.seed_ops_labels && Stores.seed_ops_template!(store, p.id)
+    p
+end
+
 # ── Focus setup for the login screens ──────────────────────────────────────
 function _init_login_focus!(m::AppModel)
     if m.auth_stage === :create
@@ -809,7 +827,13 @@ end
 function _render_help!(m::AppModel, buf::Buffer, content_area::Rect)
     # Global first so essentials (Quit/Help/views) are always visible even if the
     # per-view section is long enough to overflow a small overlay.
-    lines = help_lines([:global, m.view])
+    # Ops onboarding blurb (PR-M3 / design §4.7) is pinned at the top so a long
+    # binding list never hides the plant quickstart behind "▾ N more".
+    lines = String[
+        "Ops quickstart: project → planning window (Backlog/S) → work orders [n]",
+        "",
+    ]
+    append!(lines, help_lines([:global, m.view]))
     w = clamp(maximum(length, lines; init = 20) + 4, 20, content_area.width)
     h = clamp(length(lines) + 4, 6, content_area.height)
     r = _panel_rect(content_area, w, h)
@@ -848,15 +872,18 @@ end
     kanban2(; user_db, board_db, config_path, token_path)
 
 Launch the v2 QCI Kanban app. Separate user/board SQLite databases, real JWT
-session restore on startup, demo board seeded on first run (never users). Lives
-alongside the untouched v1 `kanban()`.
+session restore on startup. Demo board seeding follows `AppConfig.seed_demo`
+(TOML / `QCI_SEED_DEMO`; default true for demo ergonomics — plant installs set
+`seed_demo = false` via `config/maintenance.toml.example`). Never seeds users.
+Lives alongside the untouched v1 `kanban()`.
 """
 function kanban2(; user_db::AbstractString = joinpath(homedir(), ".qci-kanban", "users.db"),
                  board_db::AbstractString = joinpath(homedir(), ".qci-kanban", "board.db"),
                  config_path::Union{AbstractString,Nothing} = nothing,
                  token_path::Union{AbstractString,Nothing} = nothing)
+    cfg = Config.load_config(config_path)
     m = AppModel(; user_db = user_db, board_db = board_db,
-                 config_path = config_path, token_path = token_path)
+                 config = cfg, token_path = token_path, seed = cfg.seed_demo)
     app(m)
 end
 # COV_EXCL_STOP

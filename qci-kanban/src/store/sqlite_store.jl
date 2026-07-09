@@ -982,3 +982,28 @@ function seed_demo!(store::SQLiteBoardStore)
     set_labels!(store, i1.id, [lbl_bug.id, lbl_ui.id])
     store
 end
+
+# Ops labels template (PR-M3 / design §4.4): labels only — no issues/sprints.
+# Called by the **app layer** after create_project!, never from create_project! itself.
+const OPS_LABEL_SPECS = (
+    ("PM", "red"),
+    ("CM", "orange"),
+    ("Safety", "yellow"),
+    ("Critical", "violet"),
+)
+
+"""
+    seed_ops_template!(store, project_id) -> store
+
+Create maintenance ops labels (`PM`, `CM`, `Safety`, `Critical`) for `project_id`.
+Idempotent by label name within the project. Does **not** create issues or sprints.
+"""
+function seed_ops_template!(store::SQLiteBoardStore, project_id::AbstractString)
+    pid, _ = _resolve_project_id(store.db, project_id)
+    existing = Set(l.name for l in list_labels(store; project_id = pid))
+    for (name, color) in OPS_LABEL_SPECS
+        name in existing && continue
+        create_label!(store; name = name, color = color, project_id = pid)
+    end
+    store
+end

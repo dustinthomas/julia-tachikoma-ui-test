@@ -22,7 +22,7 @@ export create_label!, list_labels, set_labels!, labels_for_issue
 export add_comment!, list_comments, log_activity!, list_activity
 export rank_issue!, move_issue!, issues_for_sprint, backlog_issues
 export enqueue_outbox!, pending_outbox, mark_sent!
-export seed_demo!
+export seed_demo!, seed_ops_template!
 export create_project!, list_projects, get_project, archive_project!
 export board_schema_version
 
@@ -72,6 +72,8 @@ function enqueue_outbox! end
 function pending_outbox end
 function mark_sent! end
 function seed_demo! end
+"""Ops labels only (PM/CM/Safety/Critical) for a project — no issues/sprints."""
+function seed_ops_template! end
 # Project APIs + optional `project_id` kwargs: SQLite (PR-M1) + Remote/FakeExec (PR-M1b).
 function create_project! end
 function list_projects end

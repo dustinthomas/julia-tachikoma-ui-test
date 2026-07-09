@@ -523,10 +523,19 @@ function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
     _render_col_headers!(m, buf, inner_x, grid_y, col_w)
 
     nlanes = length(g)
+    # Total cards across the filtered grid (empty-state copy when zero).
+    board_total = sum(sum(length, lane.cols; init = 0) for lane in g; init = 0)
     avail_h = area.height - 2                # minus filter line + header row
     lane_h = max(MODERN_CARD_H + 2, avail_h ÷ max(1, nlanes))
     bottom_lim = area.y + area.height        # first row past the drawable area
     y = grid_y + 1
+    # Empty production board (PR-M3 / design §4.7): clear create path above lanes.
+    if board_total == 0 && y < bottom_lim
+        empty_msg = "No work orders — press [n] to create"
+        set_string!(buf, area.x, y, _short(empty_msg, area.width),
+                    Style(; fg = col_text_dim()))
+        y += 1
+    end
     frame = Style(; fg = col_text_muted())
     for (li, lane) in enumerate(g)
         lh = min(lane_h, bottom_lim - y)

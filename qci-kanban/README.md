@@ -20,10 +20,16 @@ julia --project=. -e 'using QciKanban; QciKanban.kanban2()'
 julia --project=. -e 'using QciKanban; QciKanban.kanban()'
 ```
 
-v2 stores data in `~/.qci-kanban/users.db` and `~/.qci-kanban/board.db`, seeds a
-demo board (issues/epics/sprints/labels — **never users**) on first run, and
+v2 stores data in `~/.qci-kanban/users.db` and `~/.qci-kanban/board.db`, and
 persists a session token to `~/.qci-kanban/session.jwt` (0600). First launch
 shows the login gate: **no users → press `[c]` to create an account**.
+
+Demo board seeding (issues/epics/sprints/labels — **never users**) is controlled
+by `AppConfig.seed_demo` (default **true** for local demo ergonomics). Plant /
+production installs should set `seed_demo = false` via
+`config/maintenance.toml.example` or `QCI_SEED_DEMO=0` so the board stays empty.
+New projects can receive ops labels (PM/CM/Safety/Critical) when
+`seed_ops_labels = true` (default) via the app-layer create helper.
 
 ## Features
 
@@ -134,6 +140,11 @@ Defaults are test-safe and require no setup. Notable knobs:
   "larger system" deployment; SQLite is the default.
 - **JWT** — a secret is generated and persisted on first run if absent; token TTL
   is configurable. Tests inject `secret` / `token_path` so they never touch `~`.
+- **Seed controls** — `seed_demo` (bool, default true; ENV `QCI_SEED_DEMO`) gates
+  software-demo issues on `kanban2()` / `AppModel`. `seed_ops_labels` (default true)
+  seeds PM/CM/Safety/Critical labels after app-layer project create (not inside
+  the store). See `config/maintenance.toml.example` for a plant template
+  (`seed_demo = false`, 8h TTL).
 - **SMTP notifications** — off by default (`NullNotifier`). Enabling `[smtp]` in
   config routes domain events (assigned / status-changed / comment / due-soon)
   through the outbox and `SMTPClient`. Until then nothing sends email.

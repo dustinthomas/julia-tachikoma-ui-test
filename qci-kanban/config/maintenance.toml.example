@@ -1,0 +1,25 @@
+# QCI Kanban — plant / manufacturing maintenance install template (PR-M3).
+#
+# Copy and pass to kanban2:
+#   cp config/maintenance.toml.example ~/.qci-kanban/config.toml
+#   julia --project=. -e 'using QciKanban; QciKanban.kanban2(; config_path=expanduser("~/.qci-kanban/config.toml"))'
+#
+# Or override just the seed flag:
+#   QCI_SEED_DEMO=0 julia --project=. -e 'using QciKanban; QciKanban.kanban2()'
+#
+# Code defaults stay software/demo-friendly (seed_demo=true). This template is
+# production-oriented: empty board on first open, ops labels on new projects.
+
+# Do not pollute the plant board with software-demo issues.
+seed_demo = false
+
+# After create_project! the app seeds PM / CM / Safety / Critical labels.
+seed_ops_labels = true
+
+# Shop-floor sessions (optional; code default remains 7 days).
+token_ttl_seconds = 28800   # 8 hours
+
+# Paths (optional — defaults under ~/.qci-kanban/)
+# users_db_path = "/var/lib/qci-kanban/users.db"
+# board_db_path = "/var/lib/qci-kanban/board.db"
+# session_token_path = "/var/lib/qci-kanban/session.jwt"

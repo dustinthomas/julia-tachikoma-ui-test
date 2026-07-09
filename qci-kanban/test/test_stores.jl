@@ -15,6 +15,8 @@ const Dm = QciKanban.Domain
         @test cfg.smtp.enabled == false
         @test cfg.token_ttl_seconds > 0
         @test cfg.postgres.port == 5432
+        @test cfg.seed_demo === true
+        @test cfg.seed_ops_labels === true
     end
 
     @testset "TOML file" begin
@@ -28,6 +30,8 @@ const Dm = QciKanban.Domain
                 jwt_secret_path = "/tmp/jwt.secret"
                 session_token_path = "/tmp/s.jwt"
                 token_ttl_seconds = 42
+                seed_demo = false
+                seed_ops_labels = false
                 [smtp]
                 enabled = true
                 host = "mail.example.com"
@@ -47,6 +51,8 @@ const Dm = QciKanban.Domain
             @test cfg.users_db_path == "/tmp/u.db"
             @test cfg.jwt_secret == "filesecret-0123456789abcdef-0123456789"
             @test cfg.token_ttl_seconds == 42
+            @test cfg.seed_demo === false
+            @test cfg.seed_ops_labels === false
             @test cfg.smtp.enabled && cfg.smtp.port == 587 && cfg.smtp.from == "from@example.com"
             @test cfg.postgres.host == "pg" && cfg.postgres.port == 6000 && cfg.postgres.password == "pp"
         end
@@ -57,13 +63,14 @@ const Dm = QciKanban.Domain
         @test cfg.backend == :sqlite
         env = Dict("QCI_BACKEND" => "remote", "QCI_USERS_DB" => "/e/u.db", "QCI_BOARD_DB" => "/e/b.db",
                    "QCI_JWT_SECRET" => "envsecret-0123456789abcdef-0123456789", "QCI_JWT_SECRET_PATH" => "/e/j", "QCI_SESSION_TOKEN_PATH" => "/e/s",
-                   "QCI_TOKEN_TTL" => "99", "QCI_SMTP_ENABLED" => "true", "QCI_SMTP_HOST" => "eh",
+                   "QCI_TOKEN_TTL" => "99", "QCI_SEED_DEMO" => "0", "QCI_SMTP_ENABLED" => "true", "QCI_SMTP_HOST" => "eh",
                    "QCI_SMTP_PORT" => "2525", "QCI_SMTP_USER" => "eu", "QCI_SMTP_PASSWORD" => "ep",
                    "QCI_SMTP_FROM" => "ef@x.co", "QCI_PG_HOST" => "eph", "QCI_PG_PORT" => "7000",
                    "QCI_PG_DBNAME" => "epd", "QCI_PG_USER" => "epu", "QCI_PG_PASSWORD" => "epp")
         cfg2 = C.load_config(nothing; env = env)
         @test cfg2.backend == :remote && cfg2.users_db_path == "/e/u.db"
         @test cfg2.jwt_secret == "envsecret-0123456789abcdef-0123456789" && cfg2.token_ttl_seconds == 99
+        @test cfg2.seed_demo === false
         @test cfg2.smtp.enabled && cfg2.smtp.port == 2525 && cfg2.smtp.from == "ef@x.co"
         @test cfg2.postgres.host == "eph" && cfg2.postgres.port == 7000
     end
@@ -304,6 +311,19 @@ end
     n = length(S.list_issues(bs))
     S.seed_demo!(bs)                         # idempotent
     @test length(S.list_issues(bs)) == n
+end
+
+@testset "Stores: seed_ops_template! (labels only, no issues)" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    def = only(S.list_projects(bs))
+    S.seed_ops_template!(bs, def.id)
+    labels = S.list_labels(bs; project_id = def.id)
+    @test sort([l.name for l in labels]) == ["CM", "Critical", "PM", "Safety"]
+    @test isempty(S.list_issues(bs; project_id = def.id))
+    @test isempty(S.list_sprints(bs; project_id = def.id))
+    # pure create_project! still adds no labels
+    p = S.create_project!(bs; key = "X1", name = "X")
+    @test isempty(S.list_labels(bs; project_id = p.id))
 end
 
 @testset "Stores: open_sqlite_stores + close!" begin

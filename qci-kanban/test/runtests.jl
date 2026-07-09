@@ -66,6 +66,9 @@ include("features/phase3_board.jl")
 # Multi-project scope (PR-M2): active project, store isolation, switcher.
 include("features/multi_project.jl")
 
+# Production seed controls (PR-M3): seed_demo config, ops labels, empty board.
+include("features/seed_config.jl")
+
 # Phase 4 — Calendar + Gantt: month grid, due marks, drill-down; timeline bars.
 include("test_calendar_view.jl")
 include("test_gantt.jl")
