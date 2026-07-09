@@ -63,6 +63,9 @@ include("test_card_modals.jl")
 include("test_backlog.jl")
 include("features/phase3_board.jl")
 
+# Multi-project scope (PR-M2): active project, store isolation, switcher.
+include("features/multi_project.jl")
+
 # Phase 4 — Calendar + Gantt: month grid, due marks, drill-down; timeline bars.
 include("test_calendar_view.jl")
 include("test_gantt.jl")

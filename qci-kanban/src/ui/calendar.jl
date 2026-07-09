@@ -55,7 +55,7 @@ end
 # ── Derived issue sets (pure over the store + displayed month) ──────────────
 "Issues whose due_date falls in the displayed month."
 function _cal_month_issues(m::AppModel)::Vector{Domain.Issue}
-    [i for i in Stores.list_issues(m.boardstore)
+    [i for i in Stores.list_issues(m.boardstore; project_id = _scope(m))
      if i.due_date !== nothing &&
         Dates.year(i.due_date) == m.cal_year && Dates.month(i.due_date) == m.cal_month]
 end

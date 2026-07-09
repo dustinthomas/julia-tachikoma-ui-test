@@ -28,10 +28,11 @@ edit_editors(f::EditForm) = Any[f.title_input, f.desc_area, f.priority_sel, f.po
                                 f.due_input, f.labels_ms]
 
 function _build_edit_form(m::AppModel, iss::Union{Domain.Issue,Nothing})
-    epics = Stores.list_epics(m.boardstore)
-    sprints = Stores.list_sprints(m.boardstore)
+    pid = _scope(m)
+    epics = Stores.list_epics(m.boardstore; project_id = pid)
+    sprints = Stores.list_sprints(m.boardstore; project_id = pid)
     users = Stores.list_users(m.userstore)
-    labels = Stores.list_labels(m.boardstore)
+    labels = Stores.list_labels(m.boardstore; project_id = pid)
 
     prio_opts = collect(Domain.PRIORITIES)
     prio_sel = iss === nothing ? 2 : something(findfirst(==(iss.priority), prio_opts), 2)
@@ -185,7 +186,8 @@ function _save_edit!(m::AppModel)
         iss = Stores.create_issue!(m.boardstore; title = String(title), description = desc,
                                    priority = priority, story_points = pts,
                                    epic_id = epic_id, sprint_id = sprint_id,
-                                   assignee_id = assignee_id, start_date = start_date, due_date = due_date)
+                                   assignee_id = assignee_id, start_date = start_date, due_date = due_date,
+                                   project_id = _scope(m))
         Stores.set_labels!(m.boardstore, iss.id, label_ids)
         Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
                              kind = :created, detail = "created $(iss.key)")
@@ -311,9 +313,34 @@ function _submit_new_sprint!(m::AppModel)
     if isempty(name)
         m.message = "Sprint name required"; return m
     end
-    s = Stores.create_sprint!(m.boardstore; name = String(name), goal = String(strip(text(m.sprint_goal_input))))
+    s = Stores.create_sprint!(m.boardstore; name = String(name),
+                              goal = String(strip(text(m.sprint_goal_input))),
+                              project_id = _scope(m))
     m.message = "Created sprint $(s.name)"
     _close_modal!(m)
+end
+
+# ── Project switcher (PR-M2 minimal) ────────────────────────────────────────
+function render_project_switch!(m::AppModel, buf::Buffer, content_area::Rect)
+    projs = m.projects_cache
+    n = length(projs)
+    w = clamp(40, 24, content_area.width)
+    h = clamp(n + 4, 6, content_area.height)
+    inner = _modal_box(content_area, w, h, "SWITCH PROJECT", buf)
+    set_string!(buf, inner.x + 1, inner.y,
+                _short("j/k navigate · Enter select · Esc cancel", inner.width),
+                Style(; fg = col_text_dim()))
+    y = inner.y + 2
+    maxy = inner.y + inner.height - 1
+    for (i, p) in enumerate(projs)
+        y > maxy && break
+        mark = i == m.project_sel ? "▸ " : "  "
+        active = p.id == m.active_project_id ? " *" : ""
+        line = "$(mark)$(p.name) ($(p.key))$(active)"
+        sty = i == m.project_sel ? sel_style() : Style(; fg = col_text())
+        set_string!(buf, inner.x + 1, y, _short(line, inner.width - 1), sty)
+        y += 1
+    end
 end
 
 # ═══════════════════════════ RENDER ═════════════════════════════════════════

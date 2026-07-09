@@ -300,7 +300,7 @@ end
 
 "Issues that carry at least one date (start or due) — the only ones plotted."
 gantt_dated_issues(m::AppModel)::Vector{Domain.Issue} =
-    [i for i in Stores.list_issues(m.boardstore)
+    [i for i in Stores.list_issues(m.boardstore; project_id = _scope(m))
      if i.start_date !== nothing || i.due_date !== nothing]
 
 _gantt_anchor(i::Domain.Issue)::Date = i.start_date === nothing ? i.due_date : i.start_date
@@ -319,7 +319,7 @@ function gantt_rows(m::AppModel)::Vector{GanttRow}
         push!(get!(groups, k, Domain.Issue[]), i)
     end
     rows = GanttRow[]
-    for e in Stores.list_epics(m.boardstore)
+    for e in Stores.list_epics(m.boardstore; project_id = _scope(m))
         haskey(groups, e.id) || continue
         push!(rows, GanttRow(:epic, e.name, nothing, e.id))
         for iss in _gantt_sort(groups[e.id])
@@ -346,7 +346,7 @@ clamped column span within the window.
 """
 function gantt_sprint_bands(m::AppModel, win_start::Date, dpc::Int, ncols::Int)
     bands = Tuple{String,Int,Int}[]
-    for s in Stores.list_sprints(m.boardstore)
+    for s in Stores.list_sprints(m.boardstore; project_id = _scope(m))
         (s.start_date === nothing || s.end_date === nothing) && continue
         ext = gantt_bar_extent(win_start, dpc, s.start_date, s.end_date, ncols)
         ext === nothing && continue

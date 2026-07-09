@@ -58,7 +58,7 @@ function _passes_filters(m::AppModel, iss::Domain.Issue)
         (iss.due_date !== nothing && iss.due_date <= Dates.today() + Day(7)) || return false
     end
     if :sprint in fs
-        asp = Stores.active_sprint(m.boardstore)
+        asp = Stores.active_sprint(m.boardstore; project_id = _scope(m))
         (asp !== nothing && iss.sprint_id == asp.id) || return false
     end
     if m.label_filter !== nothing
@@ -105,7 +105,8 @@ applying quick filters + live search. Each `Lane` has one card list per status
 column, ordered by store position.
 """
 function board_grid(m::AppModel)::Vector{Lane}
-    issues = filter(i -> _passes_filters(m, i), Stores.list_issues(m.boardstore))
+    issues = filter(i -> _passes_filters(m, i),
+                    Stores.list_issues(m.boardstore; project_id = _scope(m)))
     # bucket: lane key -> (name, status -> issues)
     order = String[]
     names = Dict{String,String}()
@@ -228,7 +229,8 @@ function _cycle_swimlane!(m::AppModel)
 end
 
 # ── WIP limits ──────────────────────────────────────────────────────────────
-_col_count(m::AppModel, status::AbstractString) = length(Stores.list_issues(m.boardstore; status = status))
+_col_count(m::AppModel, status::AbstractString) =
+    length(Stores.list_issues(m.boardstore; status = status, project_id = _scope(m)))
 _wip_limit(m::AppModel, status::AbstractString) = get(m.wip_limits, status, 0)
 function _is_over_wip(m::AppModel, status::AbstractString)
     lim = _wip_limit(m, status)
@@ -347,7 +349,7 @@ function _toggle_filter!(m::AppModel, f::Symbol)
 end
 
 function _cycle_label_filter!(m::AppModel)
-    lbls = Stores.list_labels(m.boardstore)
+    lbls = Stores.list_labels(m.boardstore; project_id = _scope(m))
     if isempty(lbls)
         m.message = "No labels"; return m
     end

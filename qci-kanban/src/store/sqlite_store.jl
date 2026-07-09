@@ -413,7 +413,10 @@ function _generate_epic_key(db, project_key::AbstractString)::String
     "$(project_key)-E-$(n)"
 end
 
-_status_count(db, status) = Int(_query(db, "SELECT COUNT(*) AS c FROM issues WHERE status = ?", [status]).c[1])
+# Dense ranks are per (project_id, status) — PR-M2 Key Decision #7.
+_status_count(db, project_id::AbstractString, status) =
+    Int(_query(db, "SELECT COUNT(*) AS c FROM issues WHERE project_id = ? AND status = ?",
+               [project_id, status]).c[1])
 
 # ── Projects ──────────────────────────────────────────────────────────────
 function create_project!(store::SQLiteBoardStore; key::AbstractString, name::AbstractString,
@@ -486,6 +489,43 @@ function _assert_project_writable!(store::SQLiteBoardStore, project_id::Abstract
     nothing
 end
 
+"""
+Cross-project FK integrity (Key Decision #8): epic/sprint/labels must live in
+the same project as the issue. Throws `ArgumentError` on mismatch or missing ref.
+"""
+function _assert_issue_refs!(store::SQLiteBoardStore, project_id::AbstractString;
+                             epic_id = nothing, sprint_id = nothing,
+                             labels::Union{Vector{String},Nothing} = nothing)
+    if epic_id !== nothing && epic_id !== missing
+        e = get_epic(store, String(epic_id))
+        e === nothing && throw(ArgumentError("no such epic: $epic_id"))
+        e.project_id == project_id ||
+            throw(ArgumentError("epic belongs to another project: $epic_id"))
+    end
+    if sprint_id !== nothing && sprint_id !== missing
+        s = get_sprint(store, String(sprint_id))
+        s === nothing && throw(ArgumentError("no such sprint: $sprint_id"))
+        s.project_id == project_id ||
+            throw(ArgumentError("sprint belongs to another project: $sprint_id"))
+    end
+    if labels !== nothing
+        for lid in labels
+            l = _get_label(store, lid)
+            l === nothing && throw(ArgumentError("no such label: $lid"))
+            l.project_id == project_id ||
+                throw(ArgumentError("label belongs to another project: $lid"))
+        end
+    end
+    nothing
+end
+
+function _get_label(store::SQLiteBoardStore, id::AbstractString)
+    r = _query(store.db, "SELECT * FROM labels WHERE id = ? LIMIT 1", [id])
+    isempty(r.id) && return nothing
+    Label(; id = String(r.id[1]), name = String(r.name[1]), color = String(r.color[1]),
+          project_id = _str_or_empty(hasproperty(r, :project_id) ? r.project_id[1] : nothing))
+end
+
 function create_issue!(store::SQLiteBoardStore; title::AbstractString, description::AbstractString = "",
                        status::AbstractString = "Backlog", priority::AbstractString = "Medium",
                        story_points::Union{Int,Nothing} = nothing,
@@ -500,10 +540,11 @@ function create_issue!(store::SQLiteBoardStore; title::AbstractString, descripti
     valid_status(status) || throw(ArgumentError("invalid status: $status"))
     valid_priority(priority) || throw(ArgumentError("invalid priority: $priority"))
     pid, pkey = _resolve_project_id(store.db, project_id)
+    _assert_issue_refs!(store, pid; epic_id = epic_id, sprint_id = sprint_id, labels = labels)
     id = new_id()
     key = _generate_issue_key(store.db, pkey)
     now = Dates.now(UTC)
-    position = _status_count(store.db, status)   # append → keeps 0..n dense (global until PR-M2)
+    position = _status_count(store.db, pid, status)   # append within (project, status)
     _exec(store.db, """
         INSERT INTO issues (id, key, title, description, status, priority, story_points,
             epic_id, sprint_id, assignee_id, reporter_id, start_date, due_date, position,
@@ -558,8 +599,17 @@ const _ISSUE_UPDATE_FIELDS = (:title, :description, :status, :priority, :story_p
 function update_issue!(store::SQLiteBoardStore, id::AbstractString; kwargs...)
     # Archive write guard (design § archive semantics): block updates on archived projects.
     iss0 = get_issue(store, id)
-    iss0 !== nothing && _assert_project_writable!(store, iss0.project_id)
+    iss0 === nothing && return nothing
+    _assert_project_writable!(store, iss0.project_id)
     move_status = nothing; move_pos = nothing
+    # Cross-project FK integrity on epic/sprint when those kwargs are present.
+    kw_epic = get(kwargs, :epic_id, :__absent__)
+    kw_sprint = get(kwargs, :sprint_id, :__absent__)
+    if kw_epic !== :__absent__ || kw_sprint !== :__absent__
+        _assert_issue_refs!(store, iss0.project_id;
+                            epic_id = kw_epic === :__absent__ ? nothing : kw_epic,
+                            sprint_id = kw_sprint === :__absent__ ? nothing : kw_sprint)
+    end
     fields = String[]; vals = Any[]
     for (k, v) in kwargs
         k in _ISSUE_UPDATE_FIELDS || continue
@@ -592,19 +642,21 @@ function delete_issue!(store::SQLiteBoardStore, id::AbstractString)::Bool
     _assert_project_writable!(store, iss.project_id)
     _exec(store.db, "DELETE FROM issues WHERE id = ?", [id])
     _exec(store.db, "DELETE FROM issue_labels WHERE issue_id = ?", [id])
-    _reindex_status!(store, iss.status)
+    _reindex_status!(store, iss.project_id, iss.status)
     true
 end
 
-# ── Dense, collision-free ranking ─────────────────────────────────────────
+# ── Dense, collision-free ranking (scoped by project_id + status) ─────────
 function _set_status_pos!(store, id, status, pos)
     _exec(store.db, "UPDATE issues SET status = ?, position = ?, updated = ? WHERE id = ?",
           [status, pos, _dt_str(Dates.now(UTC)), id])
 end
 
-"Renumber a status's issues to 0..n-1 in current order (closes any gaps)."
-function _reindex_status!(store, status)
-    r = _query(store.db, "SELECT id FROM issues WHERE status = ? ORDER BY position, key", [status])
+"Renumber a project's status column to dense 0..n-1 (PR-M2 Key Decision #7)."
+function _reindex_status!(store, project_id::AbstractString, status)
+    r = _query(store.db,
+               "SELECT id FROM issues WHERE project_id = ? AND status = ? ORDER BY position, key",
+               [project_id, status])
     for (i, iid) in enumerate(r.id)
         _exec(store.db, "UPDATE issues SET position = ? WHERE id = ?", [i - 1, String(iid)])
     end
@@ -614,8 +666,8 @@ end
     move_issue!(store, id; status=nothing, position=nothing) -> Issue | nothing
 
 Move an issue to `status` (default: unchanged) at 0-based `position` (default:
-end). Siblings shift so positions stay dense (0..n-1) and collision-free; the
-vacated status is reindexed too.
+end). Siblings are **same-project** only so positions stay dense (0..n-1) per
+`(project_id, status)`; the vacated status column is reindexed too.
 """
 function move_issue!(store::SQLiteBoardStore, id::AbstractString;
                      status::Union{AbstractString,Nothing} = nothing,
@@ -623,27 +675,29 @@ function move_issue!(store::SQLiteBoardStore, id::AbstractString;
     iss = get_issue(store, id)
     iss === nothing && return nothing
     _assert_project_writable!(store, iss.project_id)
+    pid = iss.project_id
     old_status = iss.status
     new_status = status === nothing ? old_status : String(status)
     valid_status(new_status) || throw(ArgumentError("invalid status: $new_status"))
     sib = String[String(x) for x in
-                 _query(store.db, "SELECT id FROM issues WHERE status = ? AND id != ? ORDER BY position, key",
-                        [new_status, id]).id]
+                 _query(store.db,
+                        "SELECT id FROM issues WHERE project_id = ? AND status = ? AND id != ? ORDER BY position, key",
+                        [pid, new_status, id]).id]
     pos = position === nothing ? length(sib) : clamp(Int(position), 0, length(sib))
     order = copy(sib)
     insert!(order, pos + 1, id)
     for (i, iid) in enumerate(order)
         _set_status_pos!(store, iid, new_status, i - 1)
     end
-    new_status == old_status || _reindex_status!(store, old_status)
+    new_status == old_status || _reindex_status!(store, pid, old_status)
     get_issue(store, id)
 end
 
 """
     rank_issue!(store, id; position) -> Issue | nothing
 
-Reorder an issue within its current status to 0-based `position`, keeping
-positions dense and collision-free.
+Reorder an issue within its current (project, status) to 0-based `position`,
+keeping positions dense and collision-free.
 """
 rank_issue!(store::SQLiteBoardStore, id::AbstractString; position::Integer) =
     move_issue!(store, id; position = position)
@@ -748,10 +802,8 @@ end
     start_sprint!(store, id) -> Sprint
 
 Start a future sprint. C8: the check-and-set runs inside a transaction and the
-UPDATE is guarded (`AND state='future'`) so the single-active invariant is
-enforced at the DB level, not just check-then-act.
-
-PR-M1: still global one-active (not per-project). Per-project active is PR-M2.
+UPDATE is guarded (`AND state='future'`). Single-active is **per project**
+(Key Decision #6): another project's active sprint does not block this one.
 """
 function start_sprint!(store::SQLiteBoardStore, id::AbstractString)::Sprint
     local s2
@@ -760,7 +812,9 @@ function start_sprint!(store::SQLiteBoardStore, id::AbstractString)::Sprint
         s === nothing && throw(ArgumentError("no such sprint: $id"))
         # Archive write guard: cannot start a planning window on an archived project.
         _assert_project_writable!(store, s.project_id)
-        active_sprint(store) === nothing || throw(ArgumentError("another sprint is already active"))
+        if active_sprint(store; project_id = s.project_id) !== nothing
+            throw(ArgumentError("another sprint is already active in this project"))
+        end
         s2 = transition(s, :active)
         _exec(store.db, "UPDATE sprints SET state = 'active' WHERE id = ? AND state = 'future'", [id])
     end
@@ -776,9 +830,14 @@ function close_sprint!(store::SQLiteBoardStore, id::AbstractString)::Sprint
     end
     s2
 end
+"""
+    active_sprint(store; project_id) -> Sprint | nothing
+
+PR-M2: `project_id` is **required for real use** (UI always passes active project).
+When omitted / empty, falls back to any active sprint (store-test compat only).
+"""
 function active_sprint(store::SQLiteBoardStore;
                        project_id::Union{AbstractString,Nothing} = nothing)
-    # PR-M1: optional project_id filter; without kw stays global (compat).
     project_id = _norm_project_filter(project_id)
     r = project_id === nothing ?
         _query(store.db, "SELECT * FROM sprints WHERE state = 'active' ORDER BY name, id LIMIT 1") :
@@ -810,7 +869,9 @@ function list_labels(store::SQLiteBoardStore;
 end
 function set_labels!(store::SQLiteBoardStore, issue_id::AbstractString, label_ids::Vector{String})
     iss = get_issue(store, issue_id)
-    iss !== nothing && _assert_project_writable!(store, iss.project_id)
+    iss === nothing && throw(ArgumentError("no such issue: $issue_id"))
+    _assert_project_writable!(store, iss.project_id)
+    _assert_issue_refs!(store, iss.project_id; labels = label_ids)
     _exec(store.db, "DELETE FROM issue_labels WHERE issue_id = ?", [issue_id])
     for lid in label_ids
         _exec(store.db, "INSERT INTO issue_labels (issue_id, label_id) VALUES (?, ?)", [issue_id, lid])
@@ -892,28 +953,32 @@ end
 
 # ── Demo seeding: issues + epics + sprints + labels, ZERO users ────────────
 function seed_demo!(store::SQLiteBoardStore)
-    isempty(list_issues(store)) || return store
-    epic_a = create_epic!(store; name = "Onboarding", color = "violet")
-    epic_b = create_epic!(store; name = "Board Core", color = "teal")
+    def = _default_project(store.db)
+    pid = def.id
+    isempty(list_issues(store; project_id = pid)) || return store
+    epic_a = create_epic!(store; name = "Onboarding", color = "violet", project_id = pid)
+    epic_b = create_epic!(store; name = "Board Core", color = "teal", project_id = pid)
     sprint = create_sprint!(store; name = "Sprint 1", goal = "Ship the board",
-                            start_date = Dates.today(), end_date = Dates.today() + Day(14))
-    lbl_bug = create_label!(store; name = "bug", color = "red")
-    lbl_ui = create_label!(store; name = "ui", color = "cyan")
+                            start_date = Dates.today(), end_date = Dates.today() + Day(14),
+                            project_id = pid)
+    lbl_bug = create_label!(store; name = "bug", color = "red", project_id = pid)
+    lbl_ui = create_label!(store; name = "ui", color = "cyan", project_id = pid)
     today = Dates.today()
     i1 = create_issue!(store; title = "Set up project board", status = "Backlog", priority = "High",
-                       due_date = today + Day(3), epic_id = epic_b.id, story_points = 3)
+                       due_date = today + Day(3), epic_id = epic_b.id, story_points = 3,
+                       project_id = pid)
     create_issue!(store; title = "Design login screen", status = "Backlog", priority = "Medium",
-                  due_date = today + Day(1), epic_id = epic_a.id)
+                  due_date = today + Day(1), epic_id = epic_a.id, project_id = pid)
     create_issue!(store; title = "Implement card model", status = "To Do", priority = "High",
-                  epic_id = epic_b.id, sprint_id = sprint.id, story_points = 5)
+                  epic_id = epic_b.id, sprint_id = sprint.id, story_points = 5, project_id = pid)
     create_issue!(store; title = "Add QCI colors + logo", status = "To Do", priority = "Medium",
-                  epic_id = epic_b.id)
+                  epic_id = epic_b.id, project_id = pid)
     create_issue!(store; title = "Board column rendering", status = "In Progress", priority = "High",
-                  epic_id = epic_b.id, sprint_id = sprint.id)
+                  epic_id = epic_b.id, sprint_id = sprint.id, project_id = pid)
     create_issue!(store; title = "Calendar view + due marks", status = "Review", priority = "Medium",
-                  epic_id = epic_a.id)
+                  epic_id = epic_a.id, project_id = pid)
     create_issue!(store; title = "Initial DB schema", status = "Done", priority = "High",
-                  due_date = today - Day(2), epic_id = epic_b.id)
+                  due_date = today - Day(2), epic_id = epic_b.id, project_id = pid)
     set_labels!(store, i1.id, [lbl_bug.id, lbl_ui.id])
     store
 end

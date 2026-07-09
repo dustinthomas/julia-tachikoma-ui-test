@@ -51,6 +51,7 @@ const KEYMAP = Binding[
     Binding(:global, 'K',          :view_backlog,  "K",     "Backlog",         true),
     Binding(:global, 'C',          :view_calendar, "C",     "Calendar",        true),
     Binding(:global, 'G',          :view_gantt,    "G",     "Gantt",           true),
+    Binding(:global, 'P',          :project_switch,"P",     "Switch project",  true),
     Binding(:global, (:ctrl, 'l'), :logout,        "^L",    "Log out",         true),
 
     # Login — sign in (email + password). Printable chars are captured by the
@@ -171,6 +172,14 @@ const KEYMAP = Binding[
     # ── New-sprint modal ───────────────────────────────────────────────────
     Binding(:new_sprint, :enter,  :submit_new_sprint, "Enter", "Create", true),
     Binding(:new_sprint, :escape, :close_card,        "Esc",   "Cancel", true),
+
+    # ── Project switcher modal (PR-M2 minimal; full create UX in PR-M7) ────
+    Binding(:project_switch, 'j',     :project_switch_down,   "j",     "Down",   true),
+    Binding(:project_switch, 'k',     :project_switch_up,     "k",     "Up",     true),
+    Binding(:project_switch, :down,   :project_switch_down,   "↓",     "Down",   false),
+    Binding(:project_switch, :up,     :project_switch_up,     "↑",     "Up",     false),
+    Binding(:project_switch, :enter,  :project_switch_select, "Enter", "Select", true),
+    Binding(:project_switch, :escape, :close_card,            "Esc",   "Cancel", true),
 ]
 
 const _KEYMAP_INDEX = let d = Dict{Tuple{Symbol,Any},Binding}()

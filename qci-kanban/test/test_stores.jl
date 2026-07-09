@@ -400,6 +400,73 @@ end
     @test ok.project_id == other.id && startswith(ok.key, "LINE2-")
 end
 
+@testset "Stores: PR-M2 per-project active sprint + rank isolation + FK guards" begin
+    bs = S.SQLiteBoardStore(":memory:")
+    def = only(S.list_projects(bs))
+    la = S.create_project!(bs; key = "LA", name = "Line A")
+    lb = S.create_project!(bs; key = "LB", name = "Line B")
+
+    # Dual active sprint: Project A + Project B can each have an active window.
+    sa = S.create_sprint!(bs; name = "A-win", project_id = la.id,
+                          start_date = Date(2026, 1, 1), end_date = Date(2026, 1, 14))
+    sb = S.create_sprint!(bs; name = "B-win", project_id = lb.id,
+                          start_date = Date(2026, 1, 1), end_date = Date(2026, 1, 14))
+    sa2 = S.create_sprint!(bs; name = "A-win2", project_id = la.id)
+    S.start_sprint!(bs, sa.id)
+    @test S.active_sprint(bs; project_id = la.id).id == sa.id
+    @test S.active_sprint(bs; project_id = lb.id) === nothing
+    S.start_sprint!(bs, sb.id)   # independent of A's active sprint
+    @test S.active_sprint(bs; project_id = lb.id).id == sb.id
+    @test S.active_sprint(bs; project_id = la.id).id == sa.id
+    err = try
+        S.start_sprint!(bs, sa2.id); ""
+    catch e
+        e isa ArgumentError ? e.msg : string(e)
+    end
+    @test occursin("this project", err)  # same project still one-active
+
+    # Ranking isolation: rank in LA must not touch LB positions.
+    a1 = S.create_issue!(bs; title = "A1", status = "Backlog", project_id = la.id)
+    a2 = S.create_issue!(bs; title = "A2", status = "Backlog", project_id = la.id)
+    a3 = S.create_issue!(bs; title = "A3", status = "Backlog", project_id = la.id)
+    b1 = S.create_issue!(bs; title = "B1", status = "Backlog", project_id = lb.id)
+    b2 = S.create_issue!(bs; title = "B2", status = "Backlog", project_id = lb.id)
+    @test a1.position == 0 && a2.position == 1 && a3.position == 2
+    @test b1.position == 0 && b2.position == 1
+    S.rank_issue!(bs, a3.id; position = 0)
+    la_bl = S.list_issues(bs; status = "Backlog", project_id = la.id)
+    @test [i.id for i in la_bl] == [a3.id, a1.id, a2.id]
+    @test [i.position for i in la_bl] == [0, 1, 2]
+    lb_bl = S.list_issues(bs; status = "Backlog", project_id = lb.id)
+    @test [i.id for i in lb_bl] == [b1.id, b2.id]
+    @test [i.position for i in lb_bl] == [0, 1]
+    # move A across columns — LB unchanged
+    S.move_issue!(bs, a1.id; status = "To Do")
+    @test [i.position for i in S.list_issues(bs; status = "Backlog", project_id = la.id)] == [0, 1]
+    @test [i.position for i in S.list_issues(bs; status = "Backlog", project_id = lb.id)] == [0, 1]
+    @test S.get_issue(bs, a1.id).position == 0
+
+    # Cross-project epic / sprint / label → ArgumentError
+    e_la = S.create_epic!(bs; name = "LA-epic", project_id = la.id)
+    e_lb = S.create_epic!(bs; name = "LB-epic", project_id = lb.id)
+    lbl_la = S.create_label!(bs; name = "pm-la", project_id = la.id)
+    lbl_lb = S.create_label!(bs; name = "pm-lb", project_id = lb.id)
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id, epic_id = e_lb.id)
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id, sprint_id = sb.id)
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id, labels = [lbl_lb.id])
+    ok_iss = S.create_issue!(bs; title = "ok", project_id = la.id, epic_id = e_la.id, sprint_id = sa.id)
+    @test ok_iss.epic_id == e_la.id && ok_iss.sprint_id == sa.id
+    @test_throws ArgumentError S.update_issue!(bs, ok_iss.id; epic_id = e_lb.id)
+    @test_throws ArgumentError S.update_issue!(bs, ok_iss.id; sprint_id = sb.id)
+    @test_throws ArgumentError S.set_labels!(bs, ok_iss.id, [lbl_lb.id])
+    S.set_labels!(bs, ok_iss.id, [lbl_la.id])
+    @test S.labels_for_issue(bs, ok_iss.id) == [lbl_la.id]
+    # missing refs
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id, epic_id = "no-epic")
+    @test_throws ArgumentError S.create_issue!(bs; title = "x", project_id = la.id, sprint_id = "no-sprint")
+    @test_throws ArgumentError S.set_labels!(bs, ok_iss.id, ["no-label"])
+end
+
 @testset "Stores: _next_seq! honours row MAX over stale key_seq" begin
     bs = S.SQLiteBoardStore(":memory:")
     def = only(S.list_projects(bs))

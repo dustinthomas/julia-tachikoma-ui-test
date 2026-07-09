@@ -72,6 +72,10 @@ mutable struct AppModel <: Model
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
+    # ── Multi-project (PR-M2) ──────────────────────────────────────────────
+    active_project_id::Union{String,Nothing}
+    projects_cache::Vector{Domain.Project}
+    project_sel::Int                   # 1-based index into projects_cache (switcher)
 end
 
 should_quit(m::AppModel) = m.quit
@@ -136,11 +140,91 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
                  td, :day, 1,
-                 false)
+                 false,
+                 nothing, Domain.Project[], 1)
     _init_login_focus!(m)
     if restore && Auth.restore_from_file!(sess, us) && sess.current_user !== nothing
         _complete_login!(m, sess.current_user)
     end
+    m
+end
+
+# ── Multi-project helpers (PR-M2) ──────────────────────────────────────────
+"Active project id for store list/create scope. `nothing` before login."
+_scope(m::AppModel) = m.active_project_id
+
+"""Reload non-archived projects and ensure `active_project_id` is valid."""
+function _load_projects!(m::AppModel)
+    m.projects_cache = Stores.list_projects(m.boardstore; include_archived = false)
+    if isempty(m.projects_cache)
+        # Default always exists after migrate; leave unset if somehow empty.
+        m.active_project_id = nothing
+        m.project_sel = 1
+        return m
+    end
+    if m.active_project_id === nothing ||
+       !any(p -> p.id == m.active_project_id, m.projects_cache)
+        m.active_project_id = m.projects_cache[1].id
+    end
+    idx = findfirst(p -> p.id == m.active_project_id, m.projects_cache)
+    m.project_sel = something(idx, 1)
+    m
+end
+
+"Clear board/backlog/gantt/modal selection after a project switch."
+function _clear_project_selection!(m::AppModel)
+    empty!(m.selected_ids)
+    m.sel_lane = 1; m.sel_col = 1; m.sel_idx = 1
+    m.card_issue_id = nothing
+    m.backlog_sel = 1
+    m.gantt_sel = 1
+    m.label_filter = nothing
+    empty!(m.active_filters)
+    set_text!(m.search_input, "")
+    m.edit_form = nothing
+    m.confirm_kind = :none
+    m.confirm_target = nothing
+    m.modal = :none
+    m.focus = FocusState()
+    m
+end
+
+function _set_active_project!(m::AppModel, project_id::AbstractString)
+    m.active_project_id = String(project_id)
+    _clear_project_selection!(m)
+    p = Stores.get_project(m.boardstore, project_id)
+    m.message = p === nothing ? "Project switched" : "PROJECT: $(p.name) ($(p.key))"
+    m
+end
+
+function _open_project_switch!(m::AppModel)
+    _load_projects!(m)
+    if isempty(m.projects_cache)
+        m.message = "No projects"
+        return m
+    end
+    if length(m.projects_cache) == 1
+        m.message = "Only one project: $(m.projects_cache[1].name)"
+        return m
+    end
+    idx = findfirst(p -> p.id == m.active_project_id, m.projects_cache)
+    m.project_sel = something(idx, 1)
+    m.modal = :project_switch
+    m.focus = FocusState()
+    m
+end
+
+function _project_switch_nav!(m::AppModel, delta::Int)
+    n = length(m.projects_cache)
+    n == 0 && return m
+    m.project_sel = clamp(m.project_sel + delta, 1, n)
+    m
+end
+
+function _project_switch_select!(m::AppModel)
+    (1 <= m.project_sel <= length(m.projects_cache)) || return _close_modal!(m)
+    p = m.projects_cache[m.project_sel]
+    _set_active_project!(m, p.id)
     m
 end
 
@@ -175,6 +259,8 @@ function context_stack(m::AppModel)
         return Symbol[:search, :global]
     elseif m.modal === :new_sprint
         return Symbol[:new_sprint, :global]
+    elseif m.modal === :project_switch
+        return Symbol[:project_switch, :global]
     else
         return Symbol[m.view, :global]
     end
@@ -335,6 +421,15 @@ function _do_action!(m::AppModel, act::Symbol)
         _gantt_zoom!(m)
     elseif act === :gantt_view_card
         _gantt_open_detail!(m)
+    # ── Multi-project (PR-M2) ──────────────────────────────────────────────
+    elseif act === :project_switch
+        _open_project_switch!(m)
+    elseif act === :project_switch_up
+        _project_switch_nav!(m, -1)
+    elseif act === :project_switch_down
+        _project_switch_nav!(m, +1)
+    elseif act === :project_switch_select
+        _project_switch_select!(m)
     end
     m
 end
@@ -375,7 +470,13 @@ function _complete_login!(m::AppModel, user::Domain.User)
     m.view = :board
     m.modal = :none
     m.focus = FocusState()             # no editor in the main shell (Phase 2)
-    m.message = "Signed in as $(user.name)"
+    _load_projects!(m)                 # Default always present after migrate
+    pname = begin
+        p = m.active_project_id === nothing ? nothing :
+            Stores.get_project(m.boardstore, m.active_project_id)
+        p === nothing ? "" : " · $(p.name)"
+    end
+    m.message = "Signed in as $(user.name)$(pname)"
     m
 end
 
@@ -455,6 +556,10 @@ function _logout!(m::AppModel)
     m.auth_stage = :signin
     m.login_error = ""
     m.message = ""
+    m.active_project_id = nothing
+    empty!(m.projects_cache)
+    m.project_sel = 1
+    _clear_project_selection!(m)
     set_text!(m.email_input, "")
     set_text!(m.password_input, "")
     set_text!(m.name_input, "")
@@ -508,6 +613,8 @@ function view(m::AppModel, f::Frame)
             render_search!(m, buf, content_area)
         elseif m.modal === :new_sprint
             render_new_sprint!(m, buf, content_area)
+        elseif m.modal === :project_switch
+            render_project_switch!(m, buf, content_area)
         end
     end
     return
@@ -636,10 +743,24 @@ function _render_main!(m::AppModel, buf::Buffer, content_area::Rect)
         x += length(label) + 2
     end
 
-    # message/toast line under the tabs
-    if !isempty(m.message)
+    # message/toast under the tabs — prefix with active project (same row so
+    # board body height is unchanged; short-terminal layout tests stay green).
+    proj_label = begin
+        p = m.active_project_id === nothing ? nothing :
+            Stores.get_project(m.boardstore, m.active_project_id)
+        p === nothing ? "" : "PROJECT: $(p.name) ($(p.key))"
+    end
+    toast = if isempty(proj_label)
+        m.message
+    elseif isempty(m.message)
+        proj_label
+    else
+        proj_label * "  ·  " * m.message
+    end
+    if !isempty(toast)
         set_string!(buf, content_area.x + 1, content_area.y + 1,
-                    _clip(m.message, content_area.width - 2), Style(; fg = col_text_muted()))
+                    _clip(toast, content_area.width - 2),
+                    Style(; fg = isempty(proj_label) ? col_text_muted() : col_primary(), dim = true))
     end
 
     body = Rect(content_area.x + 1, content_area.y + 2,

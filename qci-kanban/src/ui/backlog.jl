@@ -9,7 +9,7 @@ using .Theming
 
 "Sprints in display order: active first, then future, then closed; each by name."
 function _sorted_sprints(m::AppModel)
-    ss = Stores.list_sprints(m.boardstore)
+    ss = Stores.list_sprints(m.boardstore; project_id = _scope(m))
     ord = Dict(:active => 1, :future => 2, :closed => 3)
     sort(ss; by = s -> (get(ord, s.state, 9), s.name))
 end
@@ -20,7 +20,7 @@ function _backlog_selectable(m::AppModel)::Vector{Domain.Issue}
     for s in _sorted_sprints(m)
         append!(out, Stores.issues_for_sprint(m.boardstore, s.id))
     end
-    append!(out, Stores.backlog_issues(m.boardstore))
+    append!(out, Stores.backlog_issues(m.boardstore; project_id = _scope(m)))
     out
 end
 
@@ -39,9 +39,9 @@ end
 
 "Target sprint an issue moves INTO: the active sprint, else the first future sprint."
 function _target_sprint(m::AppModel)
-    asp = Stores.active_sprint(m.boardstore)
+    asp = Stores.active_sprint(m.boardstore; project_id = _scope(m))
     asp !== nothing && return asp
-    fut = filter(s -> s.state === :future, Stores.list_sprints(m.boardstore))
+    fut = filter(s -> s.state === :future, Stores.list_sprints(m.boardstore; project_id = _scope(m)))
     isempty(fut) ? nothing : first(fut)
 end
 
@@ -69,10 +69,10 @@ function _move_to_backlog!(m::AppModel)
 end
 
 function _start_sprint!(m::AppModel)
-    if Stores.active_sprint(m.boardstore) !== nothing
-        m.message = "A sprint is already active"; return m
+    if Stores.active_sprint(m.boardstore; project_id = _scope(m)) !== nothing
+        m.message = "A planning window is already active in this project"; return m
     end
-    fut = filter(s -> s.state === :future, Stores.list_sprints(m.boardstore))
+    fut = filter(s -> s.state === :future, Stores.list_sprints(m.boardstore; project_id = _scope(m)))
     if isempty(fut)
         m.message = "No future sprint to start"; return m
     end
@@ -82,7 +82,7 @@ function _start_sprint!(m::AppModel)
 end
 
 function _request_close_sprint!(m::AppModel)
-    asp = Stores.active_sprint(m.boardstore)
+    asp = Stores.active_sprint(m.boardstore; project_id = _scope(m))
     if asp === nothing
         m.message = "No active sprint to close"; return m
     end
@@ -134,7 +134,7 @@ function _render_backlog_list!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
     push!(rows, (:backlog, nothing, 0))
-    for iss in Stores.backlog_issues(m.boardstore)
+    for iss in Stores.backlog_issues(m.boardstore; project_id = _scope(m))
         idx += 1; push!(rows, (:issue, iss, idx))
     end
 

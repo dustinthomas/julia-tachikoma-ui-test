@@ -26,7 +26,8 @@ const STATS_HEIGHT = 4
 Pure projection: issue count per status column, in board order.
 """
 column_counts(m::AppModel)::Vector{Pair{String,Int}} =
-    [st => length(Stores.list_issues(m.boardstore; status = st)) for st in BOARD_STATUSES]
+    [st => length(Stores.list_issues(m.boardstore; status = st, project_id = _scope(m)))
+     for st in BOARD_STATUSES]
 
 """
     render_board_stats!(m, buf, area) -> Int
@@ -45,7 +46,7 @@ function render_board_stats!(m::AppModel, buf::Buffer, area::Rect)
     sp = Sparkline(Float64[last(c) for c in counts]; style = Style(; fg = col_primary_hi()))
     render(sp, Rect(area.x, area.y + 1, area.width, 1), buf)
 
-    ip = length(Stores.list_issues(m.boardstore; status = "In Progress"))
+    ip = length(Stores.list_issues(m.boardstore; status = "In Progress", project_id = _scope(m)))
     lim = _wip_limit(m, "In Progress")
     ratio = lim > 0 ? ip / lim : (ip > 0 ? 1.0 : 0.0)
     over = lim > 0 && ip > lim
@@ -83,11 +84,11 @@ end
 
 "Active sprint with dates, else the first sprint with both dates, else nothing."
 function _burndown_sprint(m::AppModel)
-    asp = Stores.active_sprint(m.boardstore)
+    asp = Stores.active_sprint(m.boardstore; project_id = _scope(m))
     if asp !== nothing && asp.start_date !== nothing && asp.end_date !== nothing
         return asp
     end
-    for s in Stores.list_sprints(m.boardstore)
+    for s in Stores.list_sprints(m.boardstore; project_id = _scope(m))
         s.start_date !== nothing && s.end_date !== nothing && return s
     end
     nothing
