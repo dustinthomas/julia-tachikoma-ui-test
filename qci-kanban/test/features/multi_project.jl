@@ -135,5 +135,24 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         @test m.active_project_id === nothing
         u!(m, 'P')
         @test occursin("No projects", m.message)
+        # Fail-closed: unset active project must not unfilter to all issues
+        @test isempty(Qm.Stores.list_issues(m.boardstore; project_id = Qm._scope(m)))
+        titles = String[iss.title for lane in Qm.board_grid(m) for col in lane.cols for iss in col]
+        @test isempty(titles) || all(isempty, titles)
+    end
+
+    @testset "Given project switch When toast shows Then message is short not double PROJECT" begin
+        m = _login_mp("Toast")
+        la = Qm.Stores.create_project!(m.boardstore; key = "TOST", name = "Toast Site")
+        Qm._set_active_project!(m, la.id)
+        @test occursin("Switched to Toast Site", m.message)
+        @test !occursin("PROJECT:", m.message)   # prefix lives on toast, not message
+        tb = app_tb(m; w = 100, h = 24)
+        # toast shows PROJECT: once; message is the short "Switched to …"
+        rows = app_rows(m; w = 100, h = 24)
+        joined = join(rows, "\n")
+        # count PROJECT: occurrences in the full frame — should be 1 (prefix only)
+        @test count("PROJECT:", joined) == 1
+        @test occursin("Switched to", joined)
     end
 end

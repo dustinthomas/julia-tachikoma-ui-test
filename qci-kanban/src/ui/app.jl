@@ -150,8 +150,19 @@ function AppModel(; user_db::AbstractString = ":memory:",
 end
 
 # ── Multi-project helpers (PR-M2) ──────────────────────────────────────────
-"Active project id for store list/create scope. `nothing` before login."
-_scope(m::AppModel) = m.active_project_id
+# When no active project is set, UI list/create calls must NOT fall through to
+# the store's unfiltered path (omit/empty project_id ≡ all projects). A
+# non-empty sentinel matches zero rows and keeps isolation fail-closed.
+const _NO_PROJECT_SCOPE = "\0__no_active_project__"
+
+"""
+    _scope(m) -> String
+
+Active project id for store list/create scope. Returns a non-matching sentinel
+when `active_project_id` is unset so lists stay empty (never unscoped).
+"""
+_scope(m::AppModel) =
+    m.active_project_id === nothing ? _NO_PROJECT_SCOPE : m.active_project_id
 
 """Reload non-archived projects and ensure `active_project_id` is valid."""
 function _load_projects!(m::AppModel)
@@ -193,7 +204,9 @@ function _set_active_project!(m::AppModel, project_id::AbstractString)
     m.active_project_id = String(project_id)
     _clear_project_selection!(m)
     p = Stores.get_project(m.boardstore, project_id)
-    m.message = p === nothing ? "Project switched" : "PROJECT: $(p.name) ($(p.key))"
+    # Short action message only — the always-on toast prefix already shows
+    # "PROJECT: name (key)"; repeating that string doubles it in the header.
+    m.message = p === nothing ? "Project switched" : "Switched to $(p.name)"
     m
 end
 
