@@ -17,6 +17,7 @@ const Dm = QciKanban.Domain
         @test cfg.postgres.port == 5432
         @test cfg.seed_demo === true
         @test cfg.seed_ops_labels === true
+        @test cfg.velocity_unit == :count       # code default; manufacturing prefers :points
     end
 
     @testset "TOML file" begin
@@ -32,6 +33,7 @@ const Dm = QciKanban.Domain
                 token_ttl_seconds = 42
                 seed_demo = false
                 seed_ops_labels = false
+                velocity_unit = "points"
                 [smtp]
                 enabled = true
                 host = "mail.example.com"
@@ -53,6 +55,7 @@ const Dm = QciKanban.Domain
             @test cfg.token_ttl_seconds == 42
             @test cfg.seed_demo === false
             @test cfg.seed_ops_labels === false
+            @test cfg.velocity_unit == :points
             @test cfg.smtp.enabled && cfg.smtp.port == 587 && cfg.smtp.from == "from@example.com"
             @test cfg.postgres.host == "pg" && cfg.postgres.port == 6000 && cfg.postgres.password == "pp"
         end
@@ -66,13 +69,15 @@ const Dm = QciKanban.Domain
                    "QCI_TOKEN_TTL" => "99", "QCI_SEED_DEMO" => "0", "QCI_SMTP_ENABLED" => "true", "QCI_SMTP_HOST" => "eh",
                    "QCI_SMTP_PORT" => "2525", "QCI_SMTP_USER" => "eu", "QCI_SMTP_PASSWORD" => "ep",
                    "QCI_SMTP_FROM" => "ef@x.co", "QCI_PG_HOST" => "eph", "QCI_PG_PORT" => "7000",
-                   "QCI_PG_DBNAME" => "epd", "QCI_PG_USER" => "epu", "QCI_PG_PASSWORD" => "epp")
+                   "QCI_PG_DBNAME" => "epd", "QCI_PG_USER" => "epu", "QCI_PG_PASSWORD" => "epp",
+                   "QCI_VELOCITY_UNIT" => "points")
         cfg2 = C.load_config(nothing; env = env)
         @test cfg2.backend == :remote && cfg2.users_db_path == "/e/u.db"
         @test cfg2.jwt_secret == "envsecret-0123456789abcdef-0123456789" && cfg2.token_ttl_seconds == 99
         @test cfg2.seed_demo === false
         @test cfg2.smtp.enabled && cfg2.smtp.port == 2525 && cfg2.smtp.from == "ef@x.co"
         @test cfg2.postgres.host == "eph" && cfg2.postgres.port == 7000
+        @test cfg2.velocity_unit == :points
     end
 
     @testset "bool coercion variants" begin

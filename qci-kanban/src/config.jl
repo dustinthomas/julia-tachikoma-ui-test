@@ -49,6 +49,11 @@ Base.@kwdef mutable struct AppConfig
     seed_ops_labels::Bool = true
     # Velocity chart series: :count (issue count) | :points (story_points sum).
     # Default :count until PR-M5 burndown unit mode prefers :points for ops.
+    # Burndown + velocity series unit: :count (issue count) | :points
+    # (story_points / est-hours sum). Shared by burndown_series and
+    # velocity_series via render_burndown! / render_velocity!. Code default
+    # stays :count for test stability; manufacturing profile uses :points
+    # (see config/maintenance.toml.example when present, or QCI_VELOCITY_UNIT).
     velocity_unit::Symbol = :count
     smtp::SmtpConfig = SmtpConfig()
     postgres::PostgresConfig = PostgresConfig()

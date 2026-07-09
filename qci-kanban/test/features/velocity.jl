@@ -95,4 +95,31 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         @test occursin("VEL", blob)
         @test occursin("avg=13", blob) || occursin("pts", blob)
     end
+
+    @testset "Given active window + velocity_unit=:points When backlog Then burndown uses pts" begin
+        m = _login_vel("Burndown Pts")
+        pid = m.active_project_id
+        sp = Qv.Stores.create_sprint!(m.boardstore; name = "BD Week",
+                                      project_id = pid,
+                                      start_date = today() - Day(1), end_date = today() + Day(6))
+        Qv.Stores.create_issue!(m.boardstore; title = "Open work", project_id = pid,
+                                story_points = 5, sprint_id = sp.id, status = "To Do")
+        # Done issue: created as Done so updated == now (today) → burned as of today.
+        Qv.Stores.create_issue!(m.boardstore; title = "Done work", project_id = pid,
+                                story_points = 3, sprint_id = sp.id, status = "Done")
+        Qv.Stores.start_sprint!(m.boardstore, sp.id)
+        m.config.velocity_unit = :points
+        u!(m, 'C'); u!(m, 'K')
+        @test m.view == :backlog
+        blob = join(app_rows(m; w = 100, h = 28), "\n")
+        @test occursin("BURNDOWN", blob)
+        @test occursin("pts", blob)
+        # total points = 8; Done (3) burned → remaining 5
+        @test occursin("5/8", blob) || occursin("5/8 pts", blob)
+        # Flip to count: 1 of 2 remaining
+        m.config.velocity_unit = :count
+        blob2 = join(app_rows(m; w = 100, h = 28), "\n")
+        @test occursin("issues", blob2)
+        @test occursin("1/2", blob2) || occursin("1/2 issues", blob2)
+    end
 end

@@ -60,25 +60,39 @@ end
 
 # ── Sprint burndown ──────────────────────────────────────────────────────────
 """
-    burndown_series(issues, start_date, end_date; today=today())
+    burndown_series(issues, start_date, end_date; today=today(), unit=:count)
         -> (; days, ideal, remaining, total)
 
-Pure burndown model over the sprint window. Scope is measured in issue count
-(one unit per issue). `ideal` is the linear ideal line from `total` → 0 across
-the window; `remaining[k]` is issues not yet Done as of `days[k]` (an issue
-counts as burned down on its `updated` date). A single-day window is widened to
-two points so the ideal line is well defined.
+Pure burndown model over the sprint window.
+
+- `unit = :count` (default): one unit per issue — `total = length(issues)`,
+  `remaining[k]` = issues not yet Done as of `days[k]`.
+- `unit = :points`: story-point / est-hour units — `total = sum_units(issues)`,
+  `remaining[k]` = sum of `story_points` (missing → 0) over issues that are
+  **not** (`status == "Done"` AND `Date(updated) ≤ days[k]`).
+
+An issue burns down on its `updated` date when status is Done. `ideal` is the
+linear line from `total` → 0 across the window. A single-day window is widened
+to two points so the ideal line is well defined.
 """
 function burndown_series(issues, start_date::Date, end_date::Date;
-                         today::Date = Dates.today())
+                         today::Date = Dates.today(), unit::Symbol = :count)
     n = max(2, Dates.value(end_date - start_date) + 1)
     days = [start_date + Day(k) for k in 0:(n - 1)]
-    total = length(issues)
+    total = unit === :points ? Domain.sum_units(issues) : length(issues)
     ideal = Float64[total * (1.0 - k / (n - 1)) for k in 0:(n - 1)]
     remaining = Float64[]
     for d in days
-        done = count(i -> i.status == "Done" && Date(i.updated) <= d, issues)
-        push!(remaining, Float64(max(0, total - done)))
+        if unit === :points
+            rem = sum(issues; init = 0) do i
+                burned = i.status == "Done" && Date(i.updated) <= d
+                burned ? 0 : something(i.story_points, 0)
+            end
+            push!(remaining, Float64(rem))
+        else
+            done = count(i -> i.status == "Done" && Date(i.updated) <= d, issues)
+            push!(remaining, Float64(max(0, total - done)))
+        end
     end
     (; days = days, ideal = ideal, remaining = remaining, total = total)
 end
@@ -105,17 +119,20 @@ end
 """
     render_burndown!(m, buf, area) -> Int
 
-Render the active/first-dated sprint's burndown into `area`. Returns rows used
-(`0` when no dated sprint exists or the area is too small).
+Render the active/first-dated sprint's burndown into `area`. Units follow
+`m.config.velocity_unit` (`:count` | `:points`) so burndown and velocity share
+one knob. Returns rows used (`0` when no dated sprint exists or area too small).
 """
 function render_burndown!(m::AppModel, buf::Buffer, area::Rect)
     (area.width < 12 || area.height < 2) && return 0
     s = _burndown_sprint(m)
     s === nothing && return 0
     iss = Stores.issues_for_sprint(m.boardstore, s.id)
-    series = burndown_series(iss, s.start_date, s.end_date)
+    unit = m.config.velocity_unit
+    series = burndown_series(iss, s.start_date, s.end_date; unit = unit)
     now = _remaining_now(series)
-    hdr = "BURNDOWN — $(s.name): $(now)/$(series.total) remaining"
+    unit_tag = unit === :count ? "issues" : "pts"
+    hdr = "BURNDOWN — $(s.name): $(now)/$(series.total) $(unit_tag) remaining"
     set_string!(buf, area.x, area.y, _short(hdr, area.width), Style(; fg = col_primary(), bold = true))
     sp = Sparkline(series.remaining; style = Style(; fg = col_primary_hi()),
                    max_val = max(1.0, Float64(series.total)))

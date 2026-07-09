@@ -136,7 +136,7 @@ end
             Q.Domain.Issue(; id = "3", key = "QCI-3", title = "c", status = "To Do", updated = DateTime(today)),
             Q.Domain.Issue(; id = "4", key = "QCI-4", title = "d", status = "Review", updated = DateTime(today)),
         ]
-        s = Q.burndown_series(iss, start, finish; today = today)
+        s = Q.burndown_series(iss, start, finish; today = today)  # default unit=:count
         n = Dates.value(finish - start) + 1
         @test length(s.days) == n == length(s.ideal) == length(s.remaining)
         @test s.total == 4
@@ -150,6 +150,79 @@ end
         s1 = Q.burndown_series(iss, today, today; today = today)
         @test length(s1.days) == 2
         @test s1.ideal[1] == 4.0 && s1.ideal[end] == 0.0
+
+        # explicit :count matches default
+        sc = Q.burndown_series(iss, start, finish; today = today, unit = :count)
+        @test sc.remaining == s.remaining && sc.total == s.total
+    end
+
+    @testset "burndown_series unit=:points — design §4.3 worked example" begin
+        # Design worked example (day1–day4 window):
+        #   A pts=5  Done         updated day2
+        #   B pts=3  In Progress  updated day1
+        #   C pts=0  Done         updated day3   (nothing → 0)
+        # total_points=8; remaining after day2 → 3; after day3 → 3.
+        day1 = Date(2026, 3, 1)
+        day2 = Date(2026, 3, 2)
+        day3 = Date(2026, 3, 3)
+        day4 = Date(2026, 3, 4)
+        iss = [
+            Q.Domain.Issue(; id = "A", key = "QCI-A", title = "A", status = "Done",
+                           story_points = 5, updated = DateTime(day2)),
+            Q.Domain.Issue(; id = "B", key = "QCI-B", title = "B", status = "In Progress",
+                           story_points = 3, updated = DateTime(day1)),
+            Q.Domain.Issue(; id = "C", key = "QCI-C", title = "C", status = "Done",
+                           story_points = nothing, updated = DateTime(day3)),
+        ]
+        s = Q.burndown_series(iss, day1, day4; unit = :points)
+        @test s.total == 8                      # 5+3+0
+        @test length(s.days) == 4
+        @test s.ideal[1] == 8.0 && s.ideal[end] == 0.0
+        @test s.remaining[1] == 8.0             # day1: nothing Done yet
+        @test s.remaining[2] == 3.0             # day2: A burned (5); B+C remain → 3
+        @test s.remaining[3] == 3.0             # day3: C Done (0 pts); B still → 3
+        @test s.remaining[4] == 3.0             # day4: still B only
+        @test Q._remaining_now(s, day2) == 3
+        @test Q._remaining_now(s, day3) == 3
+
+        # Same issues in :count mode: totals/remaining differ
+        sc = Q.burndown_series(iss, day1, day4; unit = :count)
+        @test sc.total == 3
+        @test sc.remaining[1] == 3.0
+        @test sc.remaining[2] == 2.0            # A Done
+        @test sc.remaining[3] == 1.0            # A+C Done
+        @test sc.remaining[4] == 1.0
+    end
+
+    @testset "render_burndown! respects config.velocity_unit" begin
+        m = gfx_model()
+        pid = m.active_project_id
+        # Ensure an active dated sprint with known points
+        asp = Q.Stores.active_sprint(m.boardstore; project_id = pid)
+        if asp === nothing
+            sp = Q.Stores.create_sprint!(m.boardstore; name = "Unit BD",
+                                         project_id = pid,
+                                         start_date = today(), end_date = today() + Day(7))
+            Q.Stores.start_sprint!(m.boardstore, sp.id)
+            asp = Q.Stores.get_sprint(m.boardstore, sp.id)
+        end
+        Q.Stores.create_issue!(m.boardstore; title = "pts work", project_id = pid,
+                               story_points = 7, sprint_id = asp.id, status = "To Do")
+        m.config.velocity_unit = :points
+        tb = T.TestBackend(80, 6)
+        T.reset!(tb.buf)
+        used = Q.render_burndown!(m, tb.buf, T.Rect(1, 1, 80, 3))
+        @test used > 0
+        blob = join([T.row_text(tb, i) for i in 1:3], "\n")
+        @test occursin("BURNDOWN", blob)
+        @test occursin("pts", blob)
+        # Switch to count — header unit tag flips
+        m.config.velocity_unit = :count
+        tb2 = T.TestBackend(80, 6)
+        T.reset!(tb2.buf)
+        Q.render_burndown!(m, tb2.buf, T.Rect(1, 1, 80, 3))
+        blob2 = join([T.row_text(tb2, i) for i in 1:3], "\n")
+        @test occursin("issues", blob2)
     end
 
     @testset "velocity_series is pure chronological completed units/counts" begin
