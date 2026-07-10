@@ -149,7 +149,7 @@ line, small-terminal guard.
 ## Phase 4 — Calendar + Gantt
 
 - Calendar: month grid (Calendar widget), due badges, day selection shows
-  that day's cards, month nav, create-with-due-date shortcut.
+  that day's cards, month nav, create-with-due-date shortcut (`n`).
 - Gantt: timeline view; rows = issues (grouped by epic/sprint), bars from
   start_date→due_date rendered with canvas/graphics primitives per scout
   report (braille/block canvas; pixel backend where supported, text fallback
@@ -160,11 +160,19 @@ line, small-terminal guard.
   (`▓` status fills)/inside labels, selection bar accents + epic tree indents,
   selected footer + richer empty, sprint polish + adaptive left width + legend
   + unicode/responsive fallbacks. All TestBackend-covered; 100% on gantt.jl.
+- **Edit from timeline views (`e`)** — same contract as Board/Backlog `e`:
+  Calendar selects the first issue due on the focused day; Gantt uses the
+  selected row. Both open EDIT CARD via `_open_edit_issue!` (view selection,
+  not board cursor). Empty day / no selection is a no-op. Status hints show
+  `[e] Edit`. Covered in `test_calendar_view.jl`, `test_gantt.jl`, and
+  `features/phase4_timeline.jl` BDD.
 
 ### Acceptance
 - Deterministic TestBackend assertions on bar extents (row_text patterns) for
   known dates at fixed sizes; today marker column correct; zoom changes scale.
 - Calendar day drill-down lists exactly that day's issues.
+- Calendar `e` / Gantt `e` open EDIT CARD for the view-selected issue (or do
+  nothing when none); Board/Backlog `e` unchanged.
 - 100% coverage on new files.
 
 ---
