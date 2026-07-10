@@ -98,6 +98,12 @@ end
 function _open_card_edit!(m::AppModel; create::Bool = false, due_prefill = nothing)
     iss = create ? nothing : selected_issue(m)
     (!create && iss === nothing) && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    if create
+        can!(m, :create_issue) || return m
+    else
+        can!(m, :edit_issue; resource = iss) || return m
+    end
     m.card_issue_id = create ? nothing : iss.id
     m.edit_form = _build_edit_form(m, iss)
     due_prefill === nothing || set_date_text!(m.edit_form.due_input, string(due_prefill))
@@ -131,6 +137,8 @@ grid). No-op when `iss === nothing`.
 """
 function _open_edit_issue!(m::AppModel, iss)
     iss === nothing && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :edit_issue; resource = iss) || return m
     m.card_issue_id = iss.id
     m.edit_form = _build_edit_form(m, iss)
     m.modal = :card_edit
@@ -194,6 +202,13 @@ end
 function _save_edit!(m::AppModel)
     f = m.edit_form
     f === nothing && return _close_modal!(m)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    if m.card_issue_id === nothing
+        can!(m, :create_issue) || return m
+    else
+        prev_for_can = Stores.get_issue(m.boardstore, m.card_issue_id)
+        can!(m, :edit_issue; resource = prev_for_can) || return m
+    end
     title = strip(text(f.title_input))
     if isempty(title)
         m.message = "Title is required"; return m
@@ -276,12 +291,16 @@ end
 
 # ── Delete / confirm ────────────────────────────────────────────────────────
 function _request_delete_one!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :delete_issue) || return m
     iss = selected_issue(m); iss === nothing && return m
     m.confirm_kind = :delete_one; m.confirm_target = iss.id
     m.modal = :confirm; m.focus = FocusState()
     m
 end
 function _request_bulk_delete!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :delete_issue) || return m
     isempty(m.selected_ids) && return m
     # Only currently-visible selected issues are deletable (finding C7): a card
     # hidden by a filter must never be destroyed from a stale selection.
@@ -345,12 +364,16 @@ end
 
 # ── New sprint ──────────────────────────────────────────────────────────────
 function _open_new_sprint!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     set_text!(m.sprint_name_input, ""); set_text!(m.sprint_goal_input, "")
     m.modal = :new_sprint
     m.focus = FocusState(Any[m.sprint_name_input, m.sprint_goal_input]; active = true)
     m
 end
 function _submit_new_sprint!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     name = strip(text(m.sprint_name_input))
     if isempty(name)
         m.message = "Sprint name required"; return m

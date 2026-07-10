@@ -19,6 +19,12 @@ seed_ops_labels = true
 # Shop-floor sessions (optional; code default remains 7 days).
 token_ttl_seconds = 28800   # 8 hours
 
+# PR-H1: lazy idle logout on shared terminals (code default 0 = off).
+idle_logout_seconds = 900   # 15 minutes
+
+# PR-H1: hard RBAC (code default false = warn-only). Plant opt-in.
+enforce_roles = false
+
 # Paths (optional — defaults under ~/.qci-kanban/)
 # users_db_path = "/var/lib/qci-kanban/users.db"
 # board_db_path = "/var/lib/qci-kanban/board.db"

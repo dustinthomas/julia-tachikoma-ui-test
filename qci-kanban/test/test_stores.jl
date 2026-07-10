@@ -18,6 +18,8 @@ const Dm = QciKanban.Domain
         @test cfg.seed_demo === true
         @test cfg.seed_ops_labels === true
         @test cfg.velocity_unit == :count       # code default; manufacturing prefers :points
+        @test cfg.idle_logout_seconds == 0     # PR-H1 default off
+        @test cfg.enforce_roles === false
     end
 
     @testset "TOML file" begin
@@ -34,6 +36,8 @@ const Dm = QciKanban.Domain
                 seed_demo = false
                 seed_ops_labels = false
                 velocity_unit = "points"
+                idle_logout_seconds = 900
+                enforce_roles = true
                 [smtp]
                 enabled = true
                 host = "mail.example.com"
@@ -56,6 +60,8 @@ const Dm = QciKanban.Domain
             @test cfg.seed_demo === false
             @test cfg.seed_ops_labels === false
             @test cfg.velocity_unit == :points
+            @test cfg.idle_logout_seconds == 900
+            @test cfg.enforce_roles === true
             @test cfg.smtp.enabled && cfg.smtp.port == 587 && cfg.smtp.from == "from@example.com"
             @test cfg.postgres.host == "pg" && cfg.postgres.port == 6000 && cfg.postgres.password == "pp"
         end
@@ -70,7 +76,7 @@ const Dm = QciKanban.Domain
                    "QCI_SMTP_PORT" => "2525", "QCI_SMTP_USER" => "eu", "QCI_SMTP_PASSWORD" => "ep",
                    "QCI_SMTP_FROM" => "ef@x.co", "QCI_PG_HOST" => "eph", "QCI_PG_PORT" => "7000",
                    "QCI_PG_DBNAME" => "epd", "QCI_PG_USER" => "epu", "QCI_PG_PASSWORD" => "epp",
-                   "QCI_VELOCITY_UNIT" => "points")
+                   "QCI_VELOCITY_UNIT" => "points", "QCI_IDLE_LOGOUT" => "600", "QCI_ENFORCE_ROLES" => "1")
         cfg2 = C.load_config(nothing; env = env)
         @test cfg2.backend == :remote && cfg2.users_db_path == "/e/u.db"
         @test cfg2.jwt_secret == "envsecret-0123456789abcdef-0123456789" && cfg2.token_ttl_seconds == 99
@@ -78,6 +84,8 @@ const Dm = QciKanban.Domain
         @test cfg2.smtp.enabled && cfg2.smtp.port == 2525 && cfg2.smtp.from == "ef@x.co"
         @test cfg2.postgres.host == "eph" && cfg2.postgres.port == 7000
         @test cfg2.velocity_unit == :points
+        @test cfg2.idle_logout_seconds == 600
+        @test cfg2.enforce_roles === true
     end
 
     @testset "bool coercion variants" begin
@@ -109,18 +117,67 @@ end
     us = S.SQLiteUserStore(":memory:")
     u = S.create_user!(us; email = "alex@qci.co", name = "Alex", password = "hunter2pw")
     @test u isa Dm.User && u.name == "Alex"
+    @test u.role == "admin"   # PR-H1: first empty-store user is admin
     @test S.authenticate(us, "alex@qci.co", "hunter2pw") !== nothing
+    @test S.authenticate(us, "alex@qci.co", "hunter2pw").role == "admin"
     @test S.authenticate(us, "alex@qci.co", "wrong") === nothing
     @test S.authenticate(us, "nobody@qci.co", "x") === nothing
     @test_throws ArgumentError S.create_user!(us; email = "alex@qci.co", name = "Dup", password = "pw123456")
     @test_throws ArgumentError S.create_user!(us; email = "bad", name = "X", password = "pw123456")
     @test S.get_user(us, u.id).email == "alex@qci.co"
+    @test S.get_user(us, u.id).role == "admin"
     @test S.get_user(us, "missing") === nothing
-    S.create_user!(us; email = "sam@qci.co", name = "Sam", password = "pw123456")
+    u2 = S.create_user!(us; email = "sam@qci.co", name = "Sam", password = "pw123456")
+    @test u2.role == "supervisor"   # subsequent self-service create
     @test length(S.list_users(us)) == 2
+    u3 = S.create_user!(us; email = "tech@qci.co", name = "Tech", password = "pw123456",
+                        role = "technician")
+    @test u3.role == "technician"
+    @test_throws ArgumentError S.create_user!(us; email = "x@qci.co", name = "X", password = "pw123456",
+                                              role = "nope")
     @test S.deactivate_user!(us, u.id)
     @test S.authenticate(us, "alex@qci.co", "hunter2pw") === nothing  # inactive can't auth
     @test S.get_user(us, u.id).active == false
+end
+
+@testset "Stores: users.db pre-H1 role migration fixture" begin
+    mktempdir() do dir
+        path = joinpath(dir, "users_pre_h1.db")
+        # Build pre-H1 DDL only (no role, no user_schema_migrations).
+        db = SQLite.DB(path)
+        DBInterface.execute(db, """
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                iterations INTEGER NOT NULL,
+                created TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                token_version INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        ph = QciKanban.Passwords.hash_password("oldpw12")
+        DBInterface.execute(db, """
+            INSERT INTO users (id, email, name, password_hash, salt, iterations, created, active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        """, ["uid-old", "old@qci.co", "Old User", ph.hash_hex, ph.salt_hex, ph.iterations,
+              string(Dates.now(UTC))])
+        SQLite.close(db)
+
+        us = S.SQLiteUserStore(path)
+        cols = S._query(us.db, "PRAGMA table_info(users)")
+        @test any(c -> String(c) == "role", cols.name)
+        u = S.get_user(us, "uid-old")
+        @test u !== nothing && u.role == "supervisor"
+        @test S._user_schema_version(us.db) == 1
+        # idempotent re-open
+        us2 = S.SQLiteUserStore(path)
+        @test S._user_schema_version(us2.db) == 1
+        @test S.get_user(us2, "uid-old").role == "supervisor"
+        S.close!(us); S.close!(us2)
+    end
 end
 
 @testset "Stores: SQLite board store CRUD" begin
@@ -728,8 +785,11 @@ end
         @test S.pg_placeholders(1) == "\$1"
         u = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A", "active" => 1, "created" => string(now(UTC))))
         @test u.name == "A" && u.active
+        @test u.role == "supervisor"  # missing role → default
         u2 = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A"))  # missing active/created
         @test u2.active
+        u3 = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A", "role" => "admin"))
+        @test u3.role == "admin"
         iss = S.remote_row_to_issue(Dict("id" => "i", "key" => "QCI-1", "title" => "T", "status" => "Backlog",
             "priority" => "Medium", "story_points" => 3, "epic_id" => "e", "sprint_id" => "s",
             "assignee_id" => "a", "reporter_id" => "r", "start_date" => "2026-01-01",
@@ -761,8 +821,22 @@ end
         us = S.RemoteUserStore(fx)
         u = S.create_user!(us; email = "a@b.co", name = "A", password = "pw123456")
         @test u.email == "a@b.co"
+        @test u.role == "admin"  # empty FakeExec list → first-empty-admin
         @test occursin("INSERT INTO users", fx.calls[end][1])
+        @test occursin("role", fx.calls[end][1])
+        @test fx.calls[end][2][end] == "admin"
         @test_throws ArgumentError S.create_user!(us; email = "bad", name = "A", password = "pw123456")
+        # subsequent create when list_users returns a row → supervisor
+        fx2 = S.FakeExec((sql, p) -> occursin("SELECT", sql) && occursin("users", sql) ?
+            [Dict{String,Any}("id" => "u0", "email" => "x@b.co", "name" => "X", "active" => 1,
+                              "role" => "admin")] : Dict{String,Any}[])
+        u_sup = S.create_user!(S.RemoteUserStore(fx2); email = "b@b.co", name = "B", password = "pw123456")
+        @test u_sup.role == "supervisor"
+        @test_throws ArgumentError S.create_user!(S.RemoteUserStore(S.FakeExec());
+            email = "c@b.co", name = "C", password = "pw123456", role = "nope")
+        u_tech = S.create_user!(S.RemoteUserStore(S.FakeExec());
+            email = "t@b.co", name = "T", password = "pw123456", role = "technician")
+        @test u_tech.role == "technician"
 
         ph = P.hash_password("pw123456")
         row = Dict{String,Any}("id" => "u", "email" => "a@b.co", "name" => "A",

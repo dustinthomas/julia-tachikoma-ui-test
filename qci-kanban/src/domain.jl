@@ -17,10 +17,13 @@ const NOTIFICATION_KINDS = (:assigned, :status_changed, :comment_added, :due_soo
 const WORK_TYPES = ("PM", "CM", "Improvement", "Safety", "Other")
 # Project keys: 2–8 chars, start with letter, A–Z / 0–9 only (no hyphen).
 const PROJECT_KEY_RE = r"^[A-Z][A-Z0-9]{1,7}$"
+# RBAC roles (PR-H1). Stored as TEXT on users.role; default "supervisor".
+const USER_ROLES = ("admin", "supervisor", "technician", "viewer")
 
 export User, Issue, Epic, Sprint, Label, Comment, ActivityEvent, NotificationEvent, Project
 export SprintMetrics
 export PRIORITIES, STATUSES, SPRINT_STATES, NOTIFICATION_KINDS, WORK_TYPES, PROJECT_KEY_RE
+export USER_ROLES, valid_role, can
 export valid_email, valid_priority, valid_status, valid_sprint_state, valid_notification_kind
 export valid_project_key, valid_work_type
 export can_transition, transition
@@ -36,6 +39,7 @@ valid_notification_kind(k::Symbol)::Bool = k in NOTIFICATION_KINDS
 valid_project_key(k::AbstractString)::Bool = occursin(PROJECT_KEY_RE, k)
 valid_work_type(::Nothing)::Bool = true
 valid_work_type(w::AbstractString)::Bool = w in WORK_TYPES
+valid_role(r::AbstractString)::Bool = r in USER_ROLES
 
 # ── User ────────────────────────────────────────────────────────────────
 struct User
@@ -44,15 +48,59 @@ struct User
     name::String
     active::Bool
     created::DateTime
+    role::String   # one of USER_ROLES; keyword default "supervisor"
     function User(id::AbstractString, email::AbstractString, name::AbstractString,
-                  active::Bool, created::DateTime)
+                  active::Bool, created::DateTime, role::AbstractString)
         valid_email(email) || throw(ArgumentError("invalid email: $email"))
         isempty(strip(name)) && throw(ArgumentError("user name must not be empty"))
-        new(String(id), String(email), String(name), active, created)
+        valid_role(role) || throw(ArgumentError("invalid role: $role"))
+        new(String(id), String(email), String(name), active, created, String(role))
     end
 end
-User(; id, email, name, active::Bool = true, created::DateTime = Dates.now(UTC)) =
-    User(id, email, name, active, created)
+User(; id, email, name, active::Bool = true, created::DateTime = Dates.now(UTC),
+     role::AbstractString = "supervisor") =
+    User(id, email, name, active, created, role)
+
+# ── Capability matrix (pure; no I/O) ────────────────────────────────────
+"""
+    can(user, action; resource=nothing) -> Bool
+
+Closed-set RBAC check (PR-H1 / Q6). Unauthenticated (`user === nothing`) and
+inactive users always false. Technician may create issues and edit only when
+`resource` is an `Issue` with `assignee_id == user.id`. Enforcement (hard deny
+vs warn-only) lives in UI `can!` via `config.enforce_roles`.
+"""
+function can(user::Union{User,Nothing}, action::Symbol; resource=nothing)::Bool
+    user === nothing && return false
+    user.active || return false
+    r = user.role
+    if action === :view_board
+        return true
+    elseif action === :create_issue
+        return r in ("admin", "supervisor", "technician")
+    elseif action === :edit_issue
+        r in ("admin", "supervisor") && return true
+        if r == "technician"
+            resource isa Issue || return false
+            return resource.assignee_id == user.id
+        end
+        return false
+    elseif action === :delete_issue
+        return r in ("admin", "supervisor")
+    elseif action === :manage_sprint
+        return r in ("admin", "supervisor")
+    elseif action === :manage_project
+        return r in ("admin", "supervisor")
+    elseif action === :export_csv
+        return r in ("admin", "supervisor", "technician")
+    elseif action === :create_user || action === :manage_users
+        # Matrix only (future post-login admin UI). Public create form is open (Q5)
+        # and must NOT call can! / can on pre-login _create_submit!.
+        return r == "admin"
+    else
+        return false
+    end
+end
 
 # ── Project ─────────────────────────────────────────────────────────────
 struct Project

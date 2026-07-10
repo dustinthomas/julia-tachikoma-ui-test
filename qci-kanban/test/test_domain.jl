@@ -43,10 +43,52 @@ const D = QciKanban.Domain
         u = D.User(; id = "u1", email = "a@b.co", name = "Alex")
         @test u.id == "u1" && u.active == true
         @test u.created isa DateTime
+        @test u.role == "supervisor"   # PR-H1 keyword default
         u2 = D.User(; id = "u2", email = "x@y.co", name = "X", active = false)
         @test u2.active == false
+        u3 = D.User(; id = "u3", email = "a@b.co", name = "A", role = "admin")
+        @test u3.role == "admin"
         @test_throws ArgumentError D.User(; id = "u", email = "bad", name = "n")
         @test_throws ArgumentError D.User(; id = "u", email = "a@b.co", name = "   ")
+        @test_throws ArgumentError D.User(; id = "u", email = "a@b.co", name = "n", role = "nope")
+    end
+
+    @testset "USER_ROLES / valid_role / can (PR-H1)" begin
+        @test D.USER_ROLES == ("admin", "supervisor", "technician", "viewer")
+        @test D.valid_role("admin") && D.valid_role("viewer")
+        @test !D.valid_role("nope") && !D.valid_role("")
+        admin = D.User(; id = "a", email = "a@b.co", name = "A", role = "admin")
+        sup = D.User(; id = "s", email = "s@b.co", name = "S", role = "supervisor")
+        tech = D.User(; id = "t", email = "t@b.co", name = "T", role = "technician")
+        view = D.User(; id = "v", email = "v@b.co", name = "V", role = "viewer")
+        inactive = D.User(; id = "i", email = "i@b.co", name = "I", role = "admin", active = false)
+        mine = D.Issue(; id = "i1", key = "QCI-1", title = "Mine", assignee_id = "t")
+        other = D.Issue(; id = "i2", key = "QCI-2", title = "Other", assignee_id = "s")
+        unassigned = D.Issue(; id = "i3", key = "QCI-3", title = "Free")
+        # unauthenticated / inactive
+        @test !D.can(nothing, :edit_issue)
+        @test !D.can(inactive, :edit_issue)
+        # admin full
+        for act in (:view_board, :edit_issue, :create_issue, :delete_issue,
+                    :manage_sprint, :manage_project, :export_csv, :manage_users)
+            @test D.can(admin, act)
+        end
+        # viewer read-only
+        @test D.can(view, :view_board)
+        @test !D.can(view, :delete_issue) && !D.can(view, :create_issue)
+        @test !D.can(view, :edit_issue; resource = mine)
+        # technician: create yes; edit only assigned
+        @test D.can(tech, :create_issue)
+        @test D.can(tech, :edit_issue; resource = mine)
+        @test !D.can(tech, :edit_issue; resource = other)
+        @test !D.can(tech, :edit_issue; resource = unassigned)
+        @test !D.can(tech, :edit_issue)  # no resource → deny
+        @test !D.can(tech, :delete_issue)
+        @test D.can(tech, :export_csv)
+        # supervisor work + no user-admin
+        @test D.can(sup, :edit_issue; resource = other) && D.can(sup, :manage_sprint)
+        @test !D.can(sup, :manage_users)
+        @test !D.can(admin, :bogus_action)
     end
 
     @testset "Issue" begin

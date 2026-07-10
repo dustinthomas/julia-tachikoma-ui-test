@@ -69,6 +69,8 @@ function _move_to_backlog!(m::AppModel)
 end
 
 function _start_sprint!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     if Stores.active_sprint(m.boardstore; project_id = _scope(m)) !== nothing
         m.message = "A planning window is already active in this project"; return m
     end
@@ -82,6 +84,8 @@ function _start_sprint!(m::AppModel)
 end
 
 function _request_close_sprint!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     asp = Stores.active_sprint(m.boardstore; project_id = _scope(m))
     if asp === nothing
         m.message = "No active sprint to close"; return m
@@ -98,6 +102,8 @@ issues roll back to the backlog, then mark the sprint closed.
 Metrics live in the app close path only — not inside `Stores.close_sprint!`.
 """
 function _do_close_sprint!(m::AppModel, sprint_id)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     sprint_id === nothing && return m
     issues = Stores.issues_for_sprint(m.boardstore, sprint_id)
     done = filter(i -> i.status == "Done", issues)

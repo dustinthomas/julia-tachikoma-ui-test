@@ -78,6 +78,8 @@ mutable struct AppModel <: Model
     project_sel::Int                   # 1-based index into projects_cache (switcher)
     project_name_input::TextInput      # create-project modal (name)
     project_key_input::TextInput       # create-project modal (key)
+    # PR-H1: last KeyEvent that passed the non-expired idle check (UTC).
+    last_input_at::DateTime
 end
 
 should_quit(m::AppModel) = m.quit
@@ -144,7 +146,8 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  td, :day, 1,
                  false,
                  nothing, Domain.Project[], 1,
-                 _make_input(), _make_input())
+                 _make_input(), _make_input(),
+                 Dates.now(UTC))
     _init_login_focus!(m)
     if restore && Auth.restore_from_file!(sess, us) && sess.current_user !== nothing
         _complete_login!(m, sess.current_user)
@@ -310,6 +313,8 @@ function _open_project_create!(m::AppModel; forced::Bool = false)
 end
 
 function _submit_project_create!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_project) || return m
     name = strip(text(m.project_name_input))
     key  = strip(text(m.project_key_input))
     if isempty(name)
@@ -352,6 +357,8 @@ end
 
 """Export active-project issues as CSV next to the session token (0600)."""
 function _export_csv!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :export_csv) || return m
     m.active_project_id === nothing && (m.message = "No active project"; return m)
     issues = Stores.list_issues(m.boardstore; project_id = _scope(m))
     csv = Domain.issues_to_csv(issues)
@@ -408,9 +415,62 @@ function context_stack(m::AppModel)
     end
 end
 
+# ── Permissions (PR-H1) ─────────────────────────────────────────────────────
+"""
+    can!(m, action; resource=nothing) -> Bool
+
+UI-facing capability gate. When `enforce_roles=false` (default), denied matrix
+checks still allow the action but set a role-warning message. Unauthenticated
+always returns false without reading `.role`. Do not call from pre-login
+`_create_submit!` (Q5 open self-service).
+"""
+function can!(m::AppModel, action::Symbol; resource=nothing)::Bool
+    u = m.current_user
+    if u === nothing
+        # Gated actions require a session. Never interpolate u.role.
+        if m.config.enforce_roles
+            m.message = "Permission denied ($action)"
+            return false
+        end
+        return false   # warn-only still does not allow unauthenticated mutate
+    end
+    Domain.can(u, action; resource = resource) && return true
+    if m.config.enforce_roles
+        m.message = "Permission denied ($action)"
+        return false
+    else
+        m.message = "Role warning: $(u.role) lacks $action (enforcement off)"
+        return true
+    end
+end
+
+# ── Lazy idle logout (PR-H1) ────────────────────────────────────────────────
+"""
+    _idle_expired!(m) -> Bool
+
+If logged in and idle past `idle_logout_seconds`, logout and set
+`login_error = "Session expired (idle)"` (visible on SIGN IN). Returns true
+when the key must be swallowed.
+"""
+function _idle_expired!(m::AppModel)::Bool
+    m.current_user === nothing && return false
+    m.config.idle_logout_seconds <= 0 && return false
+    if Dates.now(UTC) - m.last_input_at > Dates.Second(m.config.idle_logout_seconds)
+        _logout!(m)
+        # _logout! clears login_error — set AFTER so SIGN IN shows the reason.
+        m.login_error = "Session expired (idle)"
+        return true
+    end
+    false
+end
+
 # ── Update ──────────────────────────────────────────────────────────────────
 function update!(m::AppModel, evt::KeyEvent)
     m.tick += 1
+    if _idle_expired!(m)   # may logout + return true if expired
+        return m           # swallow this key
+    end
+    m.last_input_at = Dates.now(UTC)
     disp = route_to_focus!(m.focus, evt)      # step 1: focused editor wins
     disp === :consumed && return m
     act = lookup_action(context_stack(m), evt)  # steps 2-4 via keymap
@@ -597,12 +657,16 @@ function _backlog_open_detail!(m::AppModel)
 end
 function _backlog_open_edit!(m::AppModel)
     iss = _backlog_selected_issue(m); iss === nothing && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :edit_issue; resource = iss) || return m
     m.card_issue_id = iss.id; m.edit_form = _build_edit_form(m, iss)
     m.modal = :card_edit; m.focus = FocusState(edit_editors(m.edit_form); active = true)
     m
 end
 function _backlog_request_delete!(m::AppModel)
     iss = _backlog_selected_issue(m); iss === nothing && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :delete_issue) || return m
     m.confirm_kind = :delete_one; m.confirm_target = iss.id
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -621,6 +685,7 @@ end
 function _complete_login!(m::AppModel, user::Domain.User)
     m.current_user = user
     m.login_error = ""
+    m.last_input_at = Dates.now(UTC)   # PR-H1: start idle window at login
     m.view = :board
     m.modal = :none
     m.focus = FocusState()             # no editor in the main shell (Phase 2)

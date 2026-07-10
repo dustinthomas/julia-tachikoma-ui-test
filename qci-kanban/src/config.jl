@@ -55,6 +55,10 @@ Base.@kwdef mutable struct AppConfig
     # stays :count for test stability; manufacturing profile uses :points
     # (see config/maintenance.toml.example when present, or QCI_VELOCITY_UNIT).
     velocity_unit::Symbol = :count
+    # PR-H1: lazy idle logout (0 = off). Checked on next KeyEvent after quiet period.
+    idle_logout_seconds::Int = 0
+    # PR-H1: hard RBAC deny when true; warn-only allow when false (default).
+    enforce_roles::Bool = false
     smtp::SmtpConfig = SmtpConfig()
     postgres::PostgresConfig = PostgresConfig()
 end
@@ -104,8 +108,8 @@ Missing file → defaults only. ENV always wins over the file.
 
 Recognized ENV keys: `QCI_BACKEND`, `QCI_USERS_DB`, `QCI_BOARD_DB`,
 `QCI_JWT_SECRET`, `QCI_JWT_SECRET_PATH`, `QCI_SESSION_TOKEN_PATH`,
-`QCI_TOKEN_TTL`, `QCI_SEED_DEMO`, `QCI_SMTP_ENABLED`, `QCI_SMTP_HOST`,
-`QCI_TOKEN_TTL`, `QCI_VELOCITY_UNIT`, `QCI_SMTP_ENABLED`, `QCI_SMTP_HOST`,
+`QCI_TOKEN_TTL`, `QCI_SEED_DEMO`, `QCI_IDLE_LOGOUT`, `QCI_ENFORCE_ROLES`,
+`QCI_VELOCITY_UNIT`, `QCI_SMTP_ENABLED`, `QCI_SMTP_HOST`,
 `QCI_SMTP_PORT`, `QCI_SMTP_USER`, `QCI_SMTP_PASSWORD`, `QCI_SMTP_FROM`,
 `QCI_PG_HOST`, `QCI_PG_PORT`, `QCI_PG_DBNAME`, `QCI_PG_USER`, `QCI_PG_PASSWORD`.
 """
@@ -123,6 +127,8 @@ function load_config(path::Union{AbstractString,Nothing} = nothing; env = ENV)::
         haskey(t, "seed_demo") && (cfg.seed_demo = _as_bool(t["seed_demo"]))
         haskey(t, "seed_ops_labels") && (cfg.seed_ops_labels = _as_bool(t["seed_ops_labels"]))
         haskey(t, "velocity_unit") && (cfg.velocity_unit = Symbol(t["velocity_unit"]))
+        haskey(t, "idle_logout_seconds") && (cfg.idle_logout_seconds = _as_int(t["idle_logout_seconds"]))
+        haskey(t, "enforce_roles") && (cfg.enforce_roles = _as_bool(t["enforce_roles"]))
         if haskey(t, "smtp")
             s = t["smtp"]
             haskey(s, "enabled") && (cfg.smtp.enabled = _as_bool(s["enabled"]))
@@ -152,6 +158,8 @@ function load_config(path::Union{AbstractString,Nothing} = nothing; env = ENV)::
     haskey(env, "QCI_TOKEN_TTL") && (cfg.token_ttl_seconds = _as_int(env["QCI_TOKEN_TTL"]))
     haskey(env, "QCI_SEED_DEMO") && (cfg.seed_demo = _as_bool(env["QCI_SEED_DEMO"]))
     haskey(env, "QCI_VELOCITY_UNIT") && (cfg.velocity_unit = Symbol(env["QCI_VELOCITY_UNIT"]))
+    haskey(env, "QCI_IDLE_LOGOUT") && (cfg.idle_logout_seconds = _as_int(env["QCI_IDLE_LOGOUT"]))
+    haskey(env, "QCI_ENFORCE_ROLES") && (cfg.enforce_roles = _as_bool(env["QCI_ENFORCE_ROLES"]))
     haskey(env, "QCI_SMTP_ENABLED") && (cfg.smtp.enabled = _as_bool(env["QCI_SMTP_ENABLED"]))
     haskey(env, "QCI_SMTP_HOST") && (cfg.smtp.host = String(env["QCI_SMTP_HOST"]))
     haskey(env, "QCI_SMTP_PORT") && (cfg.smtp.port = _as_int(env["QCI_SMTP_PORT"]))
