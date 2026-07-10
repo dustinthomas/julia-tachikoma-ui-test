@@ -41,7 +41,9 @@ implementer/
 LocalPreferences.toml
 qci-kanban/agent_logs/
 qci-kanban/implementer/
-qci-kanban/scripts/
+# Keep local utility scripts untracked; ship playground seed for demos.
+qci-kanban/scripts/*
+!qci-kanban/scripts/seed_playground.jl
 qci-kanban/LocalPreferences.toml
 
 # Julia coverage and build noise
