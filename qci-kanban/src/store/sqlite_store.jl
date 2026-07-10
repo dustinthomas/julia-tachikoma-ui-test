@@ -47,6 +47,10 @@ function _open_db(path::AbstractString)::SQLite.DB
     db = SQLite.DB(path)
     # PRAGMA foreign_keys must be set per connection (SQLite default is OFF).
     DBInterface.execute(db, "PRAGMA foreign_keys = ON")
+    # Multi-reader / short-writer friendliness for shared plant DBs (local disk only).
+    # journal_mode returns a row — fully consume so later transactions are not blocked.
+    DBInterface.execute(db, "PRAGMA journal_mode = WAL") |> Tables.columntable
+    DBInterface.execute(db, "PRAGMA busy_timeout = 5000")  # ms
     db
 end
 

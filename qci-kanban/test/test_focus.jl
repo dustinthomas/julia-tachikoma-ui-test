@@ -124,6 +124,7 @@ end
     @testset "lookup_action resolves per-context and walks the stack" begin
         @test FS.lookup_action(:global, KEY('q')) == :quit
         @test FS.lookup_action(:global, KEY('?')) == :toggle_help
+        @test FS.lookup_action(:global, KEY('R')) == :soft_refresh
         @test FS.lookup_action(:global, KEY(:ctrl, 'l')) == :logout
         @test FS.lookup_action(:login, KEY(:enter)) == :login_submit
         @test FS.lookup_action(:login, KEY('c')) == :login_to_create

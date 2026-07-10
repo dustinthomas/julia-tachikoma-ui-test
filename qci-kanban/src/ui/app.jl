@@ -509,6 +509,8 @@ function _do_action!(m::AppModel, act::Symbol)
         _switch_view!(m, :gantt)
     elseif act === :logout
         _logout!(m)
+    elseif act === :soft_refresh
+        _soft_refresh!(m)
     elseif act === :login_submit
         _login_submit!(m)
     elseif act === :login_to_create
@@ -812,6 +814,45 @@ function _logout!(m::AppModel)
     set_text!(m.name_input, "")
     m.user_count = length(Stores.list_users(m.userstore))
     _init_login_focus!(m)
+end
+
+"""
+    _soft_refresh!(m)
+
+Global soft refresh (`R`): reload projects_cache, revalidate current user,
+clamp board/backlog/gantt/calendar selection, prune deleted bulk-selected ids
+(by store existence — not filter-aware visibility), and preserve open modal if
+its issue still exists. No-op when not logged in. Sets `message = "Refreshed"`.
+"""
+function _soft_refresh!(m::AppModel)
+    m.current_user === nothing && return m
+    _load_projects!(m)
+    # Re-load user so active/name changes apply without full re-login.
+    u = Stores.get_user(m.userstore, m.current_user.id)
+    if u === nothing || !u.active
+        _logout!(m)
+        m.login_error = "Account no longer active"
+        return m  # skip clamp / "Refreshed" — login chrome shows login_error
+    end
+    m.current_user = u
+    m.session.current_user = u
+    # Board cursor + bulk multi-select (drop deleted cards, not filter-hidden ones).
+    _clamp_selection!(m)
+    filter!(id -> Stores.get_issue(m.boardstore, id) !== nothing, m.selected_ids)
+    # Backlog / gantt cursors.
+    items = _backlog_selectable(m)
+    m.backlog_sel = clamp(m.backlog_sel, 1, max(1, length(items)))
+    m.gantt_sel = clamp(m.gantt_sel, 1, max(1, length(gantt_issue_rows(m))))
+    # Calendar day may exceed days-in-month after a rare month shift.
+    m.cal_sel_day = clamp(m.cal_sel_day, 1,
+        Dates.daysinmonth(Date(m.cal_year, m.cal_month, 1)))
+    # Modal: preserve if card_issue_id still exists; close when issue was deleted.
+    if m.card_issue_id !== nothing && m.modal !== :none &&
+       Stores.get_issue(m.boardstore, m.card_issue_id) === nothing
+        _close_modal!(m)
+    end
+    m.message = "Refreshed"
+    m
 end
 
 # ═══════════════════════════ VIEW ══════════════════════════════════════════
@@ -1125,7 +1166,9 @@ end
 
 Record a scripted headless tour of the v2 app (`kanban2`) to a `.tach` file:
 first-run gate → create account → board → cycle swimlanes → open card detail →
-add a comment → stats strip → calendar → backlog + start sprint → gantt → board.
+add a comment → stats strip → card edit (WO/date fields) → project switcher
+`P` open/Esc → calendar (`e` edit) → backlog + start sprint → gantt (`e` edit)
+→ soft refresh `R` → board.
 
 Runs on isolated `:memory:` stores and a throwaway token path, so it never
 touches `~/.qci-kanban`. `gif`/`svg` optionally export the same frames when the
@@ -1133,7 +1176,7 @@ corresponding Tachikoma extension loads headlessly (guarded; skipped otherwise).
 """
 function record_demo2(filename::AbstractString = "qci-kanban-v2-demo.tach";
                       width::Int = 90, height::Int = 28,
-                      frames::Int = 120, fps::Int = 8,
+                      frames::Int = 140, fps::Int = 8,
                       gif::Bool = false, svg::Bool = false)
     m = AppModel(; user_db = ":memory:", board_db = ":memory:",
                  token_path = tempname(), secret = "demo-secret", restore = false)
@@ -1152,11 +1195,20 @@ function record_demo2(filename::AbstractString = "qci-kanban-v2-demo.tach";
         (0.4, key(:enter)),                    # submit comment
         (0.5, key(:escape)),                   # close detail
         (0.8, key('t')),                       # stats strip on
+        (0.6, key('e')),                       # edit card (WO / date fields)
+        (0.7, key(:escape)),                   # close edit
+        (0.6, key('P')),                       # project switcher (multi-project ops)
+        (0.6, key(:escape)),                   # close switcher
         (0.8, key('C')),                       # calendar view
         (0.6, key('l')),                       # next month
+        (0.5, key('e')),                       # cal edit (no-op if no due issue)
+        (0.4, key(:escape)),                   # close if edit opened
         (0.8, key('K')),                       # backlog view
         (0.8, key('S')),                       # start sprint (burndown updates)
         (0.8, key('G')),                       # gantt view
+        (0.6, key('e')),                       # gantt edit selected row
+        (0.5, key(:escape)),                   # close edit
+        (0.6, key('R')),                       # soft refresh flash
         (0.8, key('B')),                       # back to board
         pause(1.0),
     )

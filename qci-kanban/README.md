@@ -70,6 +70,8 @@ status-bar hints are generated from the same table, so they never drift. The
 | `q` / `Ctrl-C` | Quit |
 | `?` | Help overlay |
 | `B` | Board · `K` Backlog · `C` Calendar · `G` Gantt |
+| `P` | Switch project |
+| `R` | Soft refresh (reload projects, re-clamp selection) |
 | `Ctrl-L` | Log out |
 
 ### Board
@@ -153,11 +155,58 @@ Defaults are test-safe and require no setup. Notable knobs:
   config routes domain events (assigned / status-changed / comment / due-soon)
   through the outbox and `SMTPClient`. Until then nothing sends email.
 
+## Manufacturing / plant install
+
+For shop-floor maintenance boards (not the software-demo seed):
+
+1. **Config template** — copy and point `kanban2` at it:
+
+   ```bash
+   mkdir -p ~/.qci-kanban
+   cp config/maintenance.toml.example ~/.qci-kanban/config.toml
+   # edit paths / TTL as needed, then:
+   julia --project=. -e 'using QciKanban; QciKanban.kanban2(; config_path=expanduser("~/.qci-kanban/config.toml"))'
+   ```
+
+   Or override only the seed flag: `QCI_SEED_DEMO=0 julia --project=. -e 'using QciKanban; QciKanban.kanban2()'`.
+
+2. **Recommended plant values** (`config/maintenance.toml.example`):
+   - `seed_demo = false` — empty board on first open (no software-demo issues).
+   - `seed_ops_labels = true` — new projects get PM / CM / Safety / Critical labels.
+   - `token_ttl_seconds = 28800` — 8-hour shop sessions (code default is 7 days).
+   - `velocity_unit = "points"` — burndown/velocity prefer story points.
+   - Optional future (see H1 roles/idle PR when merged): `idle_logout_seconds`,
+     `enforce_roles` — **not present in this build**; document only when those
+     config fields exist.
+
+3. **SQLite on local disk only** — v2 opens with `PRAGMA journal_mode=WAL` and
+   `busy_timeout=5000` for light multi-seat use on the **same host**. Do **not**
+   put `users.db` / `board.db` on NFS or other network filesystems (WAL is unsafe
+   there). Multi-host → Postgres remote backend, not shared SQLite.
+
+4. **Backup before upgrades**:
+
+   ```bash
+   cp -a ~/.qci-kanban ~/.qci-kanban.bak-$(date +%Y%m%d)
+   ```
+
+5. **Shared kiosk / multi-user seat**:
+   - `Ctrl-L` log out between operators.
+   - Per-seat session file via `session_token_path` / `QCI_SESSION_TOKEN_PATH`
+     so two terminals do not clobber the same JWT file.
+   - Soft refresh `R` after another seat writes (reloads project cache + clamps
+     selection; does not re-seed or restart).
+
+6. **Ops keys**: `P` project switcher · `E` export CSV (Backlog) · `R` refresh ·
+   `Ctrl-L` logout. Work-order fields (`asset_tag`, `location`, `work_type`) live
+   on the card create/edit form.
+
 ## Demo recording
 
 ```bash
 # v2 scripted tour → qci-kanban-v2-demo.tach (gate → account → board → swimlanes
-# → card detail + comment → stats → calendar → backlog/start-sprint → gantt)
+# → card detail + comment → stats → edit → project switcher → calendar/e →
+# backlog/start-sprint → gantt/e → soft refresh R → board)
 julia --project=. -e 'using QciKanban; QciKanban.record_demo2("qci-kanban-v2-demo.tach")'
 
 # with an SVG export alongside the .tach (GIF export if the extension is present)
