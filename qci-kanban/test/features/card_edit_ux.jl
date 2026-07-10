@@ -89,4 +89,20 @@ typ!(m, s) = (for ch in collect(s); u!(m, ch); end)
         @test m.modal == :card_edit
         @test !m.edit_form.start_input.menu_open
     end
+
+    @testset "Given Start date focused When menu closed Then [Spc] Calendar is on status bar not beside the date" begin
+        m = _login_ce("DateTip")
+        u!(m, 'n'); typ!(m, "Uncluttered dates")
+        Qe.focus_index!(m.focus, 12)
+        rows = app_rows(m; w = 100, h = 32)
+        date_line = something(findfirst(r -> occursin("Start:", r) && occursin("Due:", r), rows), 0)
+        @test date_line > 0
+        @test !occursin("Spc", rows[date_line])
+        # App status footer (Quit/Help), not the outer box border.
+        si = something(findfirst(r -> occursin("[q]Quit", r) || occursin("Quit", r), rows), 0)
+        @test si > 0
+        status = rows[si]
+        @test occursin("[Spc] Calendar", status)
+        @test occursin("Save", status) || occursin("^S", status)
+    end
 end

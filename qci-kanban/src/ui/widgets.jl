@@ -270,9 +270,10 @@ end
 
 function Tachikoma.render(d::DateField, rect::Rect, buf::Buffer)
     rect.width < 1 && return
+    # Value only — calendar tips live on the app status bar (see `_field_status_hints`)
+    # so the narrow Start/Due cells stay readable next to each other.
     shown = isempty(d.buffer) ? "(none)" : d.buffer
-    hint = d.focused && !d.menu_open ? "  [Spc calendar]" : (d.menu_open ? "  [calendar…]" : "")
-    line = fit_width(shown * hint, rect.width)
+    line = fit_width(shown, rect.width)
     st = d.focused ? Style(; fg = col_primary_hi(), bold = true) :
          (isempty(d.buffer) ? Style(; fg = col_text_muted()) : Style(; fg = col_text()))
     set_string!(buf, rect.x, rect.y, line, st)
@@ -280,6 +281,11 @@ function Tachikoma.render(d::DateField, rect::Rect, buf::Buffer)
     # Calendar grid below the value line when the rect is tall enough; otherwise
     # still draw a compact month header on the next row if height ≥ 2.
     _render_date_menu!(d, rect, buf)
+end
+
+"""Status-bar tip for a focused DateField (closed picker vs open calendar)."""
+function date_field_status_hint(d::DateField)::String
+    d.menu_open ? "[←→↑↓] Move  [Enter] Pick  [Esc] Close" : "[Spc] Calendar"
 end
 
 """Render a compact month grid starting one row under `rect.y` when space allows."""

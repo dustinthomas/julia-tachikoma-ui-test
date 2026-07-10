@@ -150,11 +150,22 @@ end
     tb = T.TestBackend(40, 12); T.reset!(tb.buf)
     Tachikoma.render(df, T.Rect(1, 1, 35, 1), tb.buf)
     @test T.find_text(tb, "2026-03-20") !== nothing
+    # Hint lives in the app status bar, not beside the crowded date value.
+    row1 = T.row_text(tb, 1)
+    @test occursin("2026-03-20", row1)
+    @test !occursin("Spc", row1) && !occursin("calendar", lowercase(row1))
     df.menu_open = true
     df.menu_date = Date(2026, 3, 20)
     Tachikoma.render(df, T.Rect(1, 1, 35, 10), tb.buf)  # taller rect for calendar
     @test T.find_text(tb, "2026") !== nothing || T.find_text(tb, "Mar") !== nothing ||
           T.find_text(tb, "March") !== nothing
+    # Open-menu chrome is the grid, not an inline "[calendar…]" suffix on the value row.
+    @test !occursin("calendar…", T.row_text(tb, 1)) && !occursin("[calendar", T.row_text(tb, 1))
+    # Status-bar contract for the focused date field (closed vs open menu).
+    df.menu_open = false
+    @test Qw.date_field_status_hint(df) == "[Spc] Calendar"
+    df.menu_open = true
+    @test Qw.date_field_status_hint(df) == "[←→↑↓] Move  [Enter] Pick  [Esc] Close"
 end
 
 @testset "C1/U1 — unicode-safe truncation helpers" begin

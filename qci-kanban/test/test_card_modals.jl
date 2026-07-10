@@ -424,6 +424,40 @@ end
         @test made.start_date isa Date
     end
 
+    @testset "date field tip [Spc] lives in status bar, not beside Start/Due value" begin
+        # Regression: 14-col date cells truncated "[Spc calendar]" into "Due:" ("[Spc c Due").
+        # Status bar is the app footer with Quit/Help — not the outer frame border (rows[end]).
+        status_of(rows) = something(findfirst(r -> occursin("[q]Quit", r) || occursin("Quit", r), rows), 0)
+        m = lbm(); k!(m, 'n'); typ!(m, "Tip placement")
+        Qm.focus_index!(m.focus, 12)   # Start DateField focused, menu closed
+        rows = app_rows(m; w = 100, h = 32)
+        start_row = something(findfirst(r -> occursin("Start:", r) && occursin("Due:", r), rows), 0)
+        @test start_row > 0
+        # Value row must stay uncluttered — no inline Spc/calendar chrome next to the date.
+        @test !occursin("Spc", rows[start_row])
+        @test !occursin("calendar", lowercase(rows[start_row]))
+        # Same tip surfaces with the other card-edit tooltips on the app status bar.
+        si = status_of(rows); @test si > 0
+        status = rows[si]
+        @test occursin("[Spc] Calendar", status)
+        @test occursin("^S", status) || occursin("Save", status)
+        # Opening the calendar menu still keeps tips off the value line; status adapts.
+        k!(m, ' ')
+        @test m.edit_form.start_input.menu_open
+        rows2 = app_rows(m; w = 100, h = 32)
+        start_row2 = something(findfirst(r -> occursin("Start:", r), rows2), 0)
+        @test start_row2 > 0
+        @test !occursin("[Spc", rows2[start_row2])
+        @test !occursin("calendar…", rows2[start_row2])
+        si2 = status_of(rows2); @test si2 > 0
+        status2 = rows2[si2]
+        # Must match open-calendar field tips — not KEYMAP Enter/Esc alone (vacuous).
+        @test occursin("[←→↑↓] Move", status2)
+        @test occursin("[Enter] Pick", status2)
+        @test occursin("[Esc] Close", status2)
+        @test !occursin("[Spc] Calendar", status2)
+    end
+
     @testset "Esc closes open date menu without dismissing the edit form" begin
         m = lbm(); k!(m, 'n'); typ!(m, "Esc menu")
         Qm.focus_index!(m.focus, 12)

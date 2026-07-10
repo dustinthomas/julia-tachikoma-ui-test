@@ -937,10 +937,23 @@ end
 
 _clip(s::AbstractString, w::Int) = fit_width(s, w)
 
+"""Contextual status tips for the focused field (date picker, …). Empty if none."""
+function _field_status_hints(ed)::String
+    ed isa DateField && return date_field_status_hint(ed)
+    ""
+end
+
 function _render_status!(m::AppModel, buf::Buffer, status_area::Rect)
     status_area.width < 10 && return
     ctx = context_stack(m)
-    hints = status_hints(ctx; editors_focused = focused_editor(m.focus) !== nothing)
+    ed = focused_editor(m.focus)
+    hints = status_hints(ctx; editors_focused = ed !== nothing)
+    # Field-specific tips (e.g. [Spc] Calendar) lead so they aren't truncated off
+    # the right of a crowded card-edit status line.
+    field = _field_status_hints(ed)
+    if !isempty(field)
+        hints = isempty(hints) ? field : field * "  " * hints
+    end
     who = m.current_user === nothing ? "" : " " * split(m.current_user.name)[1]
     mode = m.current_user === nothing ? "LOGIN" : VIEW_TITLES[m.view]
     # Pin Quit/Help to the (always-visible) left so a long view-hint string on
