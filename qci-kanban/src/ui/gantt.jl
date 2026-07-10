@@ -505,6 +505,9 @@ end
 
 _gantt_open_detail!(m::AppModel) = _open_detail_issue!(m, _gantt_selected_issue(m))
 
+"Open the card-edit modal for the currently selected gantt row issue."
+_gantt_open_edit!(m::AppModel) = _open_edit_issue!(m, _gantt_selected_issue(m))
+
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
 function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     if area.width < 24 || area.height < 6

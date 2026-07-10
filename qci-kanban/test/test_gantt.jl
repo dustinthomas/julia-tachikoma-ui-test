@@ -481,6 +481,15 @@ end
         g4!(m, :enter)
         @test m.modal == :card_detail && m.card_issue_id == b.id
         g4!(m, :escape)                          # back to gantt
+        # 'e' → edit the selected gantt issue (same selection as Enter/v)
+        g4!(m, 'e')
+        @test m.modal == :card_edit && m.card_issue_id == b.id
+        @test m.edit_form !== nothing
+        @test T.text(m.edit_form.title_input) == b.title
+        tb_e = app_tb(m; w = 100, h = 28)
+        @test T.find_text(tb_e, "EDIT CARD") !== nothing
+        g4!(m, :escape)                          # back to gantt
+        @test m.modal == :none
         # scroll right then left moves the window by current scale days (1 at default :day; week/month use 7/28)
         st0 = m.gantt_start
         g4!(m, 'l'); @test m.gantt_start == st0 + Day(1)
