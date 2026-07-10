@@ -550,6 +550,8 @@ function _do_action!(m::AppModel, act::Symbol)
         _cal_new!(m)
     elseif act === :cal_view_card
         _cal_open_detail!(m)
+    elseif act === :cal_edit_card
+        _cal_open_edit!(m)
     # ── Phase 4: gantt ─────────────────────────────────────────────────────
     elseif act === :gantt_scroll_left
         _gantt_scroll!(m, -1)
@@ -563,6 +565,8 @@ function _do_action!(m::AppModel, act::Symbol)
         _gantt_zoom!(m)
     elseif act === :gantt_view_card
         _gantt_open_detail!(m)
+    elseif act === :gantt_edit_card
+        _gantt_open_edit!(m)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
     elseif act === :project_switch
         _open_project_switch!(m)
