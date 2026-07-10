@@ -41,6 +41,18 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
             p4!(m, 'n')
             @test m.modal == :card_edit && m.card_issue_id === nothing
             @test T.text(m.edit_form.due_input) == string(Date(y, mo, 9))
+            p4!(m, :escape)
+            @test m.modal == :none
+        end
+        @testset "When e is pressed Then edit opens for a due-day issue" begin
+            for _ in 1:abs(9 - m.cal_sel_day); p4!(m, 9 >= m.cal_sel_day ? 'j' : 'k'); end
+            p4!(m, 'e')
+            @test m.modal == :card_edit
+            # _cal_selected_issue takes first issue in store order (d9 before d9b)
+            @test m.card_issue_id == d9.id
+            tb = app_tb(m; w = 100, h = 28)
+            @test T.find_text(tb, "EDIT CARD") !== nothing
+            p4!(m, :escape)
         end
     end
 

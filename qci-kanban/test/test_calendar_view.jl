@@ -76,6 +76,31 @@ cal_goto_day!(m, d) = (steps = d - m.cal_sel_day;
         cal_goto_day!(m, 8)                 # no issues
         k4!(m, :enter)
         @test m.modal == :none
+        # symmetric 'e' on empty day (same selection guard)
+        k4!(m, 'e')
+        @test m.modal == :none
+        @test m.edit_form === nothing
+    end
+
+    @testset "e edits the due-day issue (TestBackend re-render, no calendar bleed)" begin
+        m = cal_login()
+        k4!(m, 'C')
+        y, mo = m.cal_year, m.cal_month
+        iss = C4.Stores.create_issue!(m.boardstore; title = "Due for Edit", priority = "Medium",
+                                      due_date = Date(y, mo, 22))
+        cal_goto_day!(m, 22)
+        k4!(m, 'e')
+        tb = app_tb(m; w = 100, h = 28)
+        @test m.modal == :card_edit
+        @test m.card_issue_id == iss.id
+        @test T.text(m.edit_form.due_input) == string(Date(y, mo, 22))
+        @test T.find_text(tb, "EDIT CARD") !== nothing
+        @test T.find_text(tb, iss.title) !== nothing
+        # no bleed of always-on calendar chrome (panel + weekday header + month title)
+        # under the modal — stronger than "No issues due", which is empty-day-only.
+        @test T.find_text(tb, "DUE $(Dates.monthname(mo)) 22") === nothing
+        @test T.find_text(tb, "Mo") === nothing
+        @test T.find_text(tb, Dates.monthname(mo)) === nothing
     end
 
     @testset "n creates a card pre-filled with the selected date as due_date" begin
