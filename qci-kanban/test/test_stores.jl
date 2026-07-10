@@ -126,6 +126,8 @@ end
         us = S.SQLiteUserStore(joinpath(dir, "users-wal.db"))
         jm2 = DBInterface.execute(us.db, "PRAGMA journal_mode") |> Tables.columntable
         @test lowercase(String(jm2.journal_mode[1])) == "wal"
+        bt2 = DBInterface.execute(us.db, "PRAGMA busy_timeout") |> Tables.columntable
+        @test Int(bt2.timeout[1]) == 5000
         S.close!(bs)
         S.close!(us)
     end

@@ -822,10 +822,14 @@ end
 Global soft refresh (`R`): reload projects_cache, revalidate current user,
 clamp board/backlog/gantt/calendar selection, prune deleted bulk-selected ids
 (by store existence — not filter-aware visibility), and preserve open modal if
-its issue still exists. No-op when not logged in. Sets `message = "Refreshed"`.
+its issue still exists. If `_load_projects!` falls back to a different active
+project (archived/deleted behind the model), clear selection/modals like a
+project switch so multi-seat refresh does not leave cross-project selection.
+No-op when not logged in. Sets `message = "Refreshed"`.
 """
 function _soft_refresh!(m::AppModel)
     m.current_user === nothing && return m
+    prev_active = m.active_project_id
     _load_projects!(m)
     # Re-load user so active/name changes apply without full re-login.
     u = Stores.get_user(m.userstore, m.current_user.id)
@@ -836,6 +840,10 @@ function _soft_refresh!(m::AppModel)
     end
     m.current_user = u
     m.session.current_user = u
+    # Active project disappeared/archived → same hygiene as explicit switch.
+    if m.active_project_id != prev_active
+        _clear_project_selection!(m)
+    end
     # Board cursor + bulk multi-select (drop deleted cards, not filter-hidden ones).
     _clamp_selection!(m)
     filter!(id -> Stores.get_issue(m.boardstore, id) !== nothing, m.selected_ids)

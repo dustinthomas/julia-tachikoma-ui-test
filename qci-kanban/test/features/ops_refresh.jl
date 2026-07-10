@@ -42,6 +42,31 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         @test any(p -> p.key == "LINEB", m.projects_cache)
     end
 
+    @testset "Given active project archived When R Then fallback project + selection cleared" begin
+        m = _login_ops("Archive Fallback")
+        old_id = m.active_project_id
+        la = Qm.Stores.create_project!(m.boardstore; key = "LINEC", name = "Line C")
+        # Select a card and open edit on the current (Default) project.
+        issues = Qm.Stores.list_issues(m.boardstore; project_id = old_id)
+        @test !isempty(issues)
+        push!(m.selected_ids, issues[1].id)
+        m.card_issue_id = issues[1].id
+        m.edit_form = Qm._build_edit_form(m, issues[1])
+        m.modal = :card_edit
+        m.focus = Qm.FocusState()
+        # Another seat archives the active project; cache still stale.
+        Qm.Stores.archive_project!(m.boardstore, old_id)
+        @test m.active_project_id == old_id
+        u!(m, 'R')
+        @test m.message == "Refreshed"
+        @test m.active_project_id == la.id
+        @test isempty(m.selected_ids)
+        @test m.modal == :none
+        @test m.card_issue_id === nothing
+        @test any(p -> p.id == la.id, m.projects_cache)
+        @test !any(p -> p.id == old_id, m.projects_cache)
+    end
+
     @testset "Given selected id deleted When R Then selected_ids pruned" begin
         m = _login_ops("Prune Sel")
         issues = Qm.Stores.list_issues(m.boardstore; project_id = m.active_project_id)
