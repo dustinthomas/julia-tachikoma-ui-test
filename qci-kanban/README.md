@@ -46,9 +46,11 @@ New projects can receive ops labels (PM/CM/Safety/Critical) when
 - **Backlog** — backlog + sprint sections, create/start/close sprints (close rolls
   incomplete issues back), move issues backlog ↔ sprint; a **burndown** footer for
   the active sprint.
-- **Calendar** — month grid, due-date badges, day drill-down, month nav.
+- **Calendar** — month grid, due-date badges, day drill-down, month nav;
+  `n` new (due = day), `e` edit day's issue, `v`/Enter details.
 - **Gantt** — timeline bars from `start_date → due_date` with full modern visual polish (PR1–PR6), today marker, day/week/month
-  zoom, horizontal scroll. See "Gantt visuals" table below for weekend shading, ruler/axis/today, bar ends/density/labels, selection+indents, footer+rich empty, sprint/legend/fallbacks.
+  zoom, horizontal scroll; `e` edit selected row, `v`/Enter details.
+  See "Gantt visuals" table below for weekend shading, ruler/axis/today, bar ends/density/labels, selection+indents, footer+rich empty, sprint/legend/fallbacks.
 - **Graphics polish (Phase 5)** — layered QCI logo (kitty/sixel pixel canvas when
   the terminal supports it, braille/block vector art otherwise, text fallback at
   tiny sizes), a board **stats strip** (per-column sparkline + WIP gauge, toggle
@@ -101,6 +103,7 @@ status-bar hints are generated from the same table, so they never drift. The
 | `h`/`l` or arrows | Prev / next month |
 | `j`/`k` or arrows | Next / prev day |
 | `n` | New issue (due = selected day) |
+| `e` | Edit first issue due on selected day (no-op if none) |
 | `v`/`Enter` | Day's card details |
 
 ### Gantt
@@ -109,6 +112,7 @@ status-bar hints are generated from the same table, so they never drift. The
 | `h`/`l` or arrows | Scroll timeline |
 | `j`/`k` or arrows | Move row |
 | `z` | Zoom day/wk/mo |
+| `e` | Edit selected row's issue (no-op if none) |
 | `v`/`Enter` | Details |
 
 ### Gantt visuals (PR1–PR6)
@@ -119,7 +123,7 @@ status-bar hints are generated from the same table, so they never drift. The
 | PR2 | Ruler/axis + today marker + layout accounting | Dedicated ruler row (h ≥ 8): month spans (e.g. "Mar 2026") + `┬` week ticks via `gantt_axis_labels`; today upgraded to `▼` (band) + thick `┃` (or fallback) + optional "TODAY" label (primary_hi); adaptive `has_ruler`/`has_footer` + nshow math; guards for h=6/8/10, w<60. |
 | PR3 | Refined bar ends, status density fills, inside labels | BlockCanvas base `█` preserved; post-overlay `▌`/`▐` end-caps; `▓` density portion (status map: Done=1.0 full, Review=0.85, In Progress=0.55, else ~0.25); short key/title inside when bar wide (≥4–5 cols) using dim (or primary_hi bold when selected row). |
 | PR4 | Selection accent on bars + improved epic hierarchy indents | Selected row accents bar (hi-contrast left/end or segment via priority/epic tint); epic rows `▬ ` (epic_color, bold); issues under use tree indents (`  ├─ ` / `  └─ ` style) for visual hierarchy on j/k navigation. |
-| PR5 | Selected-item footer details + richer empty state | When h≥10 + rows fit: 1-line footer e.g. `QCI-123: 2026-03-12 → 2026-03-16 (5d) • In Progress • High • Alice` (dim text, priority_color on pri); empty state richer + hint "(press e on board or n on calendar to date items)". Responsive hide on narrow. |
+| PR5 | Selected-item footer details + richer empty state | When h≥10 + rows fit: 1-line footer e.g. `QCI-123: 2026-03-12 → 2026-03-16 (5d) • In Progress • High • Alice` (dim text, priority_color on pri); empty state richer + hint "(press e on board or n on calendar to date items)". Responsive hide on narrow. (Gantt also binds `e` → edit selected issue — same as Board/Backlog.) |
 | PR6 | Sprint band polish + responsive label width + legend + unicode fallbacks | Sprint bands improved (edges/position/underline); adaptive left label width `gantt_left_width` (14–24 cols based on content, min chart guarantee); compact legend in header/scale; unicode fallbacks (e.g. ┃→│, ┆→|, ▓→#, ▌→[, ▐→], ┬→+ for w<60 or font issues); narrow TestBackend cases. |
 
 All visuals are additive, 100% TestBackend-covered (re-render + `find_text`/`row_text`/`char_at`/`maxrun`/`visual_rows` after every `update!`), use only theme accessors (no raw ColorRGB), preserve public `render_gantt!` + key contract. See `src/ui/gantt.jl`, `test/test_gantt.jl`, `test/features/phase4_timeline.jl`.
