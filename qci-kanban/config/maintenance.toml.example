@@ -1,6 +1,7 @@
-# QCI Kanban — plant / manufacturing maintenance install template (PR-M3).
+# QCI Kanban — plant / manufacturing maintenance install template.
 #
 # Copy and pass to kanban2:
+#   mkdir -p ~/.qci-kanban
 #   cp config/maintenance.toml.example ~/.qci-kanban/config.toml
 #   julia --project=. -e 'using QciKanban; QciKanban.kanban2(; config_path=expanduser("~/.qci-kanban/config.toml"))'
 #
@@ -9,6 +10,13 @@
 #
 # Code defaults stay software/demo-friendly (seed_demo=true). This template is
 # production-oriented: empty board on first open, ops labels on new projects.
+#
+# SQLite notes (PR-H2):
+# - kanban2 enables WAL + busy_timeout=5000 on every open (local disk only).
+# - Do not put users.db/board.db on NFS; use Postgres remote for multi-host.
+# - Soft refresh: press R post-login to reload projects_cache after multi-seat writes.
+# - Backup: cp -a ~/.qci-kanban ~/.qci-kanban.bak-YYYYMMDD before upgrades.
+# - Shared kiosk: Ctrl-L between users; per-seat QCI_SESSION_TOKEN_PATH.
 
 # Do not pollute the plant board with software-demo issues.
 seed_demo = false
@@ -25,7 +33,10 @@ idle_logout_seconds = 900   # 15 minutes
 # PR-H1: hard RBAC (code default false = warn-only). Plant opt-in.
 enforce_roles = false
 
-# Paths (optional — defaults under ~/.qci-kanban/)
+# Burndown / velocity series unit for plant metrics (code default is "count").
+velocity_unit = "points"
+
+# Paths (optional — defaults under ~/.qci-kanban/; keep on local disk, not NFS)
 # users_db_path = "/var/lib/qci-kanban/users.db"
 # board_db_path = "/var/lib/qci-kanban/board.db"
 # session_token_path = "/var/lib/qci-kanban/session.jwt"

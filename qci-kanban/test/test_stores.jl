@@ -3,6 +3,7 @@ using Test
 using Dates
 using SQLite
 using DBInterface
+using Tables
 const S = QciKanban.Stores
 const C = QciKanban.Config
 const P = QciKanban.Passwords
@@ -110,6 +111,25 @@ const Dm = QciKanban.Domain
             cfg2 = C.AppConfig(; jwt_secret_path = spath)
             @test C.ensure_jwt_secret!(cfg2) == secret
         end
+    end
+end
+
+@testset "Stores: SQLite _open_db WAL + busy_timeout (PR-H2)" begin
+    mktempdir() do dir
+        path = joinpath(dir, "wal-probe.db")
+        bs = S.SQLiteBoardStore(path)
+        jm = DBInterface.execute(bs.db, "PRAGMA journal_mode") |> Tables.columntable
+        @test lowercase(String(jm.journal_mode[1])) == "wal"
+        bt = DBInterface.execute(bs.db, "PRAGMA busy_timeout") |> Tables.columntable
+        @test Int(bt.timeout[1]) == 5000
+        # user store shares the same open path
+        us = S.SQLiteUserStore(joinpath(dir, "users-wal.db"))
+        jm2 = DBInterface.execute(us.db, "PRAGMA journal_mode") |> Tables.columntable
+        @test lowercase(String(jm2.journal_mode[1])) == "wal"
+        bt2 = DBInterface.execute(us.db, "PRAGMA busy_timeout") |> Tables.columntable
+        @test Int(bt2.timeout[1]) == 5000
+        S.close!(bs)
+        S.close!(us)
     end
 end
 

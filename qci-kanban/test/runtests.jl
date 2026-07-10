@@ -82,6 +82,9 @@ include("features/card_edit_ux.jl")
 # Project switcher polish + create-project + CSV export (PR-M7 / MVP exit).
 include("features/project_switcher_export.jl")
 
+# Soft refresh R + WAL ops (PR-H2).
+include("features/ops_refresh.jl")
+
 # Phase 4 — Calendar + Gantt: month grid, due marks, drill-down; timeline bars.
 include("test_calendar_view.jl")
 include("test_gantt.jl")

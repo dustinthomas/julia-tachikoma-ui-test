@@ -52,6 +52,7 @@ const KEYMAP = Binding[
     Binding(:global, 'C',          :view_calendar, "C",     "Calendar",        true),
     Binding(:global, 'G',          :view_gantt,    "G",     "Gantt",           true),
     Binding(:global, 'P',          :project_switch,"P",     "Switch project",  true),
+    Binding(:global, 'R',          :soft_refresh,  "R",     "Refresh",         true),
     Binding(:global, (:ctrl, 'l'), :logout,        "^L",    "Log out",         true),
 
     # Login — sign in (email + password). Printable chars are captured by the
