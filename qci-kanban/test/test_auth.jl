@@ -202,3 +202,21 @@ end
         @test A.load_token(joinpath(dir, "missing.jwt")) === nothing
     end
 end
+
+@testset "PR-H1: first-user admin + role on auth restore" begin
+    mktempdir() do dir
+        secret = "role-secret-abcdefghijklmnop"
+        tok = joinpath(dir, "s.jwt")
+        us = S.SQLiteUserStore(":memory:")
+        u = S.create_user!(us; email = "a@b.co", name = "Al", password = "hunter2pw")
+        @test u.role == "admin"
+        sess = A.Session(; secret = secret, token_path = tok, ttl_seconds = 3600)
+        A.login!(sess, us, "a@b.co", "hunter2pw")
+        @test sess.current_user.role == "admin"
+        s2 = A.Session(; secret = secret, token_path = tok, ttl_seconds = 3600)
+        @test A.restore(s2, sess.token, us)
+        @test s2.current_user.role == "admin"
+        u2 = S.create_user!(us; email = "b@b.co", name = "Bo", password = "hunter2pw")
+        @test u2.role == "supervisor"
+    end
+end

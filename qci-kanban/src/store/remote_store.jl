@@ -71,7 +71,8 @@ function remote_row_to_user(d::AbstractDict)::User
     User(; id = String(_get(d, "id")), email = String(_get(d, "email")),
          name = String(_get(d, "name")),
          active = let a = _get(d, "active"); a === nothing ? true : (a == 1 || a === true) end,
-         created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
+         created = parse_dt(something(_get(d, "created"), Dates.now(UTC))),
+         role = _normalize_role(_get(d, "role")))
 end
 
 function remote_row_to_project(d::AbstractDict)::Project
@@ -135,17 +136,25 @@ remote_row_to_activity(d::AbstractDict)::ActivityEvent =
                   created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
 
 # ═══════════════════════════ USER STORE ═══════════════════════════════════
+# First-empty-admin parity with SQLiteUserStore (PR-H1).
 function create_user!(store::RemoteUserStore; email::AbstractString, name::AbstractString,
-                      password::AbstractString)::User
+                      password::AbstractString,
+                      role::Union{AbstractString,Nothing} = nothing)::User
     valid_email(email) || throw(ArgumentError("invalid email: $email"))
+    assigned = if role === nothing
+        isempty(list_users(store)) ? "admin" : "supervisor"
+    else
+        valid_role(role) || throw(ArgumentError("invalid role: $role"))
+        String(role)
+    end
     id = new_id(); created = Dates.now(UTC); ph = hash_password(password)
-    store.exec("INSERT INTO users (id, email, name, password_hash, salt, iterations, created, active) VALUES ($(pg_placeholders(8)))",
-               Any[id, email, name, ph.hash_hex, ph.salt_hex, ph.iterations, _dt_str(created), 1])
-    User(; id = id, email = email, name = name, active = true, created = created)
+    store.exec("INSERT INTO users (id, email, name, password_hash, salt, iterations, created, active, role) VALUES ($(pg_placeholders(9)))",
+               Any[id, email, name, ph.hash_hex, ph.salt_hex, ph.iterations, _dt_str(created), 1, assigned])
+    User(; id = id, email = email, name = name, active = true, created = created, role = assigned)
 end
 
 function authenticate(store::RemoteUserStore, email::AbstractString, password::AbstractString)
-    rows = store.exec("SELECT id, email, name, password_hash, salt, iterations, created, active FROM users WHERE email = \$1 LIMIT 1",
+    rows = store.exec("SELECT id, email, name, password_hash, salt, iterations, created, active, role FROM users WHERE email = \$1 LIMIT 1",
                       Any[email])
     # S3: constant-work dummy verify for absent/inactive email → no timing oracle.
     (isempty(rows) || !(_get(rows[1], "active") in (1, true))) && (_dummy_verify(password); return nothing)
@@ -156,7 +165,7 @@ function authenticate(store::RemoteUserStore, email::AbstractString, password::A
 end
 
 function get_user(store::RemoteUserStore, id::AbstractString)
-    rows = store.exec("SELECT id, email, name, created, active FROM users WHERE id = \$1 LIMIT 1", Any[id])
+    rows = store.exec("SELECT id, email, name, created, active, role FROM users WHERE id = \$1 LIMIT 1", Any[id])
     isempty(rows) && return nothing
     remote_row_to_user(rows[1])
 end
@@ -172,7 +181,7 @@ function bump_token_version!(store::RemoteUserStore, id::AbstractString)::Int
 end
 
 list_users(store::RemoteUserStore)::Vector{User} =
-    [remote_row_to_user(d) for d in store.exec("SELECT id, email, name, created, active FROM users ORDER BY name", Any[])]
+    [remote_row_to_user(d) for d in store.exec("SELECT id, email, name, created, active, role FROM users ORDER BY name", Any[])]
 
 function deactivate_user!(store::RemoteUserStore, id::AbstractString)::Bool
     store.exec("UPDATE users SET active = 0, token_version = token_version + 1 WHERE id = \$1", Any[id]); true

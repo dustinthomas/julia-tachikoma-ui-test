@@ -98,6 +98,12 @@ end
 function _open_card_edit!(m::AppModel; create::Bool = false, due_prefill = nothing)
     iss = create ? nothing : selected_issue(m)
     (!create && iss === nothing) && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    if create
+        can!(m, :create_issue) || return m
+    else
+        can!(m, :edit_issue; resource = iss) || return m
+    end
     m.card_issue_id = create ? nothing : iss.id
     m.edit_form = _build_edit_form(m, iss)
     due_prefill === nothing || set_date_text!(m.edit_form.due_input, string(due_prefill))
@@ -131,6 +137,8 @@ grid). No-op when `iss === nothing`.
 """
 function _open_edit_issue!(m::AppModel, iss)
     iss === nothing && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :edit_issue; resource = iss) || return m
     m.card_issue_id = iss.id
     m.edit_form = _build_edit_form(m, iss)
     m.modal = :card_edit
@@ -194,6 +202,13 @@ end
 function _save_edit!(m::AppModel)
     f = m.edit_form
     f === nothing && return _close_modal!(m)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    if m.card_issue_id === nothing
+        can!(m, :create_issue) || return m
+    else
+        prev_for_can = Stores.get_issue(m.boardstore, m.card_issue_id)
+        can!(m, :edit_issue; resource = prev_for_can) || return m
+    end
     title = strip(text(f.title_input))
     if isempty(title)
         m.message = "Title is required"; return m
@@ -233,7 +248,7 @@ function _save_edit!(m::AppModel)
         Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
                              kind = :created, detail = "created $(iss.key)")
         assignee_id === nothing || _notify_issue!(m, iss, :assigned, assignee_id, "")
-        m.message = "Created $(iss.key)"
+        _set_message!(m, "Created $(iss.key)")
     else
         prev = Stores.get_issue(m.boardstore, m.card_issue_id)
         Stores.update_issue!(m.boardstore, m.card_issue_id; title = String(title), description = desc,
@@ -248,7 +263,7 @@ function _save_edit!(m::AppModel)
         if assignee_id !== nothing && (prev === nothing || prev.assignee_id != assignee_id)
             _notify_issue!(m, iss, :assigned, assignee_id, "")
         end
-        m.message = "Saved $(iss.key)"
+        _set_message!(m, "Saved $(iss.key)")
     end
     _clamp_selection!(m)
     _close_modal!(m)
@@ -276,7 +291,10 @@ end
 
 # ── Delete / confirm ────────────────────────────────────────────────────────
 function _request_delete_one!(m::AppModel)
+    # Selection first so warn-only does not toast on no-op (PR-H1 review).
     iss = selected_issue(m); iss === nothing && return m
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :delete_issue) || return m
     m.confirm_kind = :delete_one; m.confirm_target = iss.id
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -288,6 +306,8 @@ function _request_bulk_delete!(m::AppModel)
     vis = _visible_ids(m)
     targets = [id for id in collect(m.selected_ids) if id in vis]
     isempty(targets) && (m.message = "No visible selected issues to delete"; return m)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :delete_issue) || return m
     m.confirm_kind = :bulk_delete; m.confirm_target = targets
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -296,19 +316,22 @@ end
 function _confirm_yes!(m::AppModel)
     k = m.confirm_kind
     if k === :delete_one
+        # Re-gate at confirm (mirrors sprint close); keep warn toast on success.
+        can!(m, :delete_issue) || return m
         id = m.confirm_target
         if id !== nothing
             Stores.delete_issue!(m.boardstore, id)
             delete!(m.selected_ids, id)
-            m.message = "Deleted issue"
+            _set_message!(m, "Deleted issue")
         end
     elseif k === :bulk_delete
+        can!(m, :delete_issue) || return m
         n = 0
         for id in m.confirm_target
             Stores.delete_issue!(m.boardstore, id) && (n += 1)   # count only real deletes
         end
         empty!(m.selected_ids)
-        m.message = "Deleted $(n) issues"
+        _set_message!(m, "Deleted $(n) issues")
     elseif k === :close_sprint
         _do_close_sprint!(m, m.confirm_target)
     elseif k === :bad_date  # COV_EXCL_START
@@ -345,12 +368,16 @@ end
 
 # ── New sprint ──────────────────────────────────────────────────────────────
 function _open_new_sprint!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     set_text!(m.sprint_name_input, ""); set_text!(m.sprint_goal_input, "")
     m.modal = :new_sprint
     m.focus = FocusState(Any[m.sprint_name_input, m.sprint_goal_input]; active = true)
     m
 end
 function _submit_new_sprint!(m::AppModel)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :manage_sprint) || return m
     name = strip(text(m.sprint_name_input))
     if isempty(name)
         m.message = "Sprint name required"; return m
@@ -358,7 +385,7 @@ function _submit_new_sprint!(m::AppModel)
     s = Stores.create_sprint!(m.boardstore; name = String(name),
                               goal = String(strip(text(m.sprint_goal_input))),
                               project_id = _scope(m))
-    m.message = "Created sprint $(s.name)"
+    _set_message!(m, "Created sprint $(s.name)")
     _close_modal!(m)
 end
 

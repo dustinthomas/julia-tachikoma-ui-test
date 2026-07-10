@@ -55,8 +55,53 @@ _exec(db, sql, params) = DBInterface.execute(db, sql, params)
 _query(db, sql) = DBInterface.execute(db, sql) |> Tables.columntable
 _query(db, sql, params) = DBInterface.execute(db, sql, params) |> Tables.columntable
 
+# ── Users schema (PR-H1 migrator; separate from board schema_migrations) ──
+const USER_SCHEMA_TARGET = 1
+
+function _user_schema_version(db::SQLite.DB)::Int
+    tables = _query(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='user_schema_migrations'")
+    isempty(tables.name) && return 0
+    r = _query(db, "SELECT COALESCE(MAX(version), 0) AS v FROM user_schema_migrations")
+    Int(r.v[1])
+end
+
+function _record_user_migration!(db::SQLite.DB, version::Int)
+    _exec(db, "INSERT INTO user_schema_migrations (version, applied_at) VALUES (?, ?)",
+          [version, _dt_str(Dates.now(UTC))])
+end
+
+"""
+    migrate_user_schema!(db) -> Int
+
+Users.db migrator. v1 adds `role` (default supervisor) for pre-H1 DBs and
+records `user_schema_migrations`. Fresh DBs already CREATE with role; ALTER is
+skipped when the column is present. No promote-oldest admin heuristic.
+"""
+function migrate_user_schema!(db::SQLite.DB)::Int
+    v = _user_schema_version(db)
+    if v < 1
+        SQLite.transaction(db) do
+            # Existing pre-H1 DBs: users table exists without role.
+            # Fresh DBs already have role from CREATE above; ALTER only when missing.
+            cols = _query(db, "PRAGMA table_info(users)")
+            has_role = any(c -> String(c) == "role", cols.name)
+            if !has_role
+                _exec(db, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'supervisor'")
+            end
+            # Brand-new DB (CREATE had role, migrations empty) still records v1.
+            _record_user_migration!(db, 1)
+        end
+        v = 1
+    end
+    v < USER_SCHEMA_TARGET &&
+        error("user schema migration incomplete: version $v < $USER_SCHEMA_TARGET")
+    v
+end
+
 # ── Schema ────────────────────────────────────────────────────────────────
 function init_user_schema!(db::SQLite.DB)
+    # Fresh DBs born current (include role). CREATE IF NOT EXISTS never upgrades
+    # pre-H1 files — migrate_user_schema! ALTERs those.
     _exec(db, """
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
@@ -67,9 +112,17 @@ function init_user_schema!(db::SQLite.DB)
             iterations INTEGER NOT NULL,
             created TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
-            token_version INTEGER NOT NULL DEFAULT 0
+            token_version INTEGER NOT NULL DEFAULT 0,
+            role TEXT NOT NULL DEFAULT 'supervisor'
         )
     """)
+    _exec(db, """
+        CREATE TABLE IF NOT EXISTS user_schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    migrate_user_schema!(db)
 end
 
 # Base board tables (pre-multi-project). Migrations v1–v5 add projects,
@@ -315,24 +368,38 @@ function migrate_board_schema!(db::SQLite.DB)::Int
 end
 
 # ═══════════════════════════ USER STORE ═══════════════════════════════════
+"""
+    create_user!(store; email, name, password, role=nothing) -> User
+
+When `role` is omitted: first user on an empty store becomes `"admin"`, later
+self-service creates get `"supervisor"` (Q5 open create; no promote-oldest).
+Explicit `role=` is for tests / future admin UI (must be valid_role).
+"""
 function create_user!(store::SQLiteUserStore; email::AbstractString, name::AbstractString,
-                      password::AbstractString)::User
+                      password::AbstractString,
+                      role::Union{AbstractString,Nothing} = nothing)::User
     valid_email(email) || throw(ArgumentError("invalid email: $email"))
     existing = _query(store.db, "SELECT id FROM users WHERE email = ? LIMIT 1", [email])
     isempty(existing.id) || throw(ArgumentError("email already registered: $email"))
+    assigned = if role === nothing
+        isempty(list_users(store)) ? "admin" : "supervisor"
+    else
+        valid_role(role) || throw(ArgumentError("invalid role: $role"))
+        String(role)
+    end
     id = new_id()
     created = Dates.now(UTC)
     ph = hash_password(password)
     _exec(store.db, """
-        INSERT INTO users (id, email, name, password_hash, salt, iterations, created, active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    """, [id, email, name, ph.hash_hex, ph.salt_hex, ph.iterations, _dt_str(created)])
-    User(; id = id, email = email, name = name, active = true, created = created)
+        INSERT INTO users (id, email, name, password_hash, salt, iterations, created, active, role)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+    """, [id, email, name, ph.hash_hex, ph.salt_hex, ph.iterations, _dt_str(created), assigned])
+    User(; id = id, email = email, name = name, active = true, created = created, role = assigned)
 end
 
 function authenticate(store::SQLiteUserStore, email::AbstractString, password::AbstractString)
     r = _query(store.db, """
-        SELECT id, email, name, password_hash, salt, iterations, created, active
+        SELECT id, email, name, password_hash, salt, iterations, created, active, role
         FROM users WHERE email = ? LIMIT 1
     """, [email])
     # S3: constant-work dummy verify so absent/inactive email costs the same as
@@ -341,14 +408,15 @@ function authenticate(store::SQLiteUserStore, email::AbstractString, password::A
     ph = PasswordHash(String(r.password_hash[1]), String(r.salt[1]), Int(r.iterations[1]))
     verify_password(password, ph) || return nothing
     User(; id = String(r.id[1]), email = String(r.email[1]), name = String(r.name[1]),
-         active = true, created = parse_dt(r.created[1]))
+         active = true, created = parse_dt(r.created[1]), role = _normalize_role(r.role[1]))
 end
 
 function get_user(store::SQLiteUserStore, id::AbstractString)
-    r = _query(store.db, "SELECT id, email, name, created, active FROM users WHERE id = ? LIMIT 1", [id])
+    r = _query(store.db, "SELECT id, email, name, created, active, role FROM users WHERE id = ? LIMIT 1", [id])
     isempty(r.id) && return nothing
     User(; id = String(r.id[1]), email = String(r.email[1]), name = String(r.name[1]),
-         active = r.active[1] == 1, created = parse_dt(r.created[1]))
+         active = r.active[1] == 1, created = parse_dt(r.created[1]),
+         role = _normalize_role(r.role[1]))
 end
 
 function get_token_version(store::SQLiteUserStore, id::AbstractString)::Int
@@ -362,9 +430,10 @@ function bump_token_version!(store::SQLiteUserStore, id::AbstractString)::Int
 end
 
 function list_users(store::SQLiteUserStore)::Vector{User}
-    r = _query(store.db, "SELECT id, email, name, created, active FROM users ORDER BY name")
+    r = _query(store.db, "SELECT id, email, name, created, active, role FROM users ORDER BY name")
     [User(; id = String(r.id[i]), email = String(r.email[i]), name = String(r.name[i]),
-          active = r.active[i] == 1, created = parse_dt(r.created[i])) for i in eachindex(r.id)]
+          active = r.active[i] == 1, created = parse_dt(r.created[i]),
+          role = _normalize_role(r.role[i])) for i in eachindex(r.id)]
 end
 
 function deactivate_user!(store::SQLiteUserStore, id::AbstractString)::Bool

@@ -56,6 +56,9 @@ include("test_focus.jl")
 include("test_app_shell.jl")
 include("features/phase2_shell.jl")
 
+# PR-H1 — roles schema, can!/can matrix, lazy idle logout.
+include("features/roles_idle.jl")
+
 # Phase 3 — Jira board: swimlane grid, rich cards, ops, filters, backlog, sprints.
 include("test_widgets.jl")
 include("test_board_view.jl")

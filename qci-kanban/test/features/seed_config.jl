@@ -53,6 +53,9 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         cfg_ex = SeedCfg.load_config(example; env = Dict{String,String}())
         @test cfg_ex.seed_demo === false
         @test cfg_ex.seed_ops_labels === true
+        @test cfg_ex.idle_logout_seconds == 900
+        @test cfg_ex.enforce_roles === false
+        @test cfg_ex.token_ttl_seconds == 28800
     end
 
     @testset "Given seed_demo=false When AppModel builds Then board has zero issues" begin
