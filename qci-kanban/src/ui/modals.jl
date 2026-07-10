@@ -248,7 +248,7 @@ function _save_edit!(m::AppModel)
         Stores.log_activity!(m.boardstore; issue_id = iss.id, actor_id = _actor_id(m),
                              kind = :created, detail = "created $(iss.key)")
         assignee_id === nothing || _notify_issue!(m, iss, :assigned, assignee_id, "")
-        m.message = "Created $(iss.key)"
+        _set_message!(m, "Created $(iss.key)")
     else
         prev = Stores.get_issue(m.boardstore, m.card_issue_id)
         Stores.update_issue!(m.boardstore, m.card_issue_id; title = String(title), description = desc,
@@ -263,7 +263,7 @@ function _save_edit!(m::AppModel)
         if assignee_id !== nothing && (prev === nothing || prev.assignee_id != assignee_id)
             _notify_issue!(m, iss, :assigned, assignee_id, "")
         end
-        m.message = "Saved $(iss.key)"
+        _set_message!(m, "Saved $(iss.key)")
     end
     _clamp_selection!(m)
     _close_modal!(m)
@@ -291,22 +291,23 @@ end
 
 # ── Delete / confirm ────────────────────────────────────────────────────────
 function _request_delete_one!(m::AppModel)
+    # Selection first so warn-only does not toast on no-op (PR-H1 review).
+    iss = selected_issue(m); iss === nothing && return m
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :delete_issue) || return m
-    iss = selected_issue(m); iss === nothing && return m
     m.confirm_kind = :delete_one; m.confirm_target = iss.id
     m.modal = :confirm; m.focus = FocusState()
     m
 end
 function _request_bulk_delete!(m::AppModel)
-    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
-    can!(m, :delete_issue) || return m
     isempty(m.selected_ids) && return m
     # Only currently-visible selected issues are deletable (finding C7): a card
     # hidden by a filter must never be destroyed from a stale selection.
     vis = _visible_ids(m)
     targets = [id for id in collect(m.selected_ids) if id in vis]
     isempty(targets) && (m.message = "No visible selected issues to delete"; return m)
+    # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
+    can!(m, :delete_issue) || return m
     m.confirm_kind = :bulk_delete; m.confirm_target = targets
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -315,19 +316,22 @@ end
 function _confirm_yes!(m::AppModel)
     k = m.confirm_kind
     if k === :delete_one
+        # Re-gate at confirm (mirrors sprint close); keep warn toast on success.
+        can!(m, :delete_issue) || return m
         id = m.confirm_target
         if id !== nothing
             Stores.delete_issue!(m.boardstore, id)
             delete!(m.selected_ids, id)
-            m.message = "Deleted issue"
+            _set_message!(m, "Deleted issue")
         end
     elseif k === :bulk_delete
+        can!(m, :delete_issue) || return m
         n = 0
         for id in m.confirm_target
             Stores.delete_issue!(m.boardstore, id) && (n += 1)   # count only real deletes
         end
         empty!(m.selected_ids)
-        m.message = "Deleted $(n) issues"
+        _set_message!(m, "Deleted $(n) issues")
     elseif k === :close_sprint
         _do_close_sprint!(m, m.confirm_target)
     elseif k === :bad_date  # COV_EXCL_START
@@ -381,7 +385,7 @@ function _submit_new_sprint!(m::AppModel)
     s = Stores.create_sprint!(m.boardstore; name = String(name),
                               goal = String(strip(text(m.sprint_goal_input))),
                               project_id = _scope(m))
-    m.message = "Created sprint $(s.name)"
+    _set_message!(m, "Created sprint $(s.name)")
     _close_modal!(m)
 end
 

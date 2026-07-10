@@ -408,14 +408,15 @@ function authenticate(store::SQLiteUserStore, email::AbstractString, password::A
     ph = PasswordHash(String(r.password_hash[1]), String(r.salt[1]), Int(r.iterations[1]))
     verify_password(password, ph) || return nothing
     User(; id = String(r.id[1]), email = String(r.email[1]), name = String(r.name[1]),
-         active = true, created = parse_dt(r.created[1]), role = String(r.role[1]))
+         active = true, created = parse_dt(r.created[1]), role = _normalize_role(r.role[1]))
 end
 
 function get_user(store::SQLiteUserStore, id::AbstractString)
     r = _query(store.db, "SELECT id, email, name, created, active, role FROM users WHERE id = ? LIMIT 1", [id])
     isempty(r.id) && return nothing
     User(; id = String(r.id[1]), email = String(r.email[1]), name = String(r.name[1]),
-         active = r.active[1] == 1, created = parse_dt(r.created[1]), role = String(r.role[1]))
+         active = r.active[1] == 1, created = parse_dt(r.created[1]),
+         role = _normalize_role(r.role[1]))
 end
 
 function get_token_version(store::SQLiteUserStore, id::AbstractString)::Int
@@ -432,7 +433,7 @@ function list_users(store::SQLiteUserStore)::Vector{User}
     r = _query(store.db, "SELECT id, email, name, created, active, role FROM users ORDER BY name")
     [User(; id = String(r.id[i]), email = String(r.email[i]), name = String(r.name[i]),
           active = r.active[i] == 1, created = parse_dt(r.created[i]),
-          role = String(r.role[i])) for i in eachindex(r.id)]
+          role = _normalize_role(r.role[i])) for i in eachindex(r.id)]
 end
 
 function deactivate_user!(store::SQLiteUserStore, id::AbstractString)::Bool

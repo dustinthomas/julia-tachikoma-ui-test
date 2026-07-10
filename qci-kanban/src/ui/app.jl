@@ -338,7 +338,7 @@ function _submit_project_create!(m::AppModel)
     end
     _load_projects!(m)
     _set_active_project!(m, p.id)
-    m.message = "Created project $(p.name) ($(p.key))"
+    _set_message!(m, "Created project $(p.name) ($(p.key))")
     m
 end
 
@@ -368,7 +368,7 @@ function _export_csv!(m::AppModel)
     path = joinpath(dirname(m.session.token_path), "export-$(key)-$(stamp).csv")
     try
         Config._atomic_write_0600(path, csv)
-        m.message = "Exported $(length(issues)) issues → $(path)"
+        _set_message!(m, "Exported $(length(issues)) issues → $(path)")
     catch err
         m.message = "Export failed: $(sprint(showerror, err))"  # COV_EXCL_LINE
     end
@@ -442,6 +442,19 @@ function can!(m::AppModel, action::Symbol; resource=nothing)::Bool
         m.message = "Role warning: $(u.role) lacks $action (enforcement off)"
         return true
     end
+end
+
+"""
+Preserve a warn-only role toast when setting a success/status message so pilots
+still see the matrix deny after a gated mutate completes (PR-H1 review).
+"""
+function _set_message!(m::AppModel, text::AbstractString)
+    if startswith(m.message, "Role warning:")
+        m.message = "$(m.message) · $(text)"
+    else
+        m.message = String(text)
+    end
+    m
 end
 
 # ── Lazy idle logout (PR-H1) ────────────────────────────────────────────────
@@ -782,6 +795,14 @@ function _logout!(m::AppModel)
     m.auth_stage = :signin
     m.login_error = ""
     m.message = ""
+    # Hygiene: drop modal/confirm/edit so post-idle (and normal logout) model
+    # state is clean until next login (render already short-circuits unauth).
+    m.modal = :none
+    m.confirm_kind = :none
+    m.confirm_target = nothing
+    m.card_issue_id = nothing
+    m.edit_form = nothing
+    m.focus = FocusState()
     m.active_project_id = nothing
     empty!(m.projects_cache)
     m.project_sel = 1

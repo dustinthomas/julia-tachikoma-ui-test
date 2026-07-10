@@ -7,6 +7,7 @@ using Dates
 
 const Qri = QciKanban
 const Dri = QciKanban.Domain
+const Sri = QciKanban.Stores
 
 @testset "FEATURE: roles + lazy idle logout (PR-H1 BDD)" begin
 
@@ -35,27 +36,36 @@ const Dri = QciKanban.Domain
         @test Qri.can!(m, :delete_issue) === true
         @test occursin("Role warning", m.message)
         @test occursin("viewer", m.message)
+        # warn toast preserved across success message helper
+        Qri._set_message!(m, "Deleted issue")
+        @test occursin("Role warning", m.message)
+        @test occursin("Deleted issue", m.message)
     end
 
     @testset "Given viewer with enforce_roles=true When delete Then hard deny" begin
-        m = Qri.AppModel(; token_path = tempname(), secret = "s")
+        m = Qri.AppModel(; token_path = tempname(), secret = "s", seed = true)
         app_login_new(m; name = "View Hard")
+        iss = Qri.selected_issue(m)
+        @test iss !== nothing  # seeded board has a selection
+        n_before = length(Sri.list_issues(m.boardstore; project_id = Qri._scope(m)))
         m.current_user = Dri.User(; id = m.current_user.id, email = m.current_user.email,
                                   name = m.current_user.name, role = "viewer")
         m.config.enforce_roles = true
-        prev_modal = m.modal
-        @test Qri.can!(m, :delete_issue) === false
-        @test occursin("Permission denied", m.message)
-        # board delete path does not open confirm
+        m.message = ""
         T.update!(m, T.KeyEvent('d'))
-        @test m.modal == prev_modal || m.modal == :none
-        @test m.confirm_kind !== :delete_one || m.modal !== :confirm
-        # stronger: request path blocked
-        @test m.modal !== :confirm || m.confirm_kind === :none
+        @test m.modal !== :confirm
+        @test m.confirm_kind === :none
+        @test occursin("Permission denied", m.message)
+        @test length(Sri.list_issues(m.boardstore; project_id = Qri._scope(m))) == n_before
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), T.GraphicsRegion[], T.PixelSnapshot[]))
+        @test T.find_text(tb, "Permission denied") !== nothing || occursin("Permission denied", m.message)
+        @test T.find_text(tb, "CONFIRM") === nothing && T.find_text(tb, "Delete") === nothing ||
+              m.modal !== :confirm
     end
 
-    @testset "Given technician When edit unassigned Then matrix denies; warn-only allows" begin
-        m = Qri.AppModel(; token_path = tempname(), secret = "s")
+    @testset "Given technician When edit unassigned Then matrix denies; KeyEvent hard deny" begin
+        m = Qri.AppModel(; token_path = tempname(), secret = "s", seed = true)
         app_login_new(m; name = "Tech User")
         tech = Dri.User(; id = m.current_user.id, email = m.current_user.email,
                         name = m.current_user.name, role = "technician")
@@ -72,6 +82,20 @@ const Dri = QciKanban.Domain
         m.message = ""
         @test Qri.can!(m, :edit_issue; resource = other) === false
         @test occursin("Permission denied", m.message)
+        # End-to-end: unassigned selected card + 'e' stays closed under hard enforce
+        iss = Qri.selected_issue(m)
+        @test iss !== nothing
+        Sri.update_issue!(m.boardstore, iss.id; assignee_id = "not-the-tech")
+        m.message = ""
+        m.modal = :none
+        T.update!(m, T.KeyEvent('e'))
+        @test m.modal !== :card_edit
+        @test m.edit_form === nothing
+        @test occursin("Permission denied", m.message)
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), T.GraphicsRegion[], T.PixelSnapshot[]))
+        @test T.find_text(tb, "EDIT CARD") === nothing
+        @test T.find_text(tb, "NEW CARD") === nothing
     end
 
     @testset "Given unauthenticated When can! Then false without crash" begin
@@ -89,7 +113,13 @@ const Dri = QciKanban.Domain
         m = Qri.AppModel(; token_path = tok, secret = "s")
         app_login_new(m; name = "Idle User")
         @test m.current_user !== nothing
+        uid = m.current_user.id
+        tv_before = Sri.get_token_version(m.userstore, uid)
         @test isfile(tok)
+        # leave dirty modal state to prove logout hygiene
+        m.modal = :confirm
+        m.confirm_kind = :delete_one
+        m.confirm_target = "x"
         # snapshot board selection so we can assert no nav side effect
         sel_before = (m.sel_col, m.sel_idx, m.sel_lane)
         m.config.idle_logout_seconds = 60
@@ -99,13 +129,17 @@ const Dri = QciKanban.Domain
         @test m.login_error == "Session expired (idle)"
         @test (m.sel_col, m.sel_idx, m.sel_lane) == sel_before
         @test !isfile(tok)
+        @test Sri.get_token_version(m.userstore, uid) == tv_before + 1
+        @test m.modal === :none
+        @test m.confirm_kind === :none
+        @test m.confirm_target === nothing
+        @test m.edit_form === nothing
         tb = T.TestBackend(80, 20); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), T.GraphicsRegion[], T.PixelSnapshot[]))
         @test T.find_text(tb, "Session expired (idle)") !== nothing
         @test T.find_text(tb, "SIGN IN") !== nothing || T.find_text(tb, "Email") !== nothing ||
               T.find_text(tb, "email") !== nothing || T.find_text(tb, "PASSWORD") !== nothing ||
               T.find_text(tb, "Password") !== nothing
-        # no board column bleed as primary content under login
         rows = join(app_rows(m), "\n")
         @test occursin("Session expired", rows) || m.login_error == "Session expired (idle)"
     end

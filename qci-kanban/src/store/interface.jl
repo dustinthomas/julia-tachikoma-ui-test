@@ -99,6 +99,23 @@ _dt_str(dt::DateTime) = string(dt)
 _date_str(::Nothing) = nothing
 _date_str(d::Date) = string(d)
 
+"""
+    _normalize_role(x) -> String
+
+Map missing/blank/invalid stored roles to `\"supervisor\"` so a corrupted
+users.role never throws from `User` construction on auth/restore/list.
+Valid roles pass through. No promote-to-admin heuristic.
+"""
+function _normalize_role(x)::String
+    s = if x === nothing || x === missing
+        ""
+    else
+        strip(String(x))
+    end
+    isempty(s) && return "supervisor"
+    valid_role(s) ? s : "supervisor"
+end
+
 parse_date(::Nothing) = nothing
 parse_date(::Missing) = nothing
 parse_date(d::Date) = d

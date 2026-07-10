@@ -138,6 +138,15 @@ end
     @test S.deactivate_user!(us, u.id)
     @test S.authenticate(us, "alex@qci.co", "hunter2pw") === nothing  # inactive can't auth
     @test S.get_user(us, u.id).active == false
+    # invalid stored role coerces to supervisor (no User ctor throw on get/auth)
+    us_bad = S.SQLiteUserStore(":memory:")
+    ub = S.create_user!(us_bad; email = "z@qci.co", name = "Z", password = "pw123456",
+                        role = "viewer")
+    S._exec(us_bad.db, "UPDATE users SET role = ? WHERE id = ?", ["corrupted", ub.id])
+    got = S.get_user(us_bad, ub.id)
+    @test got !== nothing && got.role == "supervisor"
+    authz = S.authenticate(us_bad, "z@qci.co", "pw123456")
+    @test authz !== nothing && authz.role == "supervisor"
 end
 
 @testset "Stores: users.db pre-H1 role migration fixture" begin
@@ -790,6 +799,8 @@ end
         @test u2.active
         u3 = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A", "role" => "admin"))
         @test u3.role == "admin"
+        u_bad = S.remote_row_to_user(Dict("id" => "u", "email" => "a@b.co", "name" => "A", "role" => "nope"))
+        @test u_bad.role == "supervisor"  # invalid stored role coerced
         iss = S.remote_row_to_issue(Dict("id" => "i", "key" => "QCI-1", "title" => "T", "status" => "Backlog",
             "priority" => "Medium", "story_points" => 3, "epic_id" => "e", "sprint_id" => "s",
             "assignee_id" => "a", "reporter_id" => "r", "start_date" => "2026-01-01",

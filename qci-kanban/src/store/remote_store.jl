@@ -68,14 +68,11 @@ _get(d, k) = _val(get(d, k, nothing))
 
 # ── Pure row mappers ─────────────────────────────────────────────────────
 function remote_row_to_user(d::AbstractDict)::User
-    role = let x = _get(d, "role")
-        x === nothing || isempty(String(x)) ? "supervisor" : String(x)
-    end
     User(; id = String(_get(d, "id")), email = String(_get(d, "email")),
          name = String(_get(d, "name")),
          active = let a = _get(d, "active"); a === nothing ? true : (a == 1 || a === true) end,
          created = parse_dt(something(_get(d, "created"), Dates.now(UTC))),
-         role = role)
+         role = _normalize_role(_get(d, "role")))
 end
 
 function remote_row_to_project(d::AbstractDict)::Project

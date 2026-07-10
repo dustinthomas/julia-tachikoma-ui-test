@@ -79,7 +79,7 @@ function _start_sprint!(m::AppModel)
         m.message = "No future sprint to start"; return m
     end
     s = Stores.start_sprint!(m.boardstore, first(fut).id)
-    m.message = "Started $(s.name)"
+    _set_message!(m, "Started $(s.name)")
     m
 end
 
@@ -127,7 +127,7 @@ function _do_close_sprint!(m::AppModel, sprint_id)
                              kind = :sprint_changed, detail = "rolled back to backlog")
     end
     s = Stores.close_sprint!(m.boardstore, sprint_id)
-    m.message = "Closed $(s.name)"
+    _set_message!(m, "Closed $(s.name)")
     m
 end
 
