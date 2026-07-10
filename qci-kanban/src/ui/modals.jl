@@ -25,8 +25,8 @@ mutable struct EditForm
     sprint_sel::Selector
     labels_ms::MultiSelect
     assignee_sel::Selector
-    start_input::TextInput
-    due_input::TextInput
+    start_input::DateField
+    due_input::DateField
 end
 
 edit_editors(f::EditForm) = Any[f.title_input, f.desc_area, f.priority_sel, f.points_input,
@@ -80,8 +80,8 @@ function _build_edit_form(m::AppModel, iss::Union{Domain.Issue,Nothing})
         Selector("Sprint:", sprint_opts, sprint_vals; selected = sprint_sel),
         MultiSelect("Labels:", label_opts, label_vals; checked = label_checked),
         Selector("Assignee:", user_opts, user_vals; selected = asg_sel),
-        _make_input(; text = iss === nothing || iss.start_date === nothing ? "" : string(iss.start_date)),
-        _make_input(; text = iss === nothing || iss.due_date === nothing ? "" : string(iss.due_date)),
+        DateField(; text = iss === nothing || iss.start_date === nothing ? "" : string(iss.start_date)),
+        DateField(; text = iss === nothing || iss.due_date === nothing ? "" : string(iss.due_date)),
     )
 end
 
@@ -100,7 +100,7 @@ function _open_card_edit!(m::AppModel; create::Bool = false, due_prefill = nothi
     (!create && iss === nothing) && return m
     m.card_issue_id = create ? nothing : iss.id
     m.edit_form = _build_edit_form(m, iss)
-    due_prefill === nothing || set_text!(m.edit_form.due_input, string(due_prefill))
+    due_prefill === nothing || set_date_text!(m.edit_form.due_input, string(due_prefill))
     m.modal = :card_edit
     m.focus = FocusState(edit_editors(m.edit_form); active = true)
     m
@@ -165,6 +165,12 @@ function _edit_enter!(m::AppModel)
     if f !== nothing && focused_editor(m.focus) === f.desc_area
         handle_key!(f.desc_area, KeyEvent(:enter))  # COV_EXCL_LINE
         return m  # COV_EXCL_LINE — desc-area newline in edit modal; path exercised by card-edit tests (currently limited by unrelated fixwave C6 failures)
+    end
+    # Enter on an open date menu commits the day (does not save the whole form).
+    ed = focused_editor(m.focus)
+    if ed isa DateField && ed.menu_open
+        handle_key!(ed, KeyEvent(:enter))
+        return m
     end
     _save_edit!(m)
 end
@@ -293,9 +299,9 @@ function _confirm_yes!(m::AppModel)
         bad = m.confirm_target
         f = m.edit_form
         if bad == "start"
-            set_text!(f.start_input, "")
+            set_date_text!(f.start_input, "")
         else
-            set_text!(f.due_input, "")
+            set_date_text!(f.due_input, "")
         end
         m.confirm_kind = :none
         _save_edit!(m)  # now validates clean and performs the save/close
@@ -441,10 +447,13 @@ end
 function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     f = m.edit_form; f === nothing && return
     creating = m.card_issue_id === nothing
-    # Taller form to fit work-order fields (design §4.4); still compact when possible.
+    # Taller form to fit work-order fields (design §4.4); expand further when a
+    # date calendar menu is open so the month grid fits under Start/Due.
     w = clamp(min(68, content_area.width - 10), 40, content_area.width)
-    h = clamp(min(20, content_area.height - 4), 16, content_area.height)
-    title = creating ? "NEW CARD — Tab fields, ^S/Enter save, Esc cancel" : "EDIT CARD — Tab fields, ^S/Enter save"
+    date_menu = (f.start_input.menu_open || f.due_input.menu_open)
+    title = creating ? "NEW CARD — Tab/↑↓ fields, Spc date, ^S/Enter save, Esc cancel" :
+                      "EDIT CARD — Tab/↑↓ fields, Spc date, ^S/Enter save"
+    h = clamp(min(date_menu ? 28 : 20, content_area.height - 2), 16, content_area.height)
     inner = _modal_box(content_area, w, h, title, buf)
     x = inner.x + 1; y = inner.y + 1; iw = inner.width - 2
     maxy = inner.y + inner.height - 1
@@ -470,9 +479,21 @@ function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
     y <= maxy && (render(f.assignee_sel, Rect(x, y, iw, 1), buf); y += 1)
     if y <= maxy
         set_string!(buf, x, y, "Start:", f.start_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
-        render(f.start_input, Rect(x + 7, y, 12, 1), buf)
-        set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
-        render(f.due_input, Rect(x + 27, y, 12, 1), buf)
+        # Date fields: value on one row; calendar uses remaining height when open.
+        start_h = f.start_input.menu_open ? max(1, maxy - y + 1) : 1
+        due_h = f.due_input.menu_open ? max(1, maxy - y + 1) : 1
+        if f.start_input.menu_open
+            render(f.start_input, Rect(x + 7, y, max(22, iw - 7), start_h), buf)
+        elseif f.due_input.menu_open
+            set_string!(buf, x + 7, y, fit_width(isempty(text(f.start_input)) ? "(none)" : text(f.start_input), 12),
+                        Style(; fg = col_text()))
+            set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+            render(f.due_input, Rect(x + 27, y, max(22, iw - 27), due_h), buf)
+        else
+            render(f.start_input, Rect(x + 7, y, 14, 1), buf)
+            set_string!(buf, x + 22, y, "Due:", f.due_input.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim()))
+            render(f.due_input, Rect(x + 27, y, 14, 1), buf)
+        end
     end
 end
 

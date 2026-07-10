@@ -47,6 +47,11 @@ function _sync_focus_flags!(fs::FocusState)
         if hasproperty(ed, :focused)
             ed.focused = fs.active && (ed === cur)
         end
+        # Close in-widget overlays (e.g. DateField calendar) when the field
+        # loses focus so a sticky menu cannot block another field's UI.
+        if ed !== cur && hasproperty(ed, :menu_open) && getproperty(ed, :menu_open) === true
+            ed.menu_open = false
+        end
     end
     fs
 end
@@ -82,19 +87,29 @@ function blur!(fs::FocusState)
     fs
 end
 
+# True when the focused widget owns ↑/↓ (e.g. open date-picker menu).
+_claims_vertical_arrows(ed)::Bool =
+    hasproperty(ed, :menu_open) && getproperty(ed, :menu_open) === true
+
+# True when Esc should dismiss an in-widget overlay instead of the parent modal.
+_claims_escape(ed)::Bool =
+    hasproperty(ed, :menu_open) && getproperty(ed, :menu_open) === true
+
 """
     route_to_focus!(fs, evt) -> Symbol
 
 Step 1 of the dispatch order. Returns:
 - `:consumed`    — the event was handled by the focused editor (printable char,
-                   backspace, arrows, delete, home/end) or by Tab/Shift-Tab
+                   backspace, arrows, delete, home/end) or by Tab/Shift-Tab/↑/↓
                    focus cycling. Nothing else must run.
 - `:structural`  — a focused editor exists but the key (Enter/Esc/Ctrl-combo)
                    is reserved for the keymap; the caller dispatches it.
 - `:fallthrough` — no editor is focused; the caller runs the keymap normally.
 
 The contract: while an editor is focused, ANY printable char (digits included)
-mutates only that editor's text — never a view/global shortcut.
+mutates only that editor's text — never a view/global shortcut. ↑/↓ move between
+form fields unless the widget claims them (open date menu). Esc on an open
+date menu closes the menu only.
 """
 function route_to_focus!(fs::FocusState, evt::KeyEvent)::Symbol
     ed = focused_editor(fs)
@@ -103,8 +118,22 @@ function route_to_focus!(fs::FocusState, evt::KeyEvent)::Symbol
         focus_next!(fs); return :consumed
     elseif evt.key === :backtab
         focus_prev!(fs); return :consumed
-    elseif evt.key === :enter || evt.key === :escape ||
-           evt.key === :ctrl || evt.key === :ctrl_c
+    elseif evt.key === :down
+        if _claims_vertical_arrows(ed)
+            handle_key!(ed, evt); return :consumed
+        end
+        focus_next!(fs); return :consumed
+    elseif evt.key === :up
+        if _claims_vertical_arrows(ed)
+            handle_key!(ed, evt); return :consumed
+        end
+        focus_prev!(fs); return :consumed
+    elseif evt.key === :escape
+        if _claims_escape(ed)
+            handle_key!(ed, evt); return :consumed
+        end
+        return :structural
+    elseif evt.key === :enter || evt.key === :ctrl || evt.key === :ctrl_c
         return :structural
     else
         handle_key!(ed, evt)

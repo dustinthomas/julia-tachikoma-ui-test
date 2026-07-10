@@ -358,3 +358,108 @@ end
     @test made.start_date === nothing  # bad date not persisted
     @test occursin("BadFormatDate", m.message) || m.message == "" || occursin("Created", m.message)  # saved
 end
+
+@testset "Phase 3 — card edit: Up/Down field nav + labels bubbles + date picker" begin
+    @testset "Up/Down move between form fields (like Tab / Shift-Tab)" begin
+        m = lbm(); k!(m, 'n')
+        @test m.modal == :card_edit
+        @test Qm.focused_editor(m.focus) === m.edit_form.title_input
+        k!(m, :down)
+        @test Qm.focused_editor(m.focus) === m.edit_form.desc_area
+        k!(m, :down)
+        @test Qm.focused_editor(m.focus) === m.edit_form.priority_sel
+        k!(m, :up)
+        @test Qm.focused_editor(m.focus) === m.edit_form.desc_area
+        k!(m, :tab)
+        @test Qm.focused_editor(m.focus) === m.edit_form.priority_sel
+    end
+
+    @testset "labels render green bubbles (not checkmarks) without overlapping names" begin
+        m = lbm(); k!(m, 'n'); typ!(m, "Bubble labels")
+        Qm.focus_index!(m.focus, 10)
+        ms = m.edit_form.labels_ms
+        isempty(ms.options) && return
+        k!(m, ' ')   # check first label
+        tb = app_tb(m; w = 100, h = 32)
+        rows = join(app_rows(m; w = 100, h = 32), "\n")
+        @test occursin("●", rows) || occursin("•", rows)
+        @test !occursin("☑", rows) && !occursin("☐", rows)
+        # name not glued to bubble
+        nm = ms.options[ms.cursor]
+        @test occursin("● " * nm, rows) || occursin("• " * nm, rows)
+        lab = T.find_text(tb, "Labels")
+        name_loc = T.find_text(tb, nm)
+        @test lab !== nothing && name_loc !== nothing
+        @test name_loc.x > lab.x + length("Labels:")
+    end
+
+    @testset "Start date: Space opens calendar; Enter commits; typing is manual" begin
+        using Dates
+        m = lbm(); k!(m, 'n'); typ!(m, "Dated card")
+        Qm.focus_index!(m.focus, 12)   # start DateField
+        start = m.edit_form.start_input
+        @test start isa Qm.DateField
+        k!(m, ' ')
+        @test start.menu_open
+        tb = app_tb(m; w = 100, h = 32)
+        # calendar chrome visible
+        blob = join(app_rows(m; w = 100, h = 32), "\n")
+        @test occursin("Su", blob) || occursin("Mo", blob) || occursin("2026", blob) ||
+              occursin("Jul", blob) || occursin("July", blob) || occursin("Mar", blob)
+        # pick a day via arrows + Enter (commits, does not save the whole form)
+        k!(m, :right)
+        k!(m, :enter)
+        @test !start.menu_open
+        @test m.modal == :card_edit
+        @test !isempty(Qm.text(start))
+        # manual entry path
+        Qm.focus_index!(m.focus, 13)   # due
+        due = m.edit_form.due_input
+        typ!(m, "2026-09-15")
+        @test Qm.text(due) == "2026-09-15"
+        T.update!(m, T.KeyEvent(:ctrl, 's'))
+        @test m.modal == :none
+        made = first(filter(i -> i.title == "Dated card", Qm.Stores.list_issues(m.boardstore)))
+        @test made.due_date == Date(2026, 9, 15)
+        @test made.start_date isa Date
+    end
+
+    @testset "Esc closes open date menu without dismissing the edit form" begin
+        m = lbm(); k!(m, 'n'); typ!(m, "Esc menu")
+        Qm.focus_index!(m.focus, 12)
+        k!(m, ' ')
+        @test m.edit_form.start_input.menu_open
+        k!(m, :escape)
+        @test m.modal == :card_edit
+        @test !m.edit_form.start_input.menu_open
+    end
+
+    @testset "Due date calendar menu renders without crash" begin
+        m = lbm(); k!(m, 'n'); typ!(m, "Due menu")
+        Qm.focus_index!(m.focus, 13)   # due DateField
+        k!(m, ' ')
+        @test m.edit_form.due_input.menu_open
+        tb = app_tb(m; w = 100, h = 32)
+        blob = join(app_rows(m; w = 100, h = 32), "\n")
+        @test occursin("Su", blob) || occursin("Mo", blob) || occursin("Due", blob)
+        @test T.find_text(tb, "Due") !== nothing || occursin("Due", blob)
+        k!(m, :escape)
+        @test !m.edit_form.due_input.menu_open
+    end
+
+    @testset "Tab away from open Start calendar closes the menu" begin
+        m = lbm(); k!(m, 'n'); typ!(m, "Sticky menu")
+        Qm.focus_index!(m.focus, 12)
+        k!(m, ' ')
+        @test m.edit_form.start_input.menu_open
+        k!(m, :tab)   # → Due
+        @test Qm.focused_editor(m.focus) === m.edit_form.due_input
+        @test !m.edit_form.start_input.menu_open
+        # Due can open its own menu cleanly
+        k!(m, ' ')
+        @test m.edit_form.due_input.menu_open
+        @test !m.edit_form.start_input.menu_open
+        tb = app_tb(m; w = 100, h = 32)
+        @test T.find_text(tb, "Due") !== nothing || occursin("Due", join(app_rows(m; w = 100, h = 32), "\n"))
+    end
+end

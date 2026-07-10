@@ -59,6 +59,14 @@ function render_board_stats!(m::AppModel, buf::Buffer, area::Rect)
 end
 
 # ── Sprint burndown ──────────────────────────────────────────────────────────
+# Issue created/updated are stored as UTC DateTimes. Day boundaries + today()
+# are local — convert so evening US sessions near UTC midnight burn correctly.
+function _local_date(dt::DateTime)
+    Date(dt + (Dates.now() - Dates.now(UTC)))
+end
+_local_date(d::Date) = d
+_local_date(x) = Date(x)
+
 """
     burndown_series(issues, start_date, end_date; today=today(), unit=:count)
         -> (; days, ideal, remaining, total)
@@ -69,11 +77,11 @@ Pure burndown model over the sprint window.
   `remaining[k]` = issues not yet Done as of `days[k]`.
 - `unit = :points`: story-point / est-hour units — `total = sum_units(issues)`,
   `remaining[k]` = sum of `story_points` (missing → 0) over issues that are
-  **not** (`status == "Done"` AND `Date(updated) ≤ days[k]`).
+  **not** (`status == "Done"` AND local-date(`updated`) ≤ `days[k]`).
 
-An issue burns down on its `updated` date when status is Done. `ideal` is the
-linear line from `total` → 0 across the window. A single-day window is widened
-to two points so the ideal line is well defined.
+An issue burns down on its local `updated` date when status is Done. `ideal` is
+the linear line from `total` → 0 across the window. A single-day window is
+widened to two points so the ideal line is well defined.
 """
 function burndown_series(issues, start_date::Date, end_date::Date;
                          today::Date = Dates.today(), unit::Symbol = :count)
@@ -85,12 +93,12 @@ function burndown_series(issues, start_date::Date, end_date::Date;
     for d in days
         if unit === :points
             rem = sum(issues; init = 0) do i
-                burned = i.status == "Done" && Date(i.updated) <= d
+                burned = i.status == "Done" && _local_date(i.updated) <= d
                 burned ? 0 : something(i.story_points, 0)
             end
             push!(remaining, Float64(rem))
         else
-            done = count(i -> i.status == "Done" && Date(i.updated) <= d, issues)
+            done = count(i -> i.status == "Done" && _local_date(i.updated) <= d, issues)
             push!(remaining, Float64(max(0, total - done)))
         end
     end

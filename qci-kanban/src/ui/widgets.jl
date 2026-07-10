@@ -10,6 +10,7 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 using .Theming
+using Dates
 
 # ── Unicode-safe truncation (shared by every view) ──────────────────────────
 # Slicing a String by a codepoint count used as a byte index (`s[1:n]`) throws
@@ -122,9 +123,10 @@ Tachikoma.text(ms::MultiSelect) = join(String[ms.options[i] for i in eachindex(m
 function Tachikoma.handle_key!(ms::MultiSelect, evt::KeyEvent)::Bool
     n = length(ms.options)
     n == 0 && return false
-    if evt.key === :left || evt.key === :up
+    # left/right only — ↑/↓ are reserved for form field navigation at the router
+    if evt.key === :left
         ms.cursor = mod1(ms.cursor - 1, n); return true
-    elseif evt.key === :right || evt.key === :down
+    elseif evt.key === :right
         ms.cursor = mod1(ms.cursor + 1, n); return true
     elseif evt.key === :char && evt.char == ' '
         ms.checked[ms.cursor] = !ms.checked[ms.cursor]; return true
@@ -136,24 +138,182 @@ function Tachikoma.render(ms::MultiSelect, rect::Rect, buf::Buffer)
     rect.width < 1 && return
     lstyle = ms.focused ? Style(; fg = col_primary(), bold = true) : Style(; fg = col_text_dim())
     set_string!(buf, rect.x, rect.y, ms.label, lstyle)
-    x = rect.x + length(ms.label) + 1
+    # display-width for the field label so chips never draw under it
+    x = rect.x + textwidth(ms.label) + 1
     maxx = rect.x + rect.width
     if isempty(ms.options)
         set_string!(buf, x, rect.y, "(none)", Style(; fg = col_text_muted()))
         return
     end
     for i in eachindex(ms.options)
-        mark = ms.checked[i] ? "☑" : "☐"
-        chip = "$(mark)$(ms.options[i]) "
-        x + length(chip) > maxx && break
+        # Green filled bubble when checked; empty ring when not. Space after bubble
+        # so the glyph never overlaps the label name.
+        bubble = ms.checked[i] ? "●" : "○"
+        chip = bubble * " " * ms.options[i] * " "
+        chip_w = textwidth(chip)
+        x + chip_w - 1 > maxx && break
         st = if ms.focused && i == ms.cursor
+            # keep cursor highlight but preserve green on the bubble glyph
             sel_style()
         elseif ms.checked[i]
-            Style(; fg = col_primary())
+            Style(; fg = col_ok(), bold = true)
         else
             Style(; fg = col_text_dim())
         end
-        set_string!(buf, x, rect.y, chip, st)
-        x += length(chip)
+        # draw bubble in green even when the chip is the focused cursor
+        if ms.checked[i]
+            rest = " " * ms.options[i] * " "
+            if ms.focused && i == ms.cursor
+                set_string!(buf, x, rect.y, bubble,
+                            Style(; fg = col_ok(), bg = col_surface_hi(), bold = true))
+                set_string!(buf, x + textwidth(bubble), rect.y, rest, sel_style())
+            else
+                set_string!(buf, x, rect.y, chip, Style(; fg = col_ok(), bold = true))
+            end
+        else
+            set_string!(buf, x, rect.y, chip, st)
+        end
+        x += chip_w
+    end
+end
+
+# ── DateField: calendar menu + optional manual YYYY-MM-DD entry ─────────────
+
+"""
+    DateField(; text="", focused=false)
+
+Start/Due editor: Space opens a month calendar; ←/→ day, ↑/↓ week; Enter
+commits. Digits/`-`/backspace edit the text manually. Esc closes an open menu
+without discarding the form (handled via `menu_open` + focus router).
+"""
+mutable struct DateField
+    buffer::String
+    focused::Bool
+    menu_open::Bool
+    menu_date::Date
+end
+
+function DateField(; text::AbstractString = "", focused::Bool = false)
+    t = String(text)
+    md = let d = tryparse(Date, t)
+        d === nothing ? Dates.today() : d
+    end
+    DateField(t, focused, false, md)
+end
+
+function Tachikoma.focusable(::DateField)
+    return true
+end
+Tachikoma.text(d::DateField) = d.buffer
+
+function set_date_text!(d::DateField, s::AbstractString)
+    d.buffer = String(s)
+    parsed = tryparse(Date, d.buffer)
+    parsed === nothing || (d.menu_date = parsed)
+    d
+end
+
+# Alias so call sites that use Tachikoma.set_text! (TextInput) keep working.
+function Tachikoma.set_text!(d::DateField, s::AbstractString)
+    set_date_text!(d, s)
+end
+
+function _df_open_menu!(d::DateField)
+    parsed = tryparse(Date, strip(d.buffer))
+    d.menu_date = parsed === nothing ? Dates.today() : parsed
+    d.menu_open = true
+    d
+end
+
+function Tachikoma.handle_key!(d::DateField, evt::KeyEvent)::Bool
+    if d.menu_open
+        if evt.key === :left
+            d.menu_date -= Day(1); return true
+        elseif evt.key === :right
+            d.menu_date += Day(1); return true
+        elseif evt.key === :up
+            d.menu_date -= Day(7); return true
+        elseif evt.key === :down
+            d.menu_date += Day(7); return true
+        elseif evt.key === :enter || (evt.key === :char && evt.char == ' ')
+            d.buffer = string(d.menu_date)
+            d.menu_open = false
+            return true
+        elseif evt.key === :escape
+            d.menu_open = false
+            return true
+        end
+        return false
+    end
+    # menu closed
+    if evt.key === :char && evt.char == ' '
+        _df_open_menu!(d); return true
+    elseif evt.key === :backspace
+        isempty(d.buffer) && return true
+        d.buffer = d.buffer[1:prevind(d.buffer, lastindex(d.buffer))]
+        return true
+    elseif evt.key === :delete || evt.key === :home || evt.key === :end ||
+           evt.key === :left || evt.key === :right
+        # no internal cursor yet; swallow navigation so it doesn't leak to the form
+        return true
+    elseif evt.key === :char
+        ch = evt.char
+        # Manual entry: accept any printable (digits/hyphen for YYYY-MM-DD, plus
+        # letters so a bad format can be typed and the save path can warn).
+        if isprint(ch) && ch != '\t'
+            d.buffer *= string(ch)
+            return true
+        end
+    end
+    false
+end
+
+function Tachikoma.render(d::DateField, rect::Rect, buf::Buffer)
+    rect.width < 1 && return
+    shown = isempty(d.buffer) ? "(none)" : d.buffer
+    hint = d.focused && !d.menu_open ? "  [Spc calendar]" : (d.menu_open ? "  [calendar…]" : "")
+    line = fit_width(shown * hint, rect.width)
+    st = d.focused ? Style(; fg = col_primary_hi(), bold = true) :
+         (isempty(d.buffer) ? Style(; fg = col_text_muted()) : Style(; fg = col_text()))
+    set_string!(buf, rect.x, rect.y, line, st)
+    d.menu_open || return
+    # Calendar grid below the value line when the rect is tall enough; otherwise
+    # still draw a compact month header on the next row if height ≥ 2.
+    _render_date_menu!(d, rect, buf)
+end
+
+"""Render a compact month grid starting one row under `rect.y` when space allows."""
+function _render_date_menu!(d::DateField, rect::Rect, buf::Buffer)
+    rect.height < 2 && return
+    y0 = rect.y + 1
+    x0 = rect.x
+    w = rect.width
+    md = d.menu_date
+    first_of_month = Date(year(md), month(md), 1)
+    # Monday=1 … Sunday=7 in Dates; we want Sun-first grid → shift
+    # dayofweek: Mon=1 .. Sun=7. Columns Su=0 .. Sa=6.
+    lead = mod(dayofweek(first_of_month), 7)   # Sun→0, Mon→1, … Sat→6
+    days_in = daysinmonth(md)
+    header = fit_width(Dates.format(md, "U yyyy"), w)
+    set_string!(buf, x0, y0, header, Style(; fg = col_primary(), bold = true))
+    y0 + 1 > rect.y + rect.height - 1 && return
+    dow = fit_width("Su Mo Tu We Th Fr Sa", w)
+    set_string!(buf, x0, y0 + 1, dow, Style(; fg = col_text_dim()))
+    row = y0 + 2
+    col = lead
+    for day in 1:days_in
+        row > rect.y + rect.height - 1 && break
+        cell_x = x0 + col * 3
+        cell_x + 2 > x0 + w && (row += 1; col = 0; cell_x = x0; row > rect.y + rect.height - 1 && break)
+        label = lpad(string(day), 2)
+        is_sel = day == Dates.day(md)
+        st = is_sel ? Style(; fg = col_bg(), bg = col_primary(), bold = true) :
+             Style(; fg = col_text())
+        set_string!(buf, cell_x, row, fit_width(label, max(1, x0 + w - cell_x)), st)
+        col += 1
+        if col >= 7
+            col = 0
+            row += 1
+        end
     end
 end

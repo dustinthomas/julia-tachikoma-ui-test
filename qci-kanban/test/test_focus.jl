@@ -36,6 +36,56 @@ const KEY = T.KeyEvent
         @test b.focused && !a.focused
     end
 
+    @testset "Up / Down cycle focus like Tab / Shift-Tab" begin
+        a = T.TextInput(; focused = false); b = T.TextInput(; focused = false)
+        c = T.TextInput(; focused = false)
+        fs = FS.FocusState(Any[a, b, c])
+        @test a.focused && !b.focused && !c.focused
+        @test FS.route_to_focus!(fs, KEY(:down)) === :consumed
+        @test !a.focused && b.focused && !c.focused
+        @test FS.route_to_focus!(fs, KEY(:down)) === :consumed
+        @test c.focused
+        @test FS.route_to_focus!(fs, KEY(:up)) === :consumed
+        @test b.focused
+        @test FS.route_to_focus!(fs, KEY(:up)) === :consumed
+        @test a.focused
+        # wrap
+        @test FS.route_to_focus!(fs, KEY(:up)) === :consumed
+        @test c.focused
+    end
+
+    @testset "Up / Down on open DateField menu stay on the widget (claims vertical)" begin
+        using Dates
+        df = FS.DateField(; text = "2026-07-01")
+        df.menu_open = true
+        df.menu_date = Date(2026, 7, 1)
+        other = T.TextInput(; focused = false)
+        fs = FS.FocusState(Any[df, other])
+        @test FS.focused_editor(fs) === df
+        before = df.menu_date
+        @test FS.route_to_focus!(fs, KEY(:down)) === :consumed
+        @test FS.focused_editor(fs) === df          # did not advance to other
+        @test df.menu_date == before + Day(7)
+        @test FS.route_to_focus!(fs, KEY(:up)) === :consumed
+        @test FS.focused_editor(fs) === df
+        @test df.menu_date == before
+        # Esc closes menu only
+        @test FS.route_to_focus!(fs, KEY(:escape)) === :consumed
+        @test !df.menu_open
+    end
+
+    @testset "Tab away from DateField closes an open calendar menu" begin
+        using Dates
+        df = FS.DateField(; text = "2026-07-01")
+        df.menu_open = true
+        other = T.TextInput(; focused = false)
+        fs = FS.FocusState(Any[df, other])
+        @test df.menu_open
+        @test FS.route_to_focus!(fs, KEY(:tab)) === :consumed
+        @test FS.focused_editor(fs) === other
+        @test !df.menu_open
+    end
+
     @testset "structural keys are handed back to the keymap" begin
         a = T.TextInput(; focused = false)
         fs = FS.FocusState(Any[a])

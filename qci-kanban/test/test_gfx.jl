@@ -126,15 +126,26 @@ end
         @test Q.render_board_stats!(m, T.TestBackend(60, 8).buf, T.Rect(1, 1, 8, 2)) == 0
     end
 
+    # Store writes issue timestamps as UTC (`Dates.now(UTC)`). Burndown converts
+    # those to the local calendar date via `_local_date`. Pure fixtures must stamp
+    # the UTC DateTime that maps back to the intended local day.
+    _utc_stamp(d::Date) = DateTime(d) + Hour(12) - (Dates.now() - Dates.now(UTC))
+
+    @testset "_local_date handles Date and parseable values" begin
+        d = Date(2026, 4, 1)
+        @test Q._local_date(d) == d
+        @test Q._local_date("2026-04-01") == d
+    end
+
     @testset "burndown_series is a pure, monotone-scoped model" begin
         today = Date(2026, 7, 3)
         start = today - Day(4)
         finish = today + Day(9)
         iss = [
-            Q.Domain.Issue(; id = "1", key = "QCI-1", title = "a", status = "Done",  updated = DateTime(today)),
-            Q.Domain.Issue(; id = "2", key = "QCI-2", title = "b", status = "Done",  updated = DateTime(today)),
-            Q.Domain.Issue(; id = "3", key = "QCI-3", title = "c", status = "To Do", updated = DateTime(today)),
-            Q.Domain.Issue(; id = "4", key = "QCI-4", title = "d", status = "Review", updated = DateTime(today)),
+            Q.Domain.Issue(; id = "1", key = "QCI-1", title = "a", status = "Done",  updated = _utc_stamp(today)),
+            Q.Domain.Issue(; id = "2", key = "QCI-2", title = "b", status = "Done",  updated = _utc_stamp(today)),
+            Q.Domain.Issue(; id = "3", key = "QCI-3", title = "c", status = "To Do", updated = _utc_stamp(today)),
+            Q.Domain.Issue(; id = "4", key = "QCI-4", title = "d", status = "Review", updated = _utc_stamp(today)),
         ]
         s = Q.burndown_series(iss, start, finish; today = today)  # default unit=:count
         n = Dates.value(finish - start) + 1
@@ -168,11 +179,11 @@ end
         day4 = Date(2026, 3, 4)
         iss = [
             Q.Domain.Issue(; id = "A", key = "QCI-A", title = "A", status = "Done",
-                           story_points = 5, updated = DateTime(day2)),
+                           story_points = 5, updated = _utc_stamp(day2)),
             Q.Domain.Issue(; id = "B", key = "QCI-B", title = "B", status = "In Progress",
-                           story_points = 3, updated = DateTime(day1)),
+                           story_points = 3, updated = _utc_stamp(day1)),
             Q.Domain.Issue(; id = "C", key = "QCI-C", title = "C", status = "Done",
-                           story_points = nothing, updated = DateTime(day3)),
+                           story_points = nothing, updated = _utc_stamp(day3)),
         ]
         s = Q.burndown_series(iss, day1, day4; unit = :points)
         @test s.total == 8                      # 5+3+0

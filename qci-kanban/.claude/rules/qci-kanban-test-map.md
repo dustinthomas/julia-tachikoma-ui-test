@@ -23,13 +23,13 @@ Run from `qci-kanban/`: `julia --project=. test/runtests.jl` (full suite). Most 
 | `src/notify/*` (outbox, smtp) | `test_notify.jl` | `test_card_modals.jl` |
 | `src/ui/app.jl` (AppModel, dispatch, login gate, project switcher/create, CSV export) | `test_app_shell.jl`, `features/multi_project.jl`, `features/project_switcher_export.jl` | `test_fixwave.jl`, `test_focus.jl` |
 | `src/ui/theme.jl` | `test_theme.jl` (incl. raw-ColorRGB grep enforcement) | — |
-| `src/ui/focus.jl`, `src/ui/keymap.jl` | `test_focus.jl` | `test_app_shell.jl`, `features/project_switcher_export.jl` |
+| `src/ui/focus.jl`, `src/ui/keymap.jl` | `test_focus.jl` | `test_app_shell.jl`, `features/project_switcher_export.jl`, `features/card_edit_ux.jl` |
 | `src/ui/board.jl` | `test_board_view.jl` | `test_focus.jl`, `test_notify.jl`, `test_stores.jl` |
 | `src/ui/backlog.jl` | `test_backlog.jl` | `test_gfx.jl` (burndown footer), `features/project_switcher_export.jl` (E export) |
 | `src/ui/calendar.jl` | `test_calendar_view.jl` | — |
 | `src/ui/gantt.jl` | `test_gantt.jl` | — |
-| `src/ui/modals.jl` | `test_card_modals.jl` | `test_backlog.jl`, `test_board_view.jl` (no-bleed), `features/project_switcher_export.jl` |
-| `src/ui/widgets.jl` | `test_widgets.jl` | all view tests indirectly |
+| `src/ui/modals.jl` | `test_card_modals.jl` | `test_backlog.jl`, `test_board_view.jl` (no-bleed), `features/project_switcher_export.jl`, `features/card_edit_ux.jl` |
+| `src/ui/widgets.jl` | `test_widgets.jl` | `test_card_modals.jl`, `features/card_edit_ux.jl`, all view tests indirectly |
 | `src/gfx/*` (logo, charts) | `test_gfx.jl` | `test_app_shell.jl` (header logo) |
 | `src/precompile.jl` | none directly (precompile-time-only workload, coverage-excluded) — a broken workload fails `Pkg.precompile`, so any test run catches it | — |
 
