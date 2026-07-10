@@ -502,6 +502,18 @@ end
         g4!(m, 'l'); @test m.gantt_start == stw + Day(7)
     end
 
+    @testset "e on empty gantt (no dated issues) is a no-op" begin
+        # Symmetry with calendar empty-day 'e': no selection → modal stays closed.
+        m = gantt_login()
+        g4!(m, 'G')
+        @test isempty(G4.gantt_issue_rows(m))
+        @test G4._gantt_selected_issue(m) === nothing
+        g4!(m, 'e')
+        @test m.modal == :none
+        @test m.edit_form === nothing
+        @test m.card_issue_id === nothing
+    end
+
     @testset "many rows clamp to the visible height (no overflow)" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "Many")

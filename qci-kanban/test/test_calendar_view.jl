@@ -96,7 +96,11 @@ cal_goto_day!(m, d) = (steps = d - m.cal_sel_day;
         @test T.text(m.edit_form.due_input) == string(Date(y, mo, 22))
         @test T.find_text(tb, "EDIT CARD") !== nothing
         @test T.find_text(tb, iss.title) !== nothing
-        @test T.find_text(tb, "No issues due") === nothing
+        # no bleed of always-on calendar chrome (panel + weekday header + month title)
+        # under the modal — stronger than "No issues due", which is empty-day-only.
+        @test T.find_text(tb, "DUE $(Dates.monthname(mo)) 22") === nothing
+        @test T.find_text(tb, "Mo") === nothing
+        @test T.find_text(tb, Dates.monthname(mo)) === nothing
     end
 
     @testset "n creates a card pre-filled with the selected date as due_date" begin
