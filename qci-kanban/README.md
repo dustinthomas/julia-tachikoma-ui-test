@@ -64,10 +64,9 @@ GitHub Release until a later polishing pass.
 ### Prerequisites
 
 - Linux x86_64 (build machine = target machine for Stage 1; no cross-compile)
-- Julia 1.10+ (developed/tested on 1.12.x)
+- Julia 1.10+ (developed/tested on **1.12.4**)
 - **5–10 GB free disk** (deps + artifacts + `dist/` + temp objects)
-- Expect first `create_app` wall time **~10–40 minutes** and output size
-  **hundreds of MB** (~200–600+ MB)
+- `filter_stdlibs = false` (build script default) — full stdlib set in the bundle
 
 ### Build steps (from `qci-kanban/`)
 
@@ -102,6 +101,27 @@ the bundle’s embedded project. Standard Julia flags after `--julia-args`
 
 `packaging/Manifest.toml` and `dist/` are gitignored; product `Manifest.toml`
 stays uncommitted per repo policy (instantiate on the build machine).
+
+### Measured create_app evidence (Stage 1, internal)
+
+First successful Linux `create_app` on this machine (2026-07-11). **Not** a
+claim of multi-machine relocatable redistribution — Stage 1 is
+**build-machine = run-machine**, internal `dist/` / private tarball only.
+
+| Metric | Value |
+|--------|--------|
+| Julia | **1.12.4** |
+| PackageCompiler | 2.4.0 |
+| `cpu_target` | `native` (default) |
+| `filter_stdlibs` | **false** |
+| `create_app` wall-clock | **~641 s (~10.7 min)** (`duration_s = 640.5` from build script) |
+| Bundle size (`du -sh dist/qci-kanban-linux`) | **942M** |
+| Binary smoke (`./dist/.../bin/qci-kanban --smoke`) | **exit 0** |
+| `packaging/smoke_bundle.jl` | **exit 0** |
+| `share/julia/LocalPreferences.toml` | empty (0 bytes; no secrets to scrub) |
+
+Re-runs on the same machine should land in a similar range; cold first builds
+with cold depot can be longer. Prefer ≥5–10 GB free disk before starting.
 
 ## Features
 
