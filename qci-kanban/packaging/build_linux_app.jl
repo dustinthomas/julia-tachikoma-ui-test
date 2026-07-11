@@ -5,7 +5,9 @@
 #   julia --project=packaging -e 'using Pkg; Pkg.instantiate()'  # Step 1
 #   julia --project=packaging packaging/build_linux_app.jl       # Step 2
 #
-# Optional: QCI_CPU_TARGET=native (default) or a broader target for redistrib.
+# Optional env:
+#   QCI_CPU_TARGET=native (default) or a broader target for redistrib
+#   QCI_FILTER_STDLIBS=1  → filter_stdlibs=true (size experiment; NOT Stage 1 default)
 # PackageCompiler is NOT a product dependency — only this packaging/ project.
 
 using PackageCompiler
@@ -15,8 +17,11 @@ const OUT = joinpath(ROOT, "dist", "qci-kanban-linux")
 const PRE = joinpath(@__DIR__, "precompile_app.jl")
 const MANIFEST = joinpath(ROOT, "Manifest.toml")
 const CPU_TARGET = get(ENV, "QCI_CPU_TARGET", "native")
+# Stage 1 default: full stdlib set. Opt-in experiment only — may shrink the
+# bundle but can break packages that touch filtered stdlibs at runtime.
+const FILTER_STDLIBS = get(ENV, "QCI_FILTER_STDLIBS", "") == "1"
 
-@info "QCI Kanban PackageCompiler build" ROOT OUT cpu_target = CPU_TARGET julia = string(VERSION)
+@info "QCI Kanban PackageCompiler build" ROOT OUT cpu_target = CPU_TARGET filter_stdlibs = FILTER_STDLIBS julia = string(VERSION)
 
 if !isfile(MANIFEST)
     error("""
@@ -36,7 +41,7 @@ duration_s = @elapsed create_app(ROOT, OUT;
     executables = ["qci-kanban" => "julia_main"],
     precompile_execution_file = PRE,
     incremental = false,
-    filter_stdlibs = false,
+    filter_stdlibs = FILTER_STDLIBS,
     force = true,
     include_lazy_artifacts = true,
     include_transitive_dependencies = true,

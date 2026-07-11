@@ -66,7 +66,17 @@ GitHub Release until a later polishing pass.
 - Linux x86_64 (build machine = target machine for Stage 1; no cross-compile)
 - Julia 1.10+ (developed/tested on **1.12.4**)
 - **5–10 GB free disk** (deps + artifacts + `dist/` + temp objects)
-- `filter_stdlibs = false` (build script default) — full stdlib set in the bundle
+- `filter_stdlibs = false` (build script **Stage 1 default**) — full stdlib set
+
+### Packaging hygiene (runtime deps)
+
+- **Coverage.jl is test-only** — listed under `[extras]` / `[targets].test` in
+  `Project.toml`, **not** in product `[deps]`. It is never loaded by the app or
+  the PackageCompiler bundle; only `test/coverage_gate.jl` and the test suite
+  need it. Keeping it out of `[deps]` avoids pulling coverage tooling into the
+  sysimage / runtime load path.
+- Product `Manifest.toml` stays uncommitted; `packaging/Manifest.toml` and
+  `dist/` are gitignored (instantiate on the build machine).
 
 ### Build steps (from `qci-kanban/`)
 
@@ -99,8 +109,37 @@ or wrapping with `julia --project=.` from a source checkout — those can shadow
 the bundle’s embedded project. Standard Julia flags after `--julia-args`
 (e.g. `-t4`) remain supported by PackageCompiler.
 
-`packaging/Manifest.toml` and `dist/` are gitignored; product `Manifest.toml`
-stays uncommitted per repo policy (instantiate on the build machine).
+### Internal tarball helper
+
+Stage 1 ships via private `dist/` or an offline tarball — not a public Release.
+
+```bash
+# After a successful create_app:
+./packaging/package_tarball.sh
+# → dist/qci-kanban-linux-<UTC-stamp>-<arch>.tar.zst  (if zstd installed)
+# → dist/qci-kanban-linux-<UTC-stamp>-<arch>.tar.gz   (fallback)
+# optional path: ./packaging/package_tarball.sh /path/to/dist/qci-kanban-linux
+```
+
+### `filter_stdlibs` size experiment (optional, not Stage 1 default)
+
+Default remains **`filter_stdlibs=false`** (full stdlib set). Setting
+`QCI_FILTER_STDLIBS=1` opts into PackageCompiler’s stdlib filter — may shrink
+the bundle, but can break packages that touch filtered stdlibs at runtime.
+**Do not treat a filtered build as the Stage 1 default** until smoke + a real
+interactive session both pass on the target machine.
+
+```bash
+# Experiment (rebuilds dist/qci-kanban-linux; ~10+ min):
+QCI_FILTER_STDLIBS=1 julia --project=packaging packaging/build_linux_app.jl
+du -sh dist/qci-kanban-linux
+./dist/qci-kanban-linux/bin/qci-kanban --smoke
+./packaging/package_tarball.sh
+# Compare sizes to the Stage 1 (filter_stdlibs=false) baseline below.
+```
+
+No second filtered create_app is required for merge; run the experiment when you
+have disk + time and record both `du -sh` numbers if you care about size.
 
 ### Measured create_app evidence (Stage 1, internal)
 
@@ -113,7 +152,7 @@ claim of multi-machine relocatable redistribution — Stage 1 is
 | Julia | **1.12.4** |
 | PackageCompiler | 2.4.0 |
 | `cpu_target` | `native` (default) |
-| `filter_stdlibs` | **false** |
+| `filter_stdlibs` | **false** (Stage 1 default; `QCI_FILTER_STDLIBS=1` for experiment only) |
 | `create_app` wall-clock | **~641 s (~10.7 min)** (`duration_s = 640.5` from build script) |
 | Bundle size (`du -sh dist/qci-kanban-linux`) | **942M** |
 | Binary smoke (`./dist/.../bin/qci-kanban --smoke`) | **exit 0** |
