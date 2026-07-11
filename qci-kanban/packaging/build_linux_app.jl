@@ -6,8 +6,10 @@
 #   julia --project=packaging packaging/build_linux_app.jl       # Step 2
 #
 # Optional env:
-#   QCI_CPU_TARGET=native (default) or a broader target for redistrib
-#   QCI_FILTER_STDLIBS=1  → filter_stdlibs=true (size experiment; NOT Stage 1 default)
+#   QCI_CPU_TARGET — Stage 1 / same-machine: native (default).
+#                    Redistribution attempt: generic (broader x86-64; rebuild required).
+#                    See packaging/relocatable_smoke.md for cpu_target + off-machine smoke.
+#   QCI_FILTER_STDLIBS=1 → filter_stdlibs=true (size experiment; NOT Stage 1 default)
 # PackageCompiler is NOT a product dependency — only this packaging/ project.
 
 using PackageCompiler

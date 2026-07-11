@@ -89,9 +89,25 @@ julia --project=packaging -e 'using Pkg; Pkg.instantiate()'
 
 # Step 2 — create_app → dist/qci-kanban-linux/
 julia --project=packaging packaging/build_linux_app.jl
-# optional CPU target (default native):
-# QCI_CPU_TARGET=native julia --project=packaging packaging/build_linux_app.jl
+# CPU target via QCI_CPU_TARGET (see table below)
 ```
+
+### `QCI_CPU_TARGET` (dev vs redistribution)
+
+| Mode | `QCI_CPU_TARGET` | When |
+|------|------------------|------|
+| Stage 1 / same-machine (default) | **`native`** | Internal builds on the machine that will run the binary |
+| Redistribution attempt | **`generic`** | Broader x86-64 baseline for other hosts; rebuild required |
+
+```bash
+QCI_CPU_TARGET=native  julia --project=packaging packaging/build_linux_app.jl  # default
+QCI_CPU_TARGET=generic julia --project=packaging packaging/build_linux_app.jl  # portable trial
+```
+
+`cpu_target` alone does **not** fix glibc mismatch: a bundle built on a newer
+distro can still fail on older hosts (`GLIBC_* not found`). Build on the oldest
+supported OS when you care about fleet portability. Full notes:
+`packaging/relocatable_smoke.md`.
 
 ### Run the binary
 
@@ -141,11 +157,37 @@ du -sh dist/qci-kanban-linux
 No second filtered create_app is required for merge; run the experiment when you
 have disk + time and record both `du -sh` numbers if you care about size.
 
+### Relocatable verification (off build machine / container)
+
+**Stage 1 remains internal** until multi-machine (or an agreed container matrix)
+smoke is recorded with exit codes. Do not claim redistribution success from
+build-host smoke alone.
+
+Procedure (detail + evidence template): **`packaging/relocatable_smoke.md`**.
+
+```bash
+# 1) Host smoke (required)
+./dist/qci-kanban-linux/bin/qci-kanban --smoke
+
+# 2) Optional: host + Docker/Podman container smoke (degrades if no runtime)
+./packaging/relocatable_container_smoke.sh
+# or point at any existing dist tree (do not commit dist/):
+# ./packaging/relocatable_container_smoke.sh /path/to/qci-kanban-linux
+#
+# Default image: ubuntu:24.04 (needs glibc new enough for the build).
+# QCI_SMOKE_IMAGE=ubuntu:24.04 ./packaging/relocatable_container_smoke.sh
+```
+
+Container smoke is a **userspace proxy** (different libc/image), not a full
+second physical host. Tarball extract on another path and real second-machine
+runs are documented in `packaging/relocatable_smoke.md`.
+
 ### Measured create_app evidence (Stage 1, internal)
 
 First successful Linux `create_app` on this machine (2026-07-11). **Not** a
 claim of multi-machine relocatable redistribution — Stage 1 is
-**build-machine = run-machine**, internal `dist/` / private tarball only.
+**build-machine = run-machine** for the default `native` build, internal
+`dist/` / private tarball only, until off-machine checks are explicitly green.
 
 | Metric | Value |
 |--------|--------|
