@@ -8,3 +8,7 @@ data/
 tmp/
 *.log
 .DS_Store
+
+# PackageCompiler output (parent also ignores dist/ monorepo-wide)
+dist/
+packaging/Manifest.toml

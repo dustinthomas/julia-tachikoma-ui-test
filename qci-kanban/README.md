@@ -10,22 +10,21 @@ side by side:
   `src/gfx/`.
 - **`kanban()`** — the original v1 prototype, kept intact for reference.
 
-## Run
+## Running from source
 
 ```bash
-# v2 (recommended) — source / dev
+# v2 (recommended)
 julia --project=. -e 'using QciKanban; QciKanban.kanban2()'
 
 # v1 prototype
 julia --project=. -e 'using QciKanban; QciKanban.kanban()'
 ```
 
-**PackageCompiler-ready:** the package defines `julia_main()::Cint` (v2 only) for
-a future Linux `create_app` binary. Interactive launch hands off to `kanban2()`
-(same `~/.qci-kanban/` data dir). Headless smoke (`--smoke` / `QCI_SMOKE=1`)
-uses isolated `:memory:` DBs + temp token + injected secret and asserts the
-first-run gate string. Packaging / `create_app` is not wired yet — source mode
-above remains the day-to-day entry.
+The package also defines `julia_main()::Cint` (v2 only) for the compiled binary
+entry below. Interactive launch hands off to `kanban2()` (same
+`~/.qci-kanban/` data dir). Headless smoke (`--smoke` / `QCI_SMOKE=1`) uses
+isolated `:memory:` DBs + temp token + injected secret and asserts the first-run
+gate string.
 
 v2 stores data in `~/.qci-kanban/users.db` and `~/.qci-kanban/board.db`, and
 persists a session token to `~/.qci-kanban/session.jwt` (0600). First launch
@@ -37,6 +36,58 @@ production installs should set `seed_demo = false` via
 `config/maintenance.toml.example` or `QCI_SEED_DEMO=0` so the board stays empty.
 New projects can receive ops labels (PM/CM/Safety/Critical) when
 `seed_ops_labels = true` (default) via the app-layer create helper.
+
+## Building a Linux binary (PackageCompiler)
+
+Optional **Stage 1** path for a relocatable Linux x86_64 app bundle via
+[PackageCompiler.jl](https://github.com/JuliaLang/PackageCompiler.jl). Source
+mode above stays the canonical dev/CI workflow. Packaging tooling lives only
+under `packaging/` — **PackageCompiler is not a product dependency**.
+
+**Stage 1 is internal-only:** ship via `dist/` or a private tarball. No public
+GitHub Release until a later polishing pass.
+
+### Prerequisites
+
+- Linux x86_64 (build machine = target machine for Stage 1; no cross-compile)
+- Julia 1.10+ (developed/tested on 1.12.x)
+- **5–10 GB free disk** (deps + artifacts + `dist/` + temp objects)
+- Expect first `create_app` wall time **~10–40 minutes** and output size
+  **hundreds of MB** (~200–600+ MB)
+
+### Build steps (from `qci-kanban/`)
+
+```bash
+# Step 0 — resolve the product project (creates Manifest.toml; required)
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+
+# Step 1 — install PackageCompiler in the packaging project only
+julia --project=packaging -e 'using Pkg; Pkg.instantiate()'
+
+# Step 2 — create_app → dist/qci-kanban-linux/
+julia --project=packaging packaging/build_linux_app.jl
+# optional CPU target (default native):
+# QCI_CPU_TARGET=native julia --project=packaging packaging/build_linux_app.jl
+```
+
+### Run the binary
+
+```bash
+# Headless login-gate smoke (exit 0; must not touch ~/.qci-kanban)
+./dist/qci-kanban-linux/bin/qci-kanban --smoke
+# or: julia packaging/smoke_bundle.jl
+
+# Interactive v2 (same defaults as kanban2 — data under ~/.qci-kanban/)
+./dist/qci-kanban-linux/bin/qci-kanban
+```
+
+Launch **`bin/qci-kanban` without** setting `JULIA_PROJECT`, `JULIA_LOAD_PATH`,
+or wrapping with `julia --project=.` from a source checkout — those can shadow
+the bundle’s embedded project. Standard Julia flags after `--julia-args`
+(e.g. `-t4`) remain supported by PackageCompiler.
+
+`packaging/Manifest.toml` and `dist/` are gitignored; product `Manifest.toml`
+stays uncommitted per repo policy (instantiate on the build machine).
 
 ### Rich playground seed (multi-project, people, 3+ months)
 

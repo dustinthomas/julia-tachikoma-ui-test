@@ -9,6 +9,9 @@
 # the ctor/`update!`/`view` paths in the pkgimage, so `kanban2()` reaches an
 # interactive board in ~1s instead of ~20s of first-call JIT.
 #
+# Keep in sync with packaging/precompile_app.jl v2 tour (and vice versa).
+# TODO: extract shared _v2_headless_tour! later (small follow-up PR).
+#
 # COV_EXCL_START — precompile-time-only code: the `@compile_workload` body runs
 # during `Pkg.precompile`, never at runtime, so no coverage run can observe it
 # executing. Any breakage fails package precompilation (and thus the suite)
