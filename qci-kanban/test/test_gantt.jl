@@ -119,6 +119,10 @@ end
         @test any(l[2] == "Mar" for l in periods)
         periods_w = G4.gantt_axis_period_labels(ws, 1, 30; narrow=false)
         @test any(occursin("Mar", string(l[2])) for l in periods_w)
+        # Short visible month tail at left edge (span 1–2, c0v==0) — not date-dependent.
+        short_ws = Date(2026, 3, 30)  # last two days of March in a tiny window
+        short_p = G4.gantt_axis_period_labels(short_ws, 1, 2; narrow=true)
+        @test any(p[1] == 0 && p[2] == "Mar" for p in short_p)
         # left width adaptive
         er = [G4.GanttRow(:epic, "EpicName", nothing, ""); G4.GanttRow(:issue, "QCI-99 Long title here", nothing, "")]
         @test G4.gantt_left_width(er, 120) <= 24
@@ -283,6 +287,20 @@ end
         g4!(m, 'j'); @test m.gantt_sel == 1
         @test G4._gantt_selected_issue(m) === nothing
         g4!(m, :enter); @test m.modal == :none
+    end
+
+    @testset "ruler left-gutter period label when short month sits at col 0" begin
+        # Exercises gantt_axis_period_labels short-span branch (c==0) + set_string!
+        # of that label into the left gutter (render path needs h>=8, left_w>=4).
+        m = gantt_login(); g4!(m, 'G')
+        m.gantt_scale = :day
+        # Start on the penultimate day of this month so only 1–2 days of the
+        # month are visible before the next month — forces period label at c=0.
+        m.gantt_start = Dates.lastdayofmonth(Dates.today()) - Day(1)
+        tb = gantt_render(m; w = 80, h = 12)
+        @test T.find_text(tb, "GANTT") !== nothing
+        mon = Dates.format(m.gantt_start, "u")
+        @test T.find_text(tb, mon) !== nothing
     end
 
     @testset "bars: deterministic extents via block-char run-lengths" begin

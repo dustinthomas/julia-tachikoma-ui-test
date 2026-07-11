@@ -1144,6 +1144,128 @@ function _render_help!(m::AppModel, buf::Buffer, content_area::Rect)
 end
 
 # ═══════════════════════════ ENTRY POINT ════════════════════════════════════
+# PackageCompiler / dual-run entry (covered by tests — no COV_EXCL).
+# Interactive live terminal handoff stays in the COV_EXCL block below.
+
+"""
+    _print_app_help()
+
+Print usage for the compiled binary / dual-run entry to stderr.
+"""
+function _print_app_help()
+    println(stderr, """
+    qci-kanban — QCI Kanban v2 (Tachikoma TUI)
+
+    Usage:
+      qci-kanban              Launch interactive app (same as kanban2())
+      qci-kanban --smoke      Headless login-gate smoke check (exit 0/1)
+      qci-kanban --help | -h  Show this help
+
+    Environment:
+      QCI_SMOKE=1             Same as --smoke
+
+    Source (dev):
+      julia --project=. -e 'using QciKanban; QciKanban.kanban2()'
+    """)
+    nothing
+end
+
+"""
+    _smoke_check_gate(tb; gate) -> Cint
+
+Assert the full first-run gate string is present in a TestBackend buffer.
+Returns `0` if found, `1` (and prints to stderr) if missing. Extracted so both
+success and failure paths are unit-testable without mutating the product gate.
+"""
+function _smoke_check_gate(tb; gate::AbstractString = "No users — press [c] to create account")::Cint
+    if Tachikoma.find_text(tb, gate) === nothing
+        println(stderr, "qci-kanban --smoke: missing gate text: ", gate)
+        return Cint(1)
+    end
+    return Cint(0)
+end
+
+"""
+    _compiled_app_smoke()::Cint
+
+Headless first-run gate check for PackageCompiler smoke / CI.
+Never reads or writes under `~/.qci-kanban/` — mandatory isolation kwargs:
+`:memory:` DBs, `token_path=tempname()`, injected `secret`, `restore=false`,
+`seed=false`. Returns `0` if the full gate string is present, else `1`.
+"""
+function _compiled_app_smoke()::Cint
+    m = AppModel(;
+        user_db = ":memory:",
+        board_db = ":memory:",
+        token_path = tempname(),
+        secret = "smoke-secret",
+        restore = false,
+        seed = false,
+    )
+    tb = Tachikoma.TestBackend(80, 24)
+    Tachikoma.reset!(tb.buf)
+    Tachikoma.view(m, Tachikoma.Frame(
+        tb.buf,
+        Tachikoma.Rect(1, 1, tb.width, tb.height),
+        Tachikoma.GraphicsRegion[],
+        Tachikoma.PixelSnapshot[],
+    ))
+    return _smoke_check_gate(tb)
+end
+
+"""
+    _app_cli_mode(args; env_smoke) -> Symbol
+
+Pure ARG/ENV dispatch for the PackageCompiler entry. Returns `:help`, `:smoke`,
+or `:interactive`. Accepts a local `args` vector so tests never touch global
+`ARGS`.
+"""
+function _app_cli_mode(args::AbstractVector{<:AbstractString};
+                       env_smoke::AbstractString = "")::Symbol
+    if any(a -> a in ("--help", "-h"), args)
+        return :help
+    end
+    if "--smoke" in args || env_smoke == "1"
+        return :smoke
+    end
+    return :interactive
+end
+
+"""
+    julia_main()::Cint
+    julia_main(args; env_smoke, interactive)::Cint
+
+PackageCompiler app entry for `bin/qci-kanban` (v2 only).
+
+  --help / -h   print usage on stderr, return 0
+  --smoke       headless login-gate smoke, return 0/1
+  QCI_SMOKE=1   same as --smoke
+  (default)     kanban2() interactive
+
+Zero-arg form uses global `ARGS` / `ENV` (PackageCompiler contract). Tests call
+the multi-arg form with a local vector — never mutate global `ARGS`. The
+`interactive` kwarg is overridable so the live handoff need not run under
+TestBackend (body of `_julia_main_interactive` stays in the COV_EXCL block).
+"""
+function julia_main(args::AbstractVector{<:AbstractString} = ARGS;
+                    env_smoke::AbstractString = get(ENV, "QCI_SMOKE", ""),
+                    interactive::Function = _julia_main_interactive)::Cint
+    try
+        mode = _app_cli_mode(args; env_smoke = env_smoke)
+        if mode === :help
+            _print_app_help()
+            return Cint(0)
+        elseif mode === :smoke
+            return _compiled_app_smoke()
+        else
+            return Cint(interactive())
+        end
+    catch
+        Base.invokelatest(Base.display_error, Base.catch_stack())
+        return Cint(1)
+    end
+end
+
 # COV_EXCL_START — live terminal loop glue: constructs the real-DB AppModel and
 # hands off to Tachikoma's interactive `app` run loop, which needs a live
 # terminal. Not reachable under TestBackend; the scripted headless tour lives in
@@ -1165,6 +1287,12 @@ function kanban2(; user_db::AbstractString = joinpath(homedir(), ".qci-kanban", 
     m = AppModel(; user_db = user_db, board_db = board_db,
                  config = cfg, token_path = token_path, seed = cfg.seed_demo)
     app(m)
+end
+
+"Thin PackageCompiler interactive handoff — calls `kanban2()` then returns 0."
+function _julia_main_interactive()::Cint
+    kanban2()
+    return Cint(0)
 end
 # COV_EXCL_STOP
 

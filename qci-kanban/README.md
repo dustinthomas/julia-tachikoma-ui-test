@@ -13,12 +13,19 @@ side by side:
 ## Run
 
 ```bash
-# v2 (recommended)
+# v2 (recommended) — source / dev
 julia --project=. -e 'using QciKanban; QciKanban.kanban2()'
 
 # v1 prototype
 julia --project=. -e 'using QciKanban; QciKanban.kanban()'
 ```
+
+**PackageCompiler-ready:** the package defines `julia_main()::Cint` (v2 only) for
+a future Linux `create_app` binary. Interactive launch hands off to `kanban2()`
+(same `~/.qci-kanban/` data dir). Headless smoke (`--smoke` / `QCI_SMOKE=1`)
+uses isolated `:memory:` DBs + temp token + injected secret and asserts the
+first-run gate string. Packaging / `create_app` is not wired yet — source mode
+above remains the day-to-day entry.
 
 v2 stores data in `~/.qci-kanban/users.db` and `~/.qci-kanban/board.db`, and
 persists a session token to `~/.qci-kanban/session.jwt` (0600). First launch
