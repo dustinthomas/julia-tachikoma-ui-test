@@ -37,6 +37,20 @@ production installs should set `seed_demo = false` via
 New projects can receive ops labels (PM/CM/Safety/Critical) when
 `seed_ops_labels = true` (default) via the app-layer create helper.
 
+### Rich playground seed (multi-project, people, 3+ months)
+
+For a fuller sandbox (7 people, 4 projects, ~60 dated issues spanning ~4 months
+for board / calendar / Gantt play):
+
+```bash
+julia --project=. scripts/seed_playground.jl          # additive / idempotent
+julia --project=. scripts/seed_playground.jl --fresh   # wipe DBs, then seed
+# login: alex@qci.demo / demo
+```
+
+Projects: **QCI** (product), **MNT** (plant maintenance WOs), **RND** (firmware),
+**OPS** (line ops). Does not change the tiny default `seed_demo!` used by tests.
+
 ## Building a Linux binary (PackageCompiler)
 
 Optional **Stage 1** path for a relocatable Linux x86_64 app bundle via
@@ -88,20 +102,6 @@ the bundle’s embedded project. Standard Julia flags after `--julia-args`
 
 `packaging/Manifest.toml` and `dist/` are gitignored; product `Manifest.toml`
 stays uncommitted per repo policy (instantiate on the build machine).
-
-### Rich playground seed (multi-project, people, 3+ months)
-
-For a fuller sandbox (7 people, 4 projects, ~60 dated issues spanning ~4 months
-for board / calendar / Gantt play):
-
-```bash
-julia --project=. scripts/seed_playground.jl          # additive / idempotent
-julia --project=. scripts/seed_playground.jl --fresh   # wipe DBs, then seed
-# login: alex@qci.demo / demo
-```
-
-Projects: **QCI** (product), **MNT** (plant maintenance WOs), **RND** (firmware),
-**OPS** (line ops). Does not change the tiny default `seed_demo!` used by tests.
 
 ## Features
 

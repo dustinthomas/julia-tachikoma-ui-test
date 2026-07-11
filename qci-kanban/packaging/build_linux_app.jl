@@ -32,7 +32,7 @@ if !isfile(PRE)
     error("Missing precompile execution file: $PRE")
 end
 
-create_app(ROOT, OUT;
+duration_s = @elapsed create_app(ROOT, OUT;
     executables = ["qci-kanban" => "julia_main"],
     precompile_execution_file = PRE,
     incremental = false,
@@ -44,4 +44,4 @@ create_app(ROOT, OUT;
     cpu_target = CPU_TARGET,
 )
 
-@info "create_app finished" OUT
+@info "create_app finished" OUT duration_s = round(duration_s; digits = 1)

@@ -18,7 +18,14 @@ if !isfile(BIN)
     exit(1)
 end
 
+if !Sys.isexecutable(BIN)
+    println(stderr, "smoke_bundle: binary exists but is not executable: $BIN")
+    println(stderr, "Re-run create_app or chmod +x the binary, then retry.")
+    exit(1)
+end
+
 @info "smoke_bundle: running" BIN
 # ignorestatus so we can forward the binary exit code without a throw
 p = run(ignorestatus(`$BIN --smoke`))
-exit(p.exitcode)
+# exitcode is nothing when the process dies on a signal — treat as failure
+exit(something(p.exitcode, 1))
