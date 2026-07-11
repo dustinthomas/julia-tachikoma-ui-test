@@ -127,7 +127,7 @@ gate on them: `QciKanban.jl` ≈ 807/965 (83.6%), `db.jl` ≈ 100/102 (98.0%).
 
 | File | Region | Why excluded |
 |------|--------|--------------|
-| `src/ui/app.jl` | `kanban2(...)` entry point (`# COV_EXCL_START/STOP`) | Live terminal loop glue: constructs the real-DB `AppModel` and hands off to Tachikoma's interactive `app` run loop, which requires a live terminal and never returns under headless tests. The scripted headless tour (`record_demo2`) exercises the same rendering/update paths and is fully covered; `AppModel` construction is covered by every UI test. |
+| `src/ui/app.jl` | `kanban2(...)` + `_julia_main_interactive()` live-entry block (`# COV_EXCL_START/STOP`) | Live terminal loop glue: constructs the real-DB `AppModel` and hands off to Tachikoma's interactive `app` run loop, which requires a live terminal and never returns under headless tests. `_julia_main_interactive` is the thin PackageCompiler handoff (`kanban2()` → `Cint(0)`) in the same block — same justification. The scripted headless tour (`record_demo2`) and covered `julia_main` help/smoke dispatch exercise rendering/update paths; `AppModel` construction is covered by every UI test. |
 
 No `EXPLICIT_EXCLUSIONS` entries were needed — the sole added exclusion is an
 auditable in-source marker.

@@ -292,15 +292,14 @@ end
     @testset "ruler left-gutter period label when short month sits at col 0" begin
         # Exercises gantt_axis_period_labels short-span branch (c==0) + set_string!
         # of that label into the left gutter (render path needs h>=8, left_w>=4).
+        # Fixed far-future month-end so day-window clamp (today-1) never pulls the
+        # start back — date-independent, same short-span geometry as the pure test.
         m = gantt_login(); g4!(m, 'G')
         m.gantt_scale = :day
-        # Start on the penultimate day of this month so only 1–2 days of the
-        # month are visible before the next month — forces period label at c=0.
-        m.gantt_start = Dates.lastdayofmonth(Dates.today()) - Day(1)
+        m.gantt_start = Date(2099, 3, 30)  # Mar 30–31 then Apr… → "Mar" at c=0
         tb = gantt_render(m; w = 80, h = 12)
         @test T.find_text(tb, "GANTT") !== nothing
-        mon = Dates.format(m.gantt_start, "u")
-        @test T.find_text(tb, mon) !== nothing
+        @test T.find_text(tb, "Mar") !== nothing
     end
 
     @testset "bars: deterministic extents via block-char run-lengths" begin

@@ -282,9 +282,24 @@ end
 @testset "PackageCompiler entry — julia_main / smoke / help" begin
     @testset "_compiled_app_smoke returns 0 with full gate string (isolated)" begin
         # Call helper directly — never mutate global ARGS.
-        code = Q._compiled_app_smoke()
+        # Isolation locked in: under a throwaway HOME, smoke must not create
+        # ~/.qci-kanban (or any files under that temp home).
+        home = mktempdir()
+        code = withenv("HOME" => home) do
+            Q._compiled_app_smoke()
+        end
         @test code == 0
         @test code isa Cint
+        @test !isdir(joinpath(home, ".qci-kanban"))
+        @test isempty(readdir(home))
+        # Gate string re-asserted independently of the helper's internal check
+        # (same isolation kwargs as _compiled_app_smoke).
+        m = Q.AppModel(; user_db = ":memory:", board_db = ":memory:",
+                       token_path = tempname(),
+                       secret = "smoke-secret-packagecompiler-ci!!",
+                       restore = false, seed = false)
+        tb = app_tb(m; w = 80, h = 24)
+        @test T.find_text(tb, "No users — press [c] to create account") !== nothing
     end
 
     @testset "_smoke_check_gate covers missing-text failure path" begin
@@ -318,10 +333,19 @@ end
     end
 
     @testset "julia_main help / smoke via local args (no ARGS mutation)" begin
-        @test Q.julia_main(String["--help"]) == 0
-        @test Q.julia_main(String["-h"]) == 0
-        @test Q.julia_main(String["--smoke"]) == 0
-        @test Q.julia_main(String[]; env_smoke = "1") == 0
+        mktemp() do path, io
+            codes = redirect_stderr(io) do
+                (Q.julia_main(String["--help"]),
+                 Q.julia_main(String["-h"]),
+                 Q.julia_main(String["--smoke"]),
+                 Q.julia_main(String[]; env_smoke = "1"))
+            end
+            @test codes == (0, 0, 0, 0)
+            flush(io)
+            body = read(path, String)
+            @test occursin("qci-kanban", body)   # help printed (twice for --help / -h)
+            @test occursin("--smoke", body)
+        end
     end
 
     @testset "julia_main interactive path uses injectable handoff (no live TUI)" begin
@@ -334,9 +358,15 @@ end
     end
 
     @testset "julia_main catch returns 1 on error" begin
-        code = Q.julia_main(String[]; env_smoke = "",
-                            interactive = () -> error("forced entry failure"))
-        @test code == 1
+        mktemp() do path, io
+            code = redirect_stderr(io) do
+                Q.julia_main(String[]; env_smoke = "",
+                             interactive = () -> error("forced entry failure"))
+            end
+            @test code == 1
+            flush(io)
+            @test occursin("forced entry failure", read(path, String))
+        end
     end
 
     @testset "_print_app_help is callable" begin

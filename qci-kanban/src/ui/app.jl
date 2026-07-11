@@ -1198,7 +1198,8 @@ function _compiled_app_smoke()::Cint
         user_db = ":memory:",
         board_db = ":memory:",
         token_path = tempname(),
-        secret = "smoke-secret",
+        # ≥ MIN_JWT_SECRET_LEN (32) for consistency with production validation rules
+        secret = "smoke-secret-packagecompiler-ci!!",
         restore = false,
         seed = false,
     )
