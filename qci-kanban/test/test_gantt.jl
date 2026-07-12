@@ -1716,5 +1716,37 @@ end
         G4.render_gantt!(m, tb.buf, tiny)
         @test m.gantt_last_area == tiny
     end
+
+    @testset "keep-in-view row_start > 1 when selection is below fold" begin
+        # Pure layout: enough issue rows that sri > nshow on a short viewport.
+        # h=8 → content_start=3 (title+band+single axis), no footer → nshow ≤ 4.
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "ScrollEp")
+        for i in 1:6
+            G4.Stores.create_issue!(m.boardstore; title = "ScrollRow$i", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(1))
+        end
+        g4!(m, 'G')
+        # 1 epic + 6 issues = 7 paint rows; select last issue (issue-only index 6)
+        m.gantt_sel = 6
+        area = T.Rect(1, 1, 80, 8)
+        lay = G4.gantt_layout(m, area)
+        @test lay.nshow >= 1
+        @test lay.nshow < 7   # short viewport cannot show all rows
+        @test lay.row_start > 1
+        # Invariant: selected full-row index is within [row_start, row_start+nshow-1]
+        rows = G4.gantt_rows(m)
+        sri = findfirst(r -> r.kind === :issue && r.issue !== nothing &&
+                             r.issue.id == G4._gantt_selected_issue(m).id, rows)
+        @test sri !== nothing
+        @test lay.row_start <= sri <= lay.row_start + lay.nshow - 1
+        @test lay.row_start == sri - lay.nshow + 1
+        # Precomputed rows kwarg matches default path (single-build API)
+        lay2 = G4.gantt_layout(m, area; rows = rows)
+        @test lay2.row_start == lay.row_start
+        @test lay2.nshow == lay.nshow
+        @test lay2.left_w == lay.left_w
+    end
 end
 

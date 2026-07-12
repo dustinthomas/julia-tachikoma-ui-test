@@ -751,20 +751,24 @@ struct GanttLayout
 end
 
 """
-    gantt_layout(m, area) -> GanttLayout
+    gantt_layout(m, area; rows=nothing) -> GanttLayout
 
 Post-G4 height matrix, compact left, view vs physical ncols, dual-axis y
 positions, content_start, chart_x, grid_y0, selection keep-in-view `row_start`.
 Same pure helpers as `render_gantt!` — paint must consume this snapshot.
+
+Pass precomputed `rows` (from `gantt_rows(m)`) to avoid a second row build when
+the caller already needs the paint list (e.g. `render_gantt!`).
 """
-function gantt_layout(m::AppModel, area::Rect)::GanttLayout
+function gantt_layout(m::AppModel, area::Rect;
+                      rows::Union{Nothing,Vector{GanttRow}} = nothing)::GanttLayout
     dpc = gantt_days_per_col(m.gantt_scale)
-    rows = gantt_rows(m)
+    rws = rows === nothing ? gantt_rows(m) : rows
     # G4: compact left on wide terminals (keys only; titles after bars). Sizes left_w from
     # compact strings so chart/physical gutter grows. Narrow keeps full labels.
     is_narrow = area.width < 60
     compact = area.width >= 60  # same as !is_narrow; explicit width gate (design V1)
-    left_w = gantt_left_width(rows, area.width; compact = compact)
+    left_w = gantt_left_width(rws, area.width; compact = compact)
     if is_narrow
         left_w = min(14, max(10, area.width - 20))
     end
@@ -781,7 +785,7 @@ function gantt_layout(m::AppModel, area::Rect)::GanttLayout
 
     has_ruler = area.height >= 8
     # PR5: has_footer = h>=10 && rows>0 && !narrow
-    has_footer = area.height >= 10 && length(rows) > 0 && !is_narrow
+    has_footer = area.height >= 10 && length(rws) > 0 && !is_narrow
     # G3 height budget: dual-row axis only at h≥12; single at 8–11; none <8.
     has_dual = area.height >= 12 && has_ruler
     tab_rows = has_dual ? 1 : 0
@@ -795,11 +799,11 @@ function gantt_layout(m::AppModel, area::Rect)::GanttLayout
     tick_y = has_ruler ? (has_dual ? area.y + 3 : area.y + 2) : 0
     ruler_y = tick_y  # TODAY label + single-row axis paint target
     grid_y0 = area.y + content_start
-    nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
+    nshow = max(0, min(length(rws), area.height - content_start - footer_rows - 1))
     # Selection keep-in-view (U5): scroll row window so selected issue is drawn.
     row_start = 1
     if sel_issue !== nothing && nshow > 0
-        sri = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == sel_issue.id, rows)
+        sri = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == sel_issue.id, rws)
         (sri !== nothing && sri > nshow) && (row_start = sri - nshow + 1)
     end
     footer_y = has_footer ? grid_y0 + nshow : nothing
@@ -824,8 +828,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     _short("Gantt needs a bigger window", area.width), Style(; fg = col_text_dim()))
         return
     end
-    lay = gantt_layout(m, area)
+    # Single gantt_rows build shared by layout + paint (N2: no double list work).
     rows = gantt_rows(m)
+    lay = gantt_layout(m, area; rows = rows)
     # Destructure layout metrics (single source of geometry for this paint).
     left_w = lay.left_w
     chart_x = lay.chart_x
@@ -1221,8 +1226,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     # PR5: selected item footer (when has_footer): exact dates, duration, status, priority (theming).
     # Draw below grid; priority token uses priority_color; rest col_text_dim. Responsive already in predicate.
+    # has_footer ⇒ footer_y is always set (gantt_layout invariant).
     if has_footer
-        fy = something(lay.footer_y, grid_y0 + nshow)
+        fy = lay.footer_y::Int
         if fy <= area.y + area.height - 1
             sel = _gantt_selected_issue(m)
             if sel !== nothing
