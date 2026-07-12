@@ -826,17 +826,19 @@ end
         @test T.find_text(tb, "Wend") !== nothing
         r = row_with(tb, "WkndBar", 30)
         @test r !== nothing
-        # shading '░' present on grid/band (post-bar titles may overwrite weekend cells
-        # after the bar — assert screen/band presence, not issue-row cells under z10 label)
-        @test T.find_text(tb, "░") !== nothing || occursin("░", r)
+        # Post-bar titles may overwrite weekend cells on the issue row after the bar.
+        # Assert ░ on epic header grid row (no post-bar) so grid weekend paint is locked
+        # without relying on band-only or sprint-band ░.
+        epic_r = row_with(tb, "Wend", 30)
+        @test epic_r !== nothing && occursin("░", epic_r)
         # week seps '┆' present (new grid lines)
         @test T.find_text(tb, "┆") !== nothing
         # full re-render after update!
         g4!(m, 'l')  # scroll window
         tb2 = gantt_render(m)
         @test T.find_text(tb2, "┆") !== nothing
-        @test T.find_text(tb2, "░") !== nothing ||
-              (row_with(tb2, "WkndBar", 30) !== nothing && occursin("░", row_with(tb2, "WkndBar", 30)))
+        epic_r2 = row_with(tb2, "Wend", 30)
+        @test epic_r2 !== nothing && occursin("░", epic_r2)
     end
 
     @testset "boundary heights + narrow: ruler/footer visibility, empty pos, today semantic (PR2)" begin
@@ -1433,8 +1435,19 @@ end
         tb = gantt_render(m; w = w, h = 16)
         r = row_with(tb, a.key, 16)
         @test r !== nothing
-        @test occursin("GutterTitleX", r) || occursin("Gutter", r)
-        # Pure geom confirms gutter room with physical label_ncols
+        # Title must appear AFTER the last bar glyph (not only left-rail fallback)
+        last_bar = 0
+        for (i, c) in enumerate(r)
+            if c in ('█', '▓', '▌', '▐')
+                last_bar = i
+            end
+        end
+        @test last_bar > 0
+        frag = occursin("GutterTitleX", r) ? "GutterTitleX" : "Gutter"
+        ti = findfirst(frag, r)
+        @test ti !== nothing
+        @test first(ti) > last_bar
+        # Pure + render geom: label starts at/after view right edge (physical gutter wiring)
         rows = G4.gantt_rows(m)
         left_w = G4.gantt_left_width(rows, w; compact = true)
         physical = w - left_w
@@ -1445,7 +1458,8 @@ end
         c0, c1 = ext
         geom = G4.gantt_post_bar_label_geom(c0, c1, physical; gap = 1)
         @test geom !== nothing
-        @test geom.start >= view_n || geom.max_chars >= 4  # gutter and/or room after bar
+        @test geom.start >= view_n  # post-bar starts in physical gutter past 14-col view
+        @test geom.max_chars >= 4
     end
 
     @testset "G4: narrow / flush-right no crash; left shows identity" begin
@@ -1525,9 +1539,45 @@ end
         @test r !== nothing
         @test occursin("◆", r) || occursin("DiamondTitleZ", r)
         @test occursin("DiamondTitleZ", r) || occursin("Diamond", r)
-        # selected post-bar uses primary_hi path (char presence sufficient)
         @test m.gantt_sel == 1
         @test T.find_text(tb, "◆") !== nothing
+        # Selected post-bar uses col_primary_hi (assert style, not only char presence)
+        loc = T.find_text(tb, "DiamondTitleZ")
+        @test loc !== nothing
+        st = T.style_at(tb, loc.x, loc.y)
+        @test st.fg == G4.Theming.col_primary_hi()
+        @test st.bold === true
+    end
+
+    @testset "G4: in-bar key suppressed when post-bar paints" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "InBarEp")
+        # Mid-window bar wide enough for in-bar key (bw≥5) AND room after bar for post-bar
+        a = G4.Stores.create_issue!(m.boardstore; title = "AfterBarOnly", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(6))
+        g4!(m, 'G')
+        g4!(m, 'z')  # week — full width, post_geom present
+        @test m.gantt_scale == :week
+        tb = gantt_render(m; w = 120, h = 14)
+        r = row_with(tb, a.key, 14)
+        @test r !== nothing
+        @test occursin("AfterBarOnly", r)
+        # Bar span via Char vector (row_text may embed multi-byte ┃ — avoid byte-index slice)
+        chars = collect(r)
+        bar_ix = [i for (i, c) in enumerate(chars) if c in ('█', '▓', '▌', '▐')]
+        @test length(bar_ix) >= 5  # enough bar cells that in-bar key would have fired if not suppressed
+        interior = String(chars[minimum(bar_ix):maximum(bar_ix)])
+        @test !occursin(a.key, interior)
+        # Title lives after the last bar glyph (post-bar path)
+        title_chars = collect("AfterBarOnly")
+        title_at = 0
+        for i in 1:(length(chars) - length(title_chars) + 1)
+            if chars[i:(i + length(title_chars) - 1)] == title_chars
+                title_at = i; break
+            end
+        end
+        @test title_at > 0 && title_at > maximum(bar_ix)
     end
 end
 

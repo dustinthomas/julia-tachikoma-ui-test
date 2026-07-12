@@ -727,7 +727,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # G4: compact left on wide terminals (keys only; titles after bars). Sizes left_w from
     # compact strings so chart/physical gutter grows. Narrow keeps full labels.
     is_narrow = area.width < 60
-    compact = !is_narrow && area.width >= 60
+    compact = area.width >= 60  # same as !is_narrow; explicit width gate (design V1)
     left_w = gantt_left_width(rows, area.width; compact = compact)
     if is_narrow
         left_w = min(14, max(10, area.width - 20))
@@ -934,6 +934,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         (sri !== nothing && sri > nshow) && (row_start = sri - nshow + 1)
     end
 
+    # G4: cache post-bar geom per visible row (shared by left-rail / in-bar / z10 paint).
+    post_geoms = Vector{Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}}(nothing, max(0, nshow))
+
     for i in 1:nshow
         ri = row_start + i - 1
         ri > length(rows) && break
@@ -970,6 +973,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
                 end
             end
+            post_geoms[i] = post_geom
             # Compact left when post-bar paints the title; full left when no post-bar room
             # (identity never lost). Under compact-sized left_w, full labels are key-first
             # so ellipsis cannot swallow key digits (QCI-100 vs QCI-101).
@@ -1062,8 +1066,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                         set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
                     end
                     # G4: suppress in-bar key when post-bar geom will paint; keep when no room after bar.
-                    post_geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
-                    if bw >= 5 && post_geom === nothing
+                    # Uses cached post_geoms[i] from the build pass (same args / tcol).
+                    if bw >= 5 && post_geoms[i] === nothing
                         avail = max(1, bw - 2)
                         lbl = fit_width(iss.key, avail)
                         lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
@@ -1096,6 +1100,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     # G4 z10 — post-bar issue titles (after bar right edge / diamond; before today z11).
     # Truncate before tcol so TestBackend row_text does not interleave ┃ inside titles.
+    # Geom cached in post_geoms during the build pass (left-rail / in-bar share the same values).
     for i in 1:nshow
         ri = row_start + i - 1
         ri > length(rows) && break
@@ -1104,20 +1109,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         iss = row.issue
         iss === nothing && continue
         rowy = grid_y0 + (i - 1)
-        geom = nothing
-        if iss.start_date !== nothing && iss.due_date !== nothing
-            ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
-            if ext !== nothing
-                c0, c1 = ext
-                geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
-            end
-        else
-            d = iss.start_date === nothing ? iss.due_date : iss.start_date
-            col = gantt_point_col(win_start, dpc, d, view_ncols)
-            if col !== nothing
-                geom = gantt_post_bar_label_geom(col, col, label_ncols; gap = 1, tcol = tcol)
-            end
-        end
+        geom = post_geoms[i]
         geom === nothing && continue
         xx = chart_x + geom.start
         xx > area.x + area.width - 1 && continue
