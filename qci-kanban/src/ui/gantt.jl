@@ -774,10 +774,20 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     ruler_y = area.y + 2
     grid_y0 = area.y + content_start
     nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
+    # G2 paint gates: weekend ░ + week seps ┆ off at :month (period wash stays on).
+    # Pure gantt_weekend_cols / gantt_week_sep_cols remain computable always.
+    paint_weekends = m.gantt_scale !== :month
+    paint_week_seps = m.gantt_scale !== :month
+    # z1 — alternating period wash on band (under weekend + sprint)
+    for c in gantt_period_shade_cols(win_start, dpc, view_ncols, m.gantt_scale)
+        set_char!(buf, chart_x + c, band_y, ' ', Style(; bg = col_gantt_period_alt()))
+    end
     # weekend shading on band row first (polish consistency), band will overlay its range
-    for c in gantt_weekend_cols(win_start, dpc, view_ncols)
-        ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
-        set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+    if paint_weekends
+        for c in gantt_weekend_cols(win_start, dpc, view_ncols)
+            ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
+            set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+        end
     end
     # Sprint bands polish (PR6): cleaner edges (▓/safe at ends), better name placement
     # (inside after edge when room; underline+dim always), aggressive truncate narrow.
@@ -894,24 +904,36 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
+    # z1 — period wash on all visible grid rows (incl. epic headers), under weekend/seps/bars/today.
+    for c in gantt_period_shade_cols(win_start, dpc, view_ncols, m.gantt_scale)
+        for ii in 1:nshow
+            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ' ',
+                      Style(; bg = col_gantt_period_alt()))
+        end
+    end
     # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
     # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
+    # G2: both gated off at :month scale (paint only; pure helpers unchanged).
     wcols = gantt_weekend_cols(win_start, dpc, view_ncols)
     scols = gantt_week_sep_cols(win_start, dpc, view_ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
-    for c in wcols
-        for ii in 1:nshow
-            ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
-            if textwidth(ch) != 1; ch = '#'; end
-            set_string!(buf, chart_x + c, grid_y0 + ii - 1, string(ch), Style(; fg = col_text_muted(), dim = true))
+    if paint_weekends
+        for c in wcols
+            for ii in 1:nshow
+                ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+                if textwidth(ch) != 1; ch = '#'; end
+                set_string!(buf, chart_x + c, grid_y0 + ii - 1, string(ch), Style(; fg = col_text_muted(), dim = true))
+            end
         end
     end
-    for c in scols
-        c == tcol && continue
-        for ii in 1:nshow
-            ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
-            if textwidth(ch) != 1; ch = '|'; end
-            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
+    if paint_week_seps
+        for c in scols
+            c == tcol && continue
+            for ii in 1:nshow
+                ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+                if textwidth(ch) != 1; ch = '|'; end
+                set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
+            end
         end
     end
 

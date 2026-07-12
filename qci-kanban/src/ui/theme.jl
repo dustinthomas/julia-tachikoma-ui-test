@@ -12,6 +12,7 @@ using Tachikoma: ColorRGB, Style
 
 export col_bg, col_surface, col_surface_hi, col_primary, col_primary_hi
 export col_text, col_text_dim, col_text_muted, col_ok, col_warn, col_err
+export col_gantt_period_alt
 export sel_style, priority_color, epic_color
 export QCI_CYAN, QCI_NAVY, QCI_SECONDARY
 
@@ -27,6 +28,8 @@ const TEXT_MUTED  = ColorRGB(100, 110, 165)  # hints, inactive
 const OK          = ColorRGB(78, 204, 94)    # success, Low priority
 const WARN        = ColorRGB(240, 198, 116)  # warnings, Medium priority
 const ERR         = ColorRGB(224, 60, 49)    # errors, High priority, overdue
+# Gantt alt period column wash (between BG and SURFACE; low-contrast stripe)
+const GANTT_PERIOD_ALT = ColorRGB(20, 24, 48)
 
 # Epic tag 5-color cycle: violet / teal / orange / pink / blue.
 const EPIC_RAMP = (
@@ -49,6 +52,7 @@ col_text_muted() = TEXT_MUTED
 col_ok()         = OK
 col_warn()       = WARN
 col_err()        = ERR
+col_gantt_period_alt() = GANTT_PERIOD_ALT
 
 "Selection style: QCI cyan on navy, bold."
 sel_style() = Style(; fg = PRIMARY, bg = SURFACE_HI, bold = true)

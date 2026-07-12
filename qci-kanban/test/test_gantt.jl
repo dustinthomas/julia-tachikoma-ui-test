@@ -1147,5 +1147,86 @@ end
         @test T.find_text(tb, "GANTT") !== nothing
         @test T.find_text(tb, "Mar") !== nothing
     end
+
+    # ── G2: alternating period wash + month paint gates ──────────────────────
+    @testset "G2: period wash render smoke all three scales (no throw)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "ShadeEp")
+        G4.Stores.create_issue!(m.boardstore; title = "ShadeBar", epic_id = e.id,
+                                start_date = Dates.today() - Day(3),
+                                due_date = Dates.today() + Day(14))
+        g4!(m, 'G')
+        @test m.gantt_scale == :day
+        tb_day = gantt_render(m; w = 100, h = 20)
+        @test T.find_text(tb_day, "GANTT") !== nothing
+        @test T.find_text(tb_day, "[day]") !== nothing
+        @test T.find_text(tb_day, "ShadeBar") !== nothing || T.find_text(tb_day, "ShadeEp") !== nothing
+        # pure shade helper still callable for day window (render z1 uses same API)
+        shade_d = G4.gantt_period_shade_cols(m.gantt_start, 1, 14, :day)
+        @test shade_d isa Vector{Int}
+
+        g4!(m, 'z'); @test m.gantt_scale == :week
+        tb_week = gantt_render(m; w = 100, h = 20)
+        @test T.find_text(tb_week, "[week]") !== nothing
+        @test T.find_text(tb_week, "GANTT") !== nothing
+
+        g4!(m, 'z'); @test m.gantt_scale == :month
+        tb_month = gantt_render(m; w = 100, h = 20)
+        @test T.find_text(tb_month, "[month]") !== nothing
+        @test T.find_text(tb_month, "GANTT") !== nothing
+        # bar still visible at month (dpc=7 compresses span)
+        r = row_with(tb_month, "ShadeBar", 30)
+        @test r !== nothing
+    end
+
+    @testset "G2: month scale gates weekend/week-sep paint OFF (red-first paint gates)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "MoGate")
+        # Monday-aligned window so dpc=7 pure week_sep_cols would be non-empty under old paint
+        mon = Dates.today() - Day(Dates.dayofweek(Dates.today()) - 1)  # this week's Monday
+        G4.Stores.create_issue!(m.boardstore; title = "MoBar", epic_id = e.id,
+                                start_date = mon, due_date = mon + Day(40))
+        g4!(m, 'G')
+        m.gantt_start = mon
+        g4!(m, 'z'); g4!(m, 'z')  # day → week → month
+        @test m.gantt_scale == :month
+        dpc = G4.gantt_days_per_col(:month)
+        @test dpc == 7
+        # Pure helpers still compute seps/weekends (paint gated only)
+        scols = G4.gantt_week_sep_cols(mon, dpc, 20)
+        @test !isempty(scols)  # Mondays every col when win starts Monday + dpc=7
+        wcols = G4.gantt_weekend_cols(mon, dpc, 20)
+        # paint must not emit week-sep glyphs on grid
+        tb = gantt_render(m; w = 120, h = 22)
+        @test T.find_text(tb, "[month]") !== nothing
+        @test T.find_text(tb, "┆") === nothing
+        # narrow fallback '|' for ┆ also absent on chart grid rows (scan issue/epic rows)
+        for i in 1:22
+            rt = T.row_text(tb, i)
+            rt === nothing && continue
+            # title/legend may use other glyphs; week-sep narrow '|' only on grid body —
+            # assert full buffer has no ┆ (already) and issue row has no lone week-sep pattern
+            if occursin("MoBar", rt) || occursin("MoGate", rt)
+                @test !occursin('┆', rt)
+            end
+        end
+        # Day/week still paint seps (regression: gate is month-only)
+        g4!(m, 'z'); @test m.gantt_scale == :day
+        m.gantt_start = mon
+        tb_d = gantt_render(m; w = 120, h = 22)
+        # day window may not include a Monday if mon is far; force week scale full width
+        g4!(m, 'z'); @test m.gantt_scale == :week
+        m.gantt_start = mon
+        tb_w = gantt_render(m; w = 120, h = 22)
+        @test T.find_text(tb_w, "┆") !== nothing
+    end
+
+    @testset "G2: theme col_gantt_period_alt reachable from gantt module" begin
+        @test G4.Theming.col_gantt_period_alt() == T.ColorRGB(20, 24, 48)
+        # pure shade cols still shape-stable after render wiring (G1 oracles)
+        mon = Date(2026, 3, 9)
+        @test G4.gantt_period_shade_cols(mon, 1, 14, :week) ==
+              [c for c in 0:13 if G4.gantt_period_parity(mon + Day(c), :week)]
+    end
 end
 
