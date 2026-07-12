@@ -1974,6 +1974,11 @@ end
         G4._handle_gantt_mouse!(m, out)
         @test m.gantt_start == st0
 
+        # Non-press wheel action ignored (parity with list_scroll)
+        rel_w = T.MouseEvent(cx, cy, T.mouse_scroll_down, T.mouse_release, false, false, false)
+        G4._handle_gantt_mouse!(m, rel_w)
+        @test m.gantt_start == st0
+
         # Empty / zero area: no-op
         m.gantt_last_area = T.Rect(0, 0, 0, 0)
         G4._handle_gantt_mouse!(m, down)

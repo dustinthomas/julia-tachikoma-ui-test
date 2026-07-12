@@ -996,18 +996,19 @@ end
 
 M1 click-select + M2 wheel scroll. Left press on left-rail issue / bar /
 diamond / post-bar → issue-only select + keep-in-view. Epic, axis, band,
-empty: no-op for click. Wheel (`mouse_scroll_up`/`down`) over `gantt_last_area`
-→ `_gantt_scroll!(±1)` (matches `h`/`l`); no zoom. Drag / open-on-click out
-of scope (M3).
+empty: no-op for click. Wheel (`mouse_scroll_up`/`down` + `mouse_press`) over
+`gantt_last_area` → `_gantt_scroll!(±1)` (matches `h`/`l`); no zoom. Drag /
+open-on-click out of scope (M3).
 """
 function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
     area = m.gantt_last_area
     (area.width < 1 || area.height < 1) && return m
 
     # M2 — wheel horizontal scroll when pointer is over the cached gantt body.
-    # Button is scroll_*; do not require mouse_left. Match button primarily
-    # (action is typically mouse_press from SGR). No zoom on wheel.
-    if evt.button === mouse_scroll_up || evt.button === mouse_scroll_down
+    # Button is scroll_*; require mouse_press for parity with Tachikoma
+    # list_scroll / widget handlers (SGR always emits press for wheel). No zoom.
+    if (evt.button === mouse_scroll_up || evt.button === mouse_scroll_down) &&
+       evt.action === mouse_press
         Base.contains(area, evt.x, evt.y) || return m
         dir = evt.button === mouse_scroll_up ? -1 : +1
         return _gantt_scroll!(m, dir)
