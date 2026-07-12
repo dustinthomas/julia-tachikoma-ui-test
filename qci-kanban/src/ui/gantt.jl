@@ -82,6 +82,85 @@ gantt_week_sep_cols(win_start::Date, dpc::Int, ncols::Int)::Vector{Int} =
     [c for c in 0:(ncols-1) if Dates.dayofweek(gantt_date_for_col(win_start, dpc, c)) == 1]
 
 """
+    gantt_period_sep_cols(win_start, dpc, ncols, scale) -> Vector{Int}
+
+0-based columns at period boundaries for vertical `┆` seps (G5 polish).
+Calendar **month** edges for all scales (day/week/month) — not ISO Mondays
+(those remain `gantt_week_sep_cols`, painted only when `dpc==1`).
+
+A column is a boundary when its `(year, month)` differs from the previous
+column's. Col 0 is never a sep (no prior period in the window). Empty /
+non-positive `ncols` → empty vector.
+"""
+function gantt_period_sep_cols(win_start::Date, dpc::Int, ncols::Int, scale::Symbol)::Vector{Int}
+    out = Int[]
+    ncols <= 0 && return out
+    # `scale` reserved for future period defs; all current scales use month edges.
+    _ = scale
+    prev_key = nothing
+    for c in 0:(ncols - 1)
+        d = gantt_date_for_col(win_start, dpc, c)
+        key = (Dates.year(d), Dates.month(d))
+        if prev_key !== nothing && key != prev_key
+            push!(out, c)
+        end
+        prev_key = key
+    end
+    out
+end
+
+"""
+    gantt_quarter_id(d::Date) -> (year::Int, quarter::Int)
+
+Calendar quarter 1..4 for `d` (Q1=Jan–Mar, …, Q4=Oct–Dec).
+"""
+gantt_quarter_id(d::Date)::Tuple{Int,Int} =
+    (Dates.year(d), (Dates.month(d) - 1) ÷ 3 + 1)
+
+"""
+    gantt_axis_quarter_tabs(win_start, dpc, ncols; narrow=false)
+        -> Vector{NamedTuple{(:c0,:c1,:label,:center), Tuple{Int,Int,String,Int}}}
+
+One entry per distinct calendar quarter intersecting the window (G5 super-header).
+Labels prefer `"Q{n} {year}"` when span fits, else `"Q{n}"`.
+"""
+function gantt_axis_quarter_tabs(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=false)
+    NT = NamedTuple{(:c0, :c1, :label, :center), Tuple{Int,Int,String,Int}}
+    out = NT[]
+    ncols <= 0 && return out
+    periods = Tuple{Tuple{Int,Int},Int,Int,Date}[]
+    seen = Dict{Tuple{Int,Int},Int}()
+    for c in 0:(ncols - 1)
+        d = gantt_date_for_col(win_start, dpc, c)
+        key = gantt_quarter_id(d)
+        if haskey(seen, key)
+            i = seen[key]
+            k, c0, _c1, sd = periods[i]
+            periods[i] = (k, c0, c, sd)
+        else
+            push!(periods, (key, c, c, d))
+            seen[key] = length(periods)
+        end
+    end
+    for (key, c0, c1, _sample) in periods
+        span = c1 - c0 + 1
+        center = c0 + (c1 - c0) ÷ 2
+        y, q = key
+        full = "Q$(q) $(y)"
+        short = "Q$(q)"
+        lab = if !narrow && textwidth(full) <= span
+            full
+        elseif textwidth(short) <= span
+            short
+        else
+            fit_width(short, max(1, span))
+        end
+        push!(out, (c0=c0, c1=c1, label=lab, center=center))
+    end
+    out
+end
+
+"""
     gantt_clamped_start_for_day(win_start, today, dpc, ncols) -> Date
 
 For day scale only (dpc==1), returns a start date that positions "today" near the
@@ -785,8 +864,10 @@ struct GanttLayout
     compact::Bool             # always false (PR-V); field retained for layout snapshot stability
     has_ruler::Bool
     has_dual::Bool
+    has_quarter::Bool         # G5: quarter super-header when h≥14 + dual + :month
     has_footer::Bool
     band_y::Int
+    quarter_y::Int            # 0 when !has_quarter
     tab_y::Int
     tick_y::Int
     ruler_y::Int              # tick / single-axis paint y (== tick_y when ruler present)
@@ -795,7 +876,7 @@ struct GanttLayout
     nshow::Int
     row_start::Int            # first visible row index into gantt_rows (1-based)
     footer_y::Union{Nothing,Int}
-    ruler_rows::Int           # 0 | 1 | 2 after G3
+    ruler_rows::Int           # axis strip rows only (tab+tick; quarter counted separately)
     paint_weekends::Bool
     paint_week_seps::Bool
 end
@@ -840,15 +921,23 @@ function gantt_layout(m::AppModel, area::Rect;
     has_footer = area.height >= 10 && length(rws) > 0 && !is_narrow
     # G3 height budget: dual-row axis only at h≥12; single at 8–11; none <8.
     has_dual = area.height >= 12 && has_ruler
+    # G5: optional quarter super-header only when height budget is loose (h≥14),
+    # dual axis already on, and month scale (where month tabs benefit from Q labels).
+    # Does not activate on day/week — keeps dual-row content_start stable for those tests.
+    has_quarter = has_dual && area.height >= 14 && m.gantt_scale === :month
+    quarter_rows = has_quarter ? 1 : 0
     tab_rows = has_dual ? 1 : 0
     tick_rows = has_ruler ? 1 : 0
-    ruler_rows = tab_rows + tick_rows   # 0 | 1 | 2
+    ruler_rows = tab_rows + tick_rows   # 0 | 1 | 2 (quarter counted outside)
     footer_rows = has_footer ? 1 : 0
-    content_start = 1 + 1 + ruler_rows  # title + band + axis strip
+    content_start = 1 + 1 + quarter_rows + ruler_rows  # title + band + [quarter] + axis
     band_y = area.y + 1
-    tab_y = has_dual ? area.y + 2 : 0
-    # Single-row axis lands at band+1; dual tick row is band+2 (under tabs).
-    tick_y = has_ruler ? (has_dual ? area.y + 3 : area.y + 2) : 0
+    quarter_y = has_quarter ? area.y + 2 : 0
+    # Axis strip sits under band, or under quarter when present.
+    axis0 = has_quarter ? area.y + 3 : area.y + 2
+    tab_y = has_dual ? axis0 : 0
+    # Single-row axis lands at band+1; dual tick is under tabs.
+    tick_y = has_ruler ? (has_dual ? axis0 + 1 : area.y + 2) : 0
     ruler_y = tick_y  # TODAY label + single-row axis paint target
     grid_y0 = area.y + content_start
     nshow = max(0, min(length(rws), area.height - content_start - footer_rows - 1))
@@ -860,13 +949,14 @@ function gantt_layout(m::AppModel, area::Rect;
     end
     footer_y = has_footer ? grid_y0 + nshow : nothing
     # G2 paint gates: weekend ░ + week seps ┆ off at :month (period wash stays on).
+    # G5 period-boundary seps still paint at :month (month edges only — not noisy Mondays).
     paint_weekends = m.gantt_scale !== :month
     paint_week_seps = m.gantt_scale !== :month
 
     GanttLayout(area, left_w, chart_x, physical_ncols, view_ncols, label_ncols,
                 dpc, m.gantt_scale, win_start, is_narrow, compact,
-                has_ruler, has_dual, has_footer,
-                band_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
+                has_ruler, has_dual, has_quarter, has_footer,
+                band_y, quarter_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
                 nshow, row_start, footer_y, ruler_rows,
                 paint_weekends, paint_week_seps)
 end
@@ -934,8 +1024,11 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
         return GanttHit(gantt_hit_band, nothing, nothing, nothing, nothing, nothing)
     end
 
-    # Axis rows (dual tab+tick, or single tick/axis)
+    # Axis rows (optional quarter super-header + dual tab+tick, or single tick/axis)
     if layout.has_ruler
+        if layout.has_quarter && y == layout.quarter_y
+            return GanttHit(gantt_hit_axis, nothing, nothing, nothing, nothing, nothing)
+        end
         if layout.has_dual
             if y == layout.tab_y || y == layout.tick_y
                 return GanttHit(gantt_hit_axis, nothing, nothing, nothing, nothing, nothing)
@@ -1081,8 +1174,10 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     is_narrow = lay.is_narrow
     has_ruler = lay.has_ruler
     has_dual = lay.has_dual
+    has_quarter = lay.has_quarter
     has_footer = lay.has_footer
     band_y = lay.band_y
+    quarter_y = lay.quarter_y
     tab_y = lay.tab_y
     tick_y = lay.tick_y
     ruler_y = lay.ruler_y
@@ -1099,16 +1194,20 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     scale_lbl = lay.scale === :month ? "month" :
                 lay.scale === :day   ? "day"   : "week"
     base = "GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]"
-    # Compact legend (PR6): ensure visible; shorten base on narrow to fit legend + responsive.
+    # Compact legend (PR6 / G5): bar / key / diamond / today glyphs must stay readable.
     if is_narrow && ncols >= 8
         base = "GANTT[$(scale_lbl)]"
     end
     title = base
     if ncols >= 10
-        leg = if !is_narrow && area.width >= 80
+        leg = if !is_narrow && area.width >= 90
+            # Wide: full legend with key token (PR-V chart identity)
+            "  ░sprint █bar KEY ◆pt " * string(gantt_safe_char('┃', false)) * "today"
+        elseif !is_narrow && area.width >= 80
             "  ░sprint █bar ◆pt " * string(gantt_safe_char('┃', false)) * "today"
         else
-            " " * string(gantt_safe_char('░', is_narrow)) * string(gantt_safe_char('█', is_narrow)) * string(gantt_safe_char('◆', is_narrow)) * string(gantt_safe_char('┃', is_narrow))
+            " " * string(gantt_safe_char('░', is_narrow)) * string(gantt_safe_char('█', is_narrow)) *
+                  "K" * string(gantt_safe_char('◆', is_narrow)) * string(gantt_safe_char('┃', is_narrow))
         end
         if textwidth(title) + textwidth(leg) <= area.width
             title = title * leg
@@ -1161,6 +1260,22 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     if has_ruler
+        # G5: optional quarter super-header (month scale, h≥14) above period tabs.
+        if has_quarter
+            for t in gantt_axis_quarter_tabs(win_start, dpc, view_ncols; narrow = is_narrow)
+                span = t.c1 - t.c0 + 1
+                span < 1 && continue
+                lab = t.label
+                textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
+                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_c = clamp(start_c, t.c0, t.c1)
+                xx = chart_x + start_c
+                xx > area.x + area.width - 1 && continue
+                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                set_string!(buf, xx, quarter_y, _short(lab, avail),
+                            Style(; fg = col_text_dim(), bold = true))
+            end
+        end
         # G3: dual-row (h≥12) = period tabs (full names) + tick row; single (h=8–11) =
         # digit-first combine on day/week, tabs-prefer on month. Pack labels into span.
         if has_dual
@@ -1314,9 +1429,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
     # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
     # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
-    # G2: both gated off at :month scale (paint only; pure helpers unchanged).
+    # G2: weekend + week seps gated off at :month (paint only; pure helpers unchanged).
+    # G5: period-boundary seps (month edges) always paint when present — z3 under bars, over wash.
     wcols = gantt_weekend_cols(win_start, dpc, view_ncols)
     scols = gantt_week_sep_cols(win_start, dpc, view_ncols)
+    pscols = gantt_period_sep_cols(win_start, dpc, view_ncols, lay.scale)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
     if paint_weekends
         for c in wcols
@@ -1335,6 +1452,17 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 if textwidth(ch) != 1; ch = '|'; end
                 set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
             end
+        end
+    end
+    # G5 period boundary seps (month edges) — same glyph, all scales; under bars over wash.
+    for c in pscols
+        c == tcol && continue
+        # Skip if week sep already painted this col (day/week) — same glyph, avoid double work.
+        paint_week_seps && (c in scols) && continue
+        for ii in 1:nshow
+            ch = gantt_safe_char('┆', is_narrow)
+            if textwidth(ch) != 1; ch = '|'; end  # COV_EXCL_LINE (safe_char always yields width-1 for ┆)
+            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
         end
     end
 

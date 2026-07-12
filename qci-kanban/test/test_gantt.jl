@@ -146,6 +146,68 @@ end
         @test 6 in scs  # 2026-03-16 Mon == col 6
     end
 
+    @testset "G5: gantt_period_sep_cols month boundaries (pure)" begin
+        # Day scale: window spanning Mar→Apr → col of Apr 1 is the only boundary
+        ws = Date(2026, 3, 25)  # Wed
+        # cols: 25,26,27,28,29,30,31,Apr1=col7,2,3
+        pcols = G4.gantt_period_sep_cols(ws, 1, 10, :day)
+        @test pcols == [7]  # 2026-04-01
+        @test G4.gantt_date_for_col(ws, 1, 7) == Date(2026, 4, 1)
+        # No boundary inside a single month
+        @test G4.gantt_period_sep_cols(Date(2026, 3, 10), 1, 14, :day) == Int[]
+        # Week scale uses same month edges (not ISO week Mondays)
+        @test G4.gantt_period_sep_cols(ws, 1, 10, :week) == [7]
+        # Month scale dpc=7: Mar 10 + 7*c → Apr lands when month flips
+        mws = Date(2026, 3, 10)
+        dpc = 7
+        mcols = G4.gantt_period_sep_cols(mws, dpc, 12, :month)
+        # Find first col whose month differs from col 0
+        expected = Int[]
+        prev = (2026, 3)
+        for c in 1:11
+            d = G4.gantt_date_for_col(mws, dpc, c)
+            key = (Dates.year(d), Dates.month(d))
+            if key != prev
+                push!(expected, c)
+                prev = key
+            end
+        end
+        @test mcols == expected
+        @test !isempty(mcols)
+        # empty / non-positive ncols
+        @test G4.gantt_period_sep_cols(ws, 1, 0, :day) == Int[]
+        @test G4.gantt_period_sep_cols(ws, 1, -1, :day) == Int[]
+        # Year boundary Dec→Jan
+        yb = Date(2025, 12, 28)
+        ycols = G4.gantt_period_sep_cols(yb, 1, 10, :day)
+        @test 4 in ycols  # 2026-01-01 is col 4
+        @test G4.gantt_date_for_col(yb, 1, 4) == Date(2026, 1, 1)
+    end
+
+    @testset "G5: gantt_quarter_id + gantt_axis_quarter_tabs (pure)" begin
+        @test G4.gantt_quarter_id(Date(2026, 1, 1)) == (2026, 1)
+        @test G4.gantt_quarter_id(Date(2026, 3, 31)) == (2026, 1)
+        @test G4.gantt_quarter_id(Date(2026, 4, 1)) == (2026, 2)
+        @test G4.gantt_quarter_id(Date(2026, 7, 15)) == (2026, 3)
+        @test G4.gantt_quarter_id(Date(2026, 12, 1)) == (2026, 4)
+        # Month scale spanning Q1→Q2
+        mws = Date(2026, 2, 1)
+        dpc = 7
+        tabs = G4.gantt_axis_quarter_tabs(mws, dpc, 20; narrow = false)
+        @test length(tabs) >= 2
+        @test any(t -> occursin("Q1", t.label), tabs)
+        @test any(t -> occursin("Q2", t.label), tabs)
+        # spans are inclusive and ordered
+        @test tabs[1].c0 == 0
+        @test tabs[1].c1 >= tabs[1].c0
+        @test tabs[2].c0 == tabs[1].c1 + 1
+        # empty ncols
+        @test G4.gantt_axis_quarter_tabs(mws, dpc, 0) == []
+        # narrow prefers short "Qn"
+        tabs_n = G4.gantt_axis_quarter_tabs(mws, dpc, 8; narrow = true)
+        @test all(t -> startswith(t.label, "Q"), tabs_n)
+    end
+
     @testset "gantt_clamped_start_for_day (pure, day positioning near left)" begin
         td = Dates.today()
         @test G4.gantt_clamped_start_for_day(td - Day(100), td, 1, 80) == td - Day(1)  # far past snaps
@@ -1286,25 +1348,29 @@ end
         @test m.gantt_scale == :month
         dpc = G4.gantt_days_per_col(:month)
         @test dpc == 7
-        # Pure helpers still compute seps/weekends (paint gated only)
+        # Pure helpers still compute week seps/weekends (week-sep *paint* gated only)
         scols = G4.gantt_week_sep_cols(mon, dpc, 20)
         @test !isempty(scols)  # Mondays every col when win starts Monday + dpc=7
         wcols = G4.gantt_weekend_cols(mon, dpc, 20)
-        # paint must not emit week-sep glyphs on grid
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 120, 22))
+        @test lay.paint_week_seps === false
+        @test lay.paint_weekends === false
+        # G5: period-boundary seps (month edges) may paint ┆ at :month — not week Mondays.
+        # At dpc=7 Monday-aligned windows, pure week_sep_cols marks *every* col (noisy);
+        # period seps must stay sparse (≪ view_ncols) — that is the anti-noise contract.
+        pscols = G4.gantt_period_sep_cols(lay.win_start, dpc, lay.view_ncols, :month)
+        week_all = G4.gantt_week_sep_cols(lay.win_start, dpc, lay.view_ncols)
         tb = gantt_render(m; w = 120, h = 22)
         @test T.find_text(tb, "[month]") !== nothing
-        @test T.find_text(tb, "┆") === nothing
-        # narrow fallback '|' for ┆ also absent on chart grid rows (scan issue/epic rows)
-        for i in 1:22
-            rt = T.row_text(tb, i)
-            rt === nothing && continue
-            # title/legend may use other glyphs; week-sep narrow '|' only on grid body —
-            # assert full buffer has no ┆ (already) and issue row has no lone week-sep pattern
-            if occursin("MoBar", rt) || occursin("MoGate", rt)
-                @test !occursin('┆', rt)
-            end
+        if isempty(pscols)
+            @test T.find_text(tb, "┆") === nothing
+        else
+            @test T.find_text(tb, "┆") !== nothing
+            # Sparse vs chart width and vs full Monday-every-col week-sep set
+            @test length(pscols) < lay.view_ncols ÷ 2
+            @test length(pscols) < length(week_all)
         end
-        # Day/week still paint seps (regression: gate is month-only)
+        # Day/week still paint week seps (regression: gate is month-only for week seps)
         g4!(m, 'z'); @test m.gantt_scale == :day
         m.gantt_start = mon
         tb_d = gantt_render(m; w = 120, h = 22)
@@ -1313,6 +1379,63 @@ end
         m.gantt_start = mon
         tb_w = gantt_render(m; w = 120, h = 22)
         @test T.find_text(tb_w, "┆") !== nothing
+    end
+
+    @testset "G5: period seps paint at month scale + legend key + quarter super-header" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "G5Ep")
+        # Span multiple months so period seps + quarters appear at month scale
+        start0 = Date(2026, 2, 1)
+        G4.Stores.create_issue!(m.boardstore; title = "G5Bar", epic_id = e.id,
+                                start_date = start0, due_date = start0 + Day(90))
+        g4!(m, 'G')
+        m.gantt_start = start0
+        g4!(m, 'z'); g4!(m, 'z')  # → month
+        @test m.gantt_scale == :month
+        area = T.Rect(1, 1, 120, 20)
+        lay = G4.gantt_layout(m, area)
+        @test lay.has_dual === true
+        @test lay.has_quarter === true
+        @test lay.quarter_y == area.y + 2
+        @test lay.tab_y == area.y + 3
+        @test lay.tick_y == area.y + 4
+        @test lay.content_start == 1 + 1 + 1 + 2  # title + band + quarter + dual
+        @test lay.paint_week_seps === false
+        ps = G4.gantt_period_sep_cols(lay.win_start, lay.dpc, lay.view_ncols, :month)
+        @test !isempty(ps)
+        tb = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb, "[month]") !== nothing
+        # Period seps visible (month edges) — G5 paint under bars
+        @test T.find_text(tb, "┆") !== nothing
+        # Legend: bar / key / today glyphs on wide title row
+        hrow = T.row_text(tb, 1)
+        @test hrow !== nothing && occursin("GANTT", hrow)
+        @test occursin("█", hrow) || occursin("bar", lowercase(hrow))
+        @test occursin("KEY", hrow) || occursin("K", hrow)
+        @test occursin("┃", hrow) || occursin("today", lowercase(hrow)) || occursin("◆", hrow)
+        # Quarter super-header labels present (Q1/Q2…)
+        blob = gantt_screen_blob(tb; h = 20)
+        @test occursin(r"Q[1-4]", blob)
+        # Day scale at h≥14 does NOT take quarter row (content_start stable)
+        g4!(m, 'z'); @test m.gantt_scale == :day
+        lay_d = G4.gantt_layout(m, area)
+        @test lay_d.has_quarter === false
+        @test lay_d.content_start == 1 + 1 + 2
+        # h=12 month: dual but no quarter (height budget)
+        g4!(m, 'z'); g4!(m, 'z'); @test m.gantt_scale == :month
+        lay12 = G4.gantt_layout(m, T.Rect(1, 1, 120, 12))
+        @test lay12.has_dual === true
+        @test lay12.has_quarter === false
+        @test lay12.content_start == 4
+        # PR-V contract: full left label still present; no compact-only left
+        @test lay.compact === false
+        r = row_with(tb, "G5Bar", 20)
+        @test r !== nothing
+        @test occursin("G5Bar", r)  # full title in left rail
+        # Hit-test: quarter super-header row is axis kind
+        rows_g5 = G4.gantt_rows(m)
+        hit_q = G4.gantt_hit_test(lay, rows_g5, lay.chart_x + 2, lay.quarter_y)
+        @test hit_q.kind === G4.gantt_hit_axis
     end
 
     @testset "G2: theme col_gantt_period_alt reachable from gantt module" begin
@@ -1797,6 +1920,11 @@ end
         @test lay_m.dpc == 7
         @test lay_m.paint_weekends === false
         @test lay_m.paint_week_seps === false
+        # G5: h=14 month enables quarter super-header; day/week above do not
+        @test lay_d.has_quarter === false
+        @test lay_w.has_quarter === false
+        @test lay_m.has_quarter === true
+        @test lay_m.content_start == 1 + 1 + 1 + 2  # title+band+quarter+dual
     end
 
     @testset "h=11 single axis vs h=12 dual; undersized area still caches" begin
@@ -2147,7 +2275,8 @@ end
         lay_def = G4.GanttLayout(
             area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, lay_w.scale,
             lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
-            lay_w.has_dual, lay_w.has_footer, lay_w.band_y, lay_w.tab_y, lay_w.tick_y,
+            lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
+            lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
             lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, lay_w.nshow,
             lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows, lay_w.paint_weekends,
             lay_w.paint_week_seps)
