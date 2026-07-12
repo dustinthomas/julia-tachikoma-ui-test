@@ -89,6 +89,8 @@ include("features/ops_refresh.jl")
 include("test_calendar_view.jl")
 include("test_gantt.jl")
 include("features/phase4_timeline.jl")
+# Gantt mouse M1 — click-select via pure hit-test (after G4.1 layout).
+include("features/gantt_mouse.jl")
 
 # Phase 5 — graphics polish: layered logo, board stats strip, sprint burndown,
 # animation gating, scripted v2 demo tour.

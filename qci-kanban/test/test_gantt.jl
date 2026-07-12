@@ -1750,3 +1750,267 @@ end
     end
 end
 
+# ── M1 pure hit-test + select helpers ───────────────────────────────────────
+@testset "M1 — gantt_hit_test + select helpers (pure)" begin
+    @testset "bar / left-rail / post-bar / epic / axis / outside on fixed layout" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "HitEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "HitFirst", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(3))
+        b = G4.Stores.create_issue!(m.boardstore; title = "HitSecond", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(5))
+        # Diamond (single-date) issue for bar-kind diamond path
+        dmd = G4.Stores.create_issue!(m.boardstore; title = "HitDiamond", epic_id = e.id,
+                                      due_date = Dates.today() + Day(2))
+        g4!(m, 'G')
+        area = T.Rect(1, 1, 120, 20)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        @test lay.nshow >= 4  # epic + 3 issues
+        # Full-list: row 1 = epic, 2 = a, 3 = b, 4 = dmd (sort by anchor then key)
+        @test rows[1].kind === :epic
+        iss_rows = [r for r in rows if r.kind === :issue]
+        @test length(iss_rows) == 3
+
+        # Outside area → none
+        hit_out = G4.gantt_hit_test(lay, rows, 0, 0)
+        @test hit_out.kind === G4.gantt_hit_none
+
+        # Band row
+        hit_band = G4.gantt_hit_test(lay, rows, lay.chart_x, lay.band_y)
+        @test hit_band.kind === G4.gantt_hit_band
+
+        # Axis (dual at h=20)
+        @test lay.has_dual
+        hit_axis = G4.gantt_hit_test(lay, rows, lay.chart_x, lay.tick_y)
+        @test hit_axis.kind === G4.gantt_hit_axis
+        hit_tab = G4.gantt_hit_test(lay, rows, lay.chart_x, lay.tab_y)
+        @test hit_tab.kind === G4.gantt_hit_axis
+
+        # Epic left rail → left_rail with no issue_sel (no-op target)
+        epic_y = lay.grid_y0  # first visible row is epic at row_start=1
+        hit_epic = G4.gantt_hit_test(lay, rows, area.x + 1, epic_y)
+        @test hit_epic.kind === G4.gantt_hit_left_rail
+        @test hit_epic.row_index == 1
+        @test hit_epic.issue_id === nothing
+        @test hit_epic.issue_sel === nothing
+
+        # Locate issue A full-list index and its bar extent
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
+        @test ra !== nothing && rb !== nothing
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        yb = lay.grid_y0 + (rb - lay.row_start)
+        ext_a = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext_a !== nothing
+        c0a, c1a = ext_a
+
+        # Left-rail issue A → issue_sel is issue-only (1), not full-row index
+        hit_lr = G4.gantt_hit_test(lay, rows, area.x + 1, ya)
+        @test hit_lr.kind === G4.gantt_hit_left_rail
+        @test hit_lr.row_index == ra
+        @test hit_lr.issue_id == a.id
+        @test hit_lr.issue_sel isa Int
+        @test hit_lr.issue_sel != ra || ra == 1  # issue_sel is issue-only space
+        # issue_sel must match position among issue rows only
+        expected_sel_a = count(r -> r.kind === :issue, rows[1:ra])
+        @test hit_lr.issue_sel == expected_sel_a
+        @test expected_sel_a < ra   # epic offsets full-list vs issue-only
+
+        # Bar cell on A
+        hit_bar = G4.gantt_hit_test(lay, rows, lay.chart_x + c0a, ya)
+        @test hit_bar.kind === G4.gantt_hit_bar
+        @test hit_bar.issue_id == a.id
+        @test hit_bar.issue_sel == expected_sel_a
+        @test hit_bar.col == c0a
+        @test hit_bar.date isa Date
+
+        # Post-bar on A (after c1 + gap)
+        post_a = G4.gantt_post_bar_label_geom(c0a, c1a, lay.label_ncols; gap = 1)
+        if post_a !== nothing
+            hit_post = G4.gantt_hit_test(lay, rows, lay.chart_x + post_a.start, ya)
+            @test hit_post.kind === G4.gantt_hit_post_bar
+            @test hit_post.issue_id == a.id
+            @test hit_post.issue_sel == expected_sel_a
+        end
+
+        # Gap between bar and post-bar is empty chart (not bar)
+        if c1a + 1 < lay.physical_ncols
+            gap_col = c1a + 1
+            hit_gap = G4.gantt_hit_test(lay, rows, lay.chart_x + gap_col, ya)
+            @test hit_gap.kind === G4.gantt_hit_empty_chart ||
+                  hit_gap.kind === G4.gantt_hit_post_bar  # if gap=0 path; design uses gap=1
+            if post_a !== nothing
+                @test hit_gap.kind === G4.gantt_hit_empty_chart
+            end
+        end
+
+        # Bar on B → different issue_sel
+        ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
+        @test ext_b !== nothing
+        expected_sel_b = count(r -> r.kind === :issue, rows[1:rb])
+        hit_b = G4.gantt_hit_test(lay, rows, lay.chart_x + ext_b[1], yb)
+        @test hit_b.kind === G4.gantt_hit_bar
+        @test hit_b.issue_id == b.id
+        @test hit_b.issue_sel == expected_sel_b
+        @test hit_b.issue_sel != expected_sel_a
+
+        # Diamond → gantt_hit_bar
+        rd = findfirst(r -> r.kind === :issue && r.issue.id == dmd.id, rows)
+        yd = lay.grid_y0 + (rd - lay.row_start)
+        pcol = G4.gantt_point_col(lay.win_start, lay.dpc, dmd.due_date, lay.view_ncols)
+        @test pcol !== nothing
+        hit_d = G4.gantt_hit_test(lay, rows, lay.chart_x + pcol, yd)
+        @test hit_d.kind === G4.gantt_hit_bar
+        @test hit_d.issue_id == dmd.id
+    end
+
+    @testset "_gantt_select! / _gantt_select_issue_id! use issue-only index + keep-in-view" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "SelEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "SelA", epic_id = e.id,
+                                    start_date = Dates.today(), due_date = Dates.today() + Day(2))
+        b = G4.Stores.create_issue!(m.boardstore; title = "SelB", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1), due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        @test m.gantt_sel == 1
+        G4._gantt_select!(m, 2)
+        @test m.gantt_sel == 2
+        @test G4._gantt_selected_issue(m).id == b.id
+        G4._gantt_select_issue_id!(m, a.id)
+        @test m.gantt_sel == 1
+        @test G4._gantt_selected_issue(m).id == a.id
+        # unknown id no-ops
+        G4._gantt_select_issue_id!(m, "no-such-id")
+        @test m.gantt_sel == 1
+        # clamp
+        G4._gantt_select!(m, 99)
+        @test m.gantt_sel == 2
+        # empty list no-ops
+        m2 = gantt_login(); g4!(m2, 'G')
+        @test isempty(G4.gantt_issue_rows(m2))
+        G4._gantt_select!(m2, 1)
+        @test m2.gantt_sel == 1
+    end
+
+    @testset "mouse handler: left-rail / bar select; epic / axis / non-press no-op" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "MsEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "MsA", epic_id = e.id,
+                                    start_date = Dates.today(), due_date = Dates.today() + Day(3))
+        b = G4.Stores.create_issue!(m.boardstore; title = "MsB", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1), due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
+        yb = lay.grid_y0 + (rb - lay.row_start)
+        ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
+        @test m.gantt_sel == 1
+
+        # Click bar of B
+        click_b = T.MouseEvent(lay.chart_x + ext_b[1], yb, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, click_b)
+        @test m.gantt_sel == 2
+        @test G4._gantt_selected_issue(m).id == b.id
+
+        # Click left rail of A
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        click_a = T.MouseEvent(area.x + 1, ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, click_a)
+        @test m.gantt_sel == 1
+
+        # Epic left rail no-op
+        G4._gantt_select!(m, 2)
+        click_ep = T.MouseEvent(area.x + 1, lay.grid_y0, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, click_ep)
+        @test m.gantt_sel == 2
+
+        # Axis no-op
+        click_ax = T.MouseEvent(lay.chart_x, lay.tick_y, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, click_ax)
+        @test m.gantt_sel == 2
+
+        # Release / non-left ignored
+        rel = T.MouseEvent(lay.chart_x + ext_b[1], yb, T.mouse_left, T.mouse_release, false, false, false)
+        G4._handle_gantt_mouse!(m, rel)
+        @test m.gantt_sel == 2
+        mid = T.MouseEvent(area.x + 1, ya, T.mouse_middle, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, mid)
+        @test m.gantt_sel == 2
+    end
+
+    @testset "hit-test edge coverage: single axis, epic chart, diamond post-bar, title/footer" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "EdgeEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "EdgeBar", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(2))
+        dmd = G4.Stores.create_issue!(m.boardstore; title = "EdgeDia", epic_id = e.id,
+                                      due_date = Dates.today() + Day(1))
+        g4!(m, 'G')
+        # Single-row axis (h=10–11, not dual): tick_y axis path
+        area_s = T.Rect(1, 1, 100, 11)
+        rows = G4.gantt_rows(m)
+        lay_s = G4.gantt_layout(m, area_s; rows = rows)
+        @test lay_s.has_ruler && !lay_s.has_dual
+        hit_ax = G4.gantt_hit_test(lay_s, rows, lay_s.chart_x, lay_s.tick_y)
+        @test hit_ax.kind === G4.gantt_hit_axis
+
+        # Title row + footer → none (falls through final return)
+        hit_title = G4.gantt_hit_test(lay_s, rows, lay_s.chart_x, area_s.y)
+        @test hit_title.kind === G4.gantt_hit_none
+        if lay_s.footer_y !== nothing
+            hit_ft = G4.gantt_hit_test(lay_s, rows, lay_s.chart_x, lay_s.footer_y)
+            @test hit_ft.kind === G4.gantt_hit_none
+        end
+
+        # Epic empty chart cell (period wash region)
+        area_w = T.Rect(1, 1, 120, 20)
+        lay_w = G4.gantt_layout(m, area_w; rows = rows)
+        @test rows[1].kind === :epic
+        hit_ep_chart = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x + 2, lay_w.grid_y0)
+        @test hit_ep_chart.kind === G4.gantt_hit_empty_chart
+        @test hit_ep_chart.row_index == 1
+        @test hit_ep_chart.issue_id === nothing
+
+        # Diamond post-bar region
+        rd = findfirst(r -> r.kind === :issue && r.issue.id == dmd.id, rows)
+        yd = lay_w.grid_y0 + (rd - lay_w.row_start)
+        pcol = G4.gantt_point_col(lay_w.win_start, lay_w.dpc, dmd.due_date, lay_w.view_ncols)
+        @test pcol !== nothing
+        post_d = G4.gantt_post_bar_label_geom(pcol, pcol, lay_w.label_ncols; gap = 1)
+        @test post_d !== nothing
+        hit_dpost = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x + post_d.start, yd)
+        @test hit_dpost.kind === G4.gantt_hit_post_bar
+        @test hit_dpost.issue_id == dmd.id
+
+        # Stale layout vs shorter rows: row_index out of range → none
+        short = rows[1:1]  # epic only
+        hit_oob = G4.gantt_hit_test(lay_w, short, lay_w.chart_x, lay_w.grid_y0 + 1)
+        @test hit_oob.kind === G4.gantt_hit_none
+
+        # Empty area width/height → none
+        empty_lay = G4.gantt_layout(m, T.Rect(1, 1, 0, 0); rows = rows)
+        @test G4.gantt_hit_test(empty_lay, rows, 1, 1).kind === G4.gantt_hit_none
+
+        # col beyond physical_ncols defensive path: hand-built layout with
+        # physical_ncols smaller than area width implies
+        lay_def = G4.GanttLayout(
+            area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, lay_w.scale,
+            lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
+            lay_w.has_dual, lay_w.has_footer, lay_w.band_y, lay_w.tab_y, lay_w.tick_y,
+            lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, lay_w.nshow,
+            lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows, lay_w.paint_weekends,
+            lay_w.paint_week_seps)
+        # x far enough that col >= physical_ncols=2 but still inside area
+        hit_far = G4.gantt_hit_test(lay_def, rows, lay_w.chart_x + 5, lay_w.grid_y0 + 1)
+        @test hit_far.kind === G4.gantt_hit_none
+    end
+end
+

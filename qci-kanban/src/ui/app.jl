@@ -493,6 +493,28 @@ function update!(m::AppModel, evt::KeyEvent)
     m
 end
 
+"""
+    update!(m::AppModel, evt::MouseEvent)
+
+M1 mouse path (not KEYMAP): idle parity, then Gantt-only click-select when
+logged in, no modal, view is `:gantt`, and `gantt_last_area` is non-empty.
+"""
+function update!(m::AppModel, evt::MouseEvent)
+    m.tick += 1
+    if _idle_expired!(m)
+        return m
+    end
+    m.last_input_at = Dates.now(UTC)
+
+    m.current_user === nothing && return m
+    m.modal !== :none && return m
+    m.view !== :gantt && return m
+    (m.gantt_last_area.width < 1 || m.gantt_last_area.height < 1) && return m
+
+    _handle_gantt_mouse!(m, evt)
+    m
+end
+
 function _do_action!(m::AppModel, act::Symbol)
     if act === :quit
         m.quit = true

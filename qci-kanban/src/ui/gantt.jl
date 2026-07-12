@@ -628,12 +628,37 @@ function _gantt_scroll!(m::AppModel, dir::Int)
     m
 end
 
+"""
+    _gantt_select!(m, sel)
+
+Shared select helper for keyboard and mouse: set issue-only `gantt_sel`
+(1-based into `gantt_issue_rows`) and run horizontal keep-in-view.
+"""
+function _gantt_select!(m::AppModel, sel::Int)
+    n = length(gantt_issue_rows(m))
+    n == 0 && return m
+    m.gantt_sel = clamp(sel, 1, n)
+    _gantt_ensure_selection_visible!(m)
+    m
+end
+
+"""
+    _gantt_select_issue_id!(m, issue_id)
+
+Map an issue id → issue-only selection index, then `_gantt_select!`.
+Never assigns a full-list `gantt_rows` index into `gantt_sel`.
+"""
+function _gantt_select_issue_id!(m::AppModel, issue_id)
+    irows = gantt_issue_rows(m)
+    idx = findfirst(r -> r.issue !== nothing && r.issue.id == issue_id, irows)
+    idx === nothing && return m
+    _gantt_select!(m, idx)
+end
+
 function _gantt_row!(m::AppModel, delta::Int)
     n = length(gantt_issue_rows(m))
     n == 0 && return m
-    m.gantt_sel = clamp(m.gantt_sel + delta, 1, n)
-    _gantt_ensure_selection_visible!(m)
-    m
+    _gantt_select!(m, m.gantt_sel + delta)
 end
 
 function _gantt_zoom!(m::AppModel)
@@ -817,6 +842,179 @@ function gantt_layout(m::AppModel, area::Rect;
                 band_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
                 nshow, row_start, footer_y, ruler_rows,
                 paint_weekends, paint_week_seps)
+end
+
+# ═══════════════════════════ HIT-TEST (M1) ═══════════════════════════════════
+"""
+Hit kinds for pure Gantt mouse hit-testing (M1 click-select).
+Shared metrics with paint via `GanttLayout` — no render-side side effects.
+"""
+@enum GanttHitKind begin
+    gantt_hit_none
+    gantt_hit_left_rail   # issue or epic label cells
+    gantt_hit_bar         # bar or diamond body
+    gantt_hit_post_bar    # title after bar (G4 region)
+    gantt_hit_axis        # period tab / tick row
+    gantt_hit_band        # sprint band row
+    gantt_hit_empty_chart # chart background / wash only
+end
+
+"""
+Result of `gantt_hit_test`. `issue_sel` is the 1-based index into
+`gantt_issue_rows` (same space as `m.gantt_sel`) — never a full-list index.
+"""
+struct GanttHit
+    kind::GanttHitKind
+    row_index::Union{Nothing,Int}      # into full gantt_rows (includes epics)
+    issue_id::Union{Nothing,String}    # Domain issue id when issue-related
+    issue_sel::Union{Nothing,Int}      # 1-based issue-only index
+    col::Union{Nothing,Int}            # 0-based chart col when in chart strip
+    date::Union{Nothing,Date}          # gantt_date_for_col when col in view strip
+end
+
+const _GANTT_HIT_NONE = GanttHit(gantt_hit_none, nothing, nothing, nothing, nothing, nothing)
+
+"Issue-only selection index for a full-list row, or nothing if not an issue row."
+function _gantt_issue_sel_at(rows::Vector{GanttRow}, row_index::Int)::Union{Nothing,Int}
+    (1 <= row_index <= length(rows)) || return nothing
+    rows[row_index].kind === :issue || return nothing
+    n = 0
+    for i in 1:row_index
+        rows[i].kind === :issue && (n += 1)
+    end
+    n
+end
+
+"""
+    gantt_hit_test(layout, rows, x, y) -> GanttHit
+
+Pure hit-test against a `GanttLayout` snapshot + the full paint row list.
+Coordinates are absolute terminal cells (same space as `MouseEvent.x/y` and
+`layout.area`). Does not mutate model state.
+"""
+function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
+                        x::Int, y::Int)::GanttHit
+    area = layout.area
+    (area.width < 1 || area.height < 1) && return _GANTT_HIT_NONE
+    if x < area.x || x >= area.x + area.width ||
+       y < area.y || y >= area.y + area.height
+        return _GANTT_HIT_NONE
+    end
+
+    # Band (sprint strip under title)
+    if y == layout.band_y
+        return GanttHit(gantt_hit_band, nothing, nothing, nothing, nothing, nothing)
+    end
+
+    # Axis rows (dual tab+tick, or single tick/axis)
+    if layout.has_ruler
+        if layout.has_dual
+            if y == layout.tab_y || y == layout.tick_y
+                return GanttHit(gantt_hit_axis, nothing, nothing, nothing, nothing, nothing)
+            end
+        elseif y == layout.tick_y
+            return GanttHit(gantt_hit_axis, nothing, nothing, nothing, nothing, nothing)
+        end
+    end
+
+    # Grid body
+    if layout.nshow > 0 && y >= layout.grid_y0 && y < layout.grid_y0 + layout.nshow
+        vis_i = y - layout.grid_y0 + 1
+        row_index = layout.row_start + vis_i - 1
+        (1 <= row_index <= length(rows)) || return _GANTT_HIT_NONE
+        row = rows[row_index]
+        issue_id = row.issue === nothing ? nothing : row.issue.id
+        issue_sel = _gantt_issue_sel_at(rows, row_index)
+
+        # Left rail (labels)
+        if x < layout.chart_x
+            return GanttHit(gantt_hit_left_rail, row_index, issue_id, issue_sel,
+                            nothing, nothing)
+        end
+
+        col = x - layout.chart_x  # 0-based into chart strip
+        if col < 0 || col >= layout.physical_ncols
+            return _GANTT_HIT_NONE
+        end
+        date = col < layout.view_ncols ?
+               gantt_date_for_col(layout.win_start, layout.dpc, col) : nothing
+
+        if row.kind === :epic
+            return GanttHit(gantt_hit_empty_chart, row_index, nothing, nothing,
+                            col < layout.view_ncols ? col : nothing, date)
+        end
+
+        # Issue: bar / diamond / post-bar (x-disjoint; post-bar after c1 + gap)
+        iss = row.issue
+        if iss !== nothing
+            tcol = gantt_point_col(layout.win_start, layout.dpc, Dates.today(),
+                                   layout.view_ncols)
+            if iss.start_date !== nothing && iss.due_date !== nothing
+                ext = gantt_bar_extent(layout.win_start, layout.dpc,
+                                       iss.start_date, iss.due_date, layout.view_ncols)
+                if ext !== nothing
+                    c0, c1 = ext
+                    if c0 <= col <= c1
+                        return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
+                                        col, date)
+                    end
+                    post = gantt_post_bar_label_geom(c0, c1, layout.label_ncols;
+                                                     gap = 1, tcol = tcol)
+                    if post !== nothing &&
+                       post.start <= col < post.start + post.max_chars
+                        return GanttHit(gantt_hit_post_bar, row_index, issue_id,
+                                        issue_sel, col, date)
+                    end
+                end
+            else
+                d = iss.start_date === nothing ? iss.due_date : iss.start_date
+                pcol = gantt_point_col(layout.win_start, layout.dpc, d, layout.view_ncols)
+                if pcol !== nothing
+                    if col == pcol
+                        return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
+                                        col, date)
+                    end
+                    post = gantt_post_bar_label_geom(pcol, pcol, layout.label_ncols;
+                                                     gap = 1, tcol = tcol)
+                    if post !== nothing &&
+                       post.start <= col < post.start + post.max_chars
+                        return GanttHit(gantt_hit_post_bar, row_index, issue_id,
+                                        issue_sel, col, date)
+                    end
+                end
+            end
+        end
+        return GanttHit(gantt_hit_empty_chart, row_index, issue_id, issue_sel,
+                        col < layout.view_ncols ? col : nothing, date)
+    end
+
+    _GANTT_HIT_NONE
+end
+
+"""
+    _handle_gantt_mouse!(m, evt)
+
+M1 click-select path. Left press on left-rail issue / bar / diamond / post-bar
+→ issue-only select + keep-in-view. Epic, axis, band, empty: no-op.
+Wheel / drag / open-on-click are intentionally out of scope (M2/M3).
+"""
+function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
+    (evt.button === mouse_left && evt.action === mouse_press) || return m
+    area = m.gantt_last_area
+    (area.width < 1 || area.height < 1) && return m
+    rows = gantt_rows(m)
+    lay = gantt_layout(m, area; rows = rows)
+    hit = gantt_hit_test(lay, rows, evt.x, evt.y)
+    if hit.kind === gantt_hit_left_rail
+        hit.row_index === nothing && return m
+        rows[hit.row_index].kind === :epic && return m
+        hit.issue_id === nothing && return m
+        return _gantt_select_issue_id!(m, hit.issue_id)
+    elseif hit.kind === gantt_hit_bar || hit.kind === gantt_hit_post_bar
+        hit.issue_id === nothing && return m
+        return _gantt_select_issue_id!(m, hit.issue_id)
+    end
+    m
 end
 
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
