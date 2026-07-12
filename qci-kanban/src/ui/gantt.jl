@@ -195,6 +195,9 @@ Paint issue key ending just before bar start `c0` (or diamond col), with `gap`
 blank columns between key and bar. Returns nothing when the full key cannot fit
 in chart cols `[0, c0)` (no bleed into left rail; no partial key). Clip edge is
 `view_ncols` (keys live in the bar window, not the day physical gutter).
+
+Note: plan PR-V optional `(c0, c1, …)` is simplified — pre-bar placement depends
+only on bar/diamond **start** `c0`, not `c1`.
 """
 function gantt_pre_bar_key_geom(c0::Int, view_ncols::Int;
                                 gap::Int=1, key_w::Int)
@@ -779,7 +782,7 @@ struct GanttLayout
     scale::Symbol
     win_start::Date
     is_narrow::Bool
-    compact::Bool
+    compact::Bool             # always false (PR-V); field retained for layout snapshot stability
     has_ruler::Bool
     has_dual::Bool
     has_footer::Bool
@@ -877,7 +880,7 @@ Shared metrics with paint via `GanttLayout` — no render-side side effects.
     gantt_hit_none
     gantt_hit_left_rail   # issue or epic label cells
     gantt_hit_bar         # bar or diamond body
-    gantt_hit_post_bar    # legacy post-bar geom region (not primary paint UX)
+    gantt_hit_post_bar    # legacy G4 region; paint no longer fills it (L1.6 keep kind)
     gantt_hit_pre_bar     # issue key immediately left of bar/diamond (PR-V)
     gantt_hit_axis        # period tab / tick row
     gantt_hit_band        # sprint band row
@@ -1369,14 +1372,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                         ch = (p >= 0.999 ? '█' : '▓')
                         set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
                     end
-                    # PR-V: in-bar key only when pre-bar key cannot fit; suppress if pre-bar paints.
-                    if bw >= 5 && pre_geoms[i] === nothing
-                        avail = max(1, bw - 2)
-                        lbl = fit_width(iss.key, avail)
-                        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
-                        set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
-                    end
-                    # bar end caps (unicode) LAST so they win over density/label at edge cells
+                    # In-bar key deferred to post-today identity pass (PR-V: key wins over ┃).
+                    # bar end caps (unicode) LAST so they win over density at edge cells
                     set_char!(buf, chart_x + c0, rowy, '▌', Style(; fg = bar_col))
                     if bw >= 2
                         set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
@@ -1402,7 +1399,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
-    # Use gantt_safe_char + textwidth guard (PR6). Painted before pre-bar keys so issue
+    # Use gantt_safe_char + textwidth guard (PR6). Painted before pre/in-bar keys so issue
     # identifiers win over today on collision (PR-V primary chart identity).
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
@@ -1420,8 +1417,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
-    # PR-V — pre-bar issue keys (immediately left of bar/diamond; after today so key wins).
-    # Full key only (geom already requires room); no post-bar titles.
+    # PR-V — chart identity keys after today: pre-bar key preferred; in-bar fallback.
+    # Pre-bar: immediately left of bar/diamond. In-bar: only when pre-bar cannot fit (bw≥5).
     for i in 1:nshow
         ri = row_start + i - 1
         ri > length(rows) && break
@@ -1430,18 +1427,38 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         iss = row.issue
         iss === nothing && continue
         rowy = grid_y0 + (i - 1)
-        geom = pre_geoms[i]
-        geom === nothing && continue
-        xx = chart_x + geom.start
-        xx > area.x + area.width - 1 && continue
-        maxc = min(geom.max_chars, area.x + area.width - xx)
-        maxc < 1 && continue
-        key = iss.key
-        lbl = fit_width(key, maxc)
-        isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=key_w and non-empty key ⇒ non-empty fit)
         selected = sel_issue !== nothing && iss.id == sel_issue.id
-        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
-        set_string!(buf, xx, rowy, lbl, lsty)
+        geom = pre_geoms[i]
+        if geom !== nothing
+            xx = chart_x + geom.start
+            xx > area.x + area.width - 1 && continue
+            maxc = min(geom.max_chars, area.x + area.width - xx)
+            maxc < 1 && continue
+            lbl = fit_width(iss.key, maxc)
+            isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=key_w and non-empty key ⇒ non-empty fit)
+            lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
+            set_string!(buf, xx, rowy, lbl, lsty)
+        elseif iss.start_date !== nothing && iss.due_date !== nothing
+            # In-bar fallback when pre-bar cannot fit (L1.4)
+            ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
+            if ext !== nothing
+                c0, c1 = ext
+                bw = c1 - c0 + 1
+                if bw >= 5
+                    avail = max(1, bw - 2)
+                    lbl = fit_width(iss.key, avail)
+                    lsty = selected ? Style(; fg = col_primary_hi(), bold = true) :
+                           Style(; fg = col_text_dim(), dim = true)
+                    set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
+                    # re-assert caps so key never eats bar ends
+                    bar_col = (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
+                    set_char!(buf, chart_x + c0, rowy, '▌',
+                              selected ? Style(; fg = col_primary_hi(), bold = true) :
+                                         Style(; fg = bar_col))
+                    set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                end
+            end
+        end
     end
 
     # PR5: selected item footer (when has_footer): exact dates, duration, status, priority (theming).

@@ -1573,8 +1573,12 @@ end
         g4!(m, 'G')
         g4!(m, 'z')  # week
         m.gantt_start = Dates.today() - Day(1)
-        tb = gantt_render(m; w = 100, h = 14)
-        r = row_with(tb, pt.key, 14)
+        w, h = 100, 14
+        area = T.Rect(1, 1, w, h)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        tb = gantt_render(m; w = w, h = h)
+        r = row_with(tb, pt.key, h)
         @test r !== nothing
         @test occursin("◆", r)
         @test occursin("DiamondTitleZ", r) || occursin("Diamond", r)
@@ -1593,13 +1597,17 @@ end
         key_start = key_end - kw + 1
         @test key_start >= 1
         @test String(chars[key_start:key_end]) == pt.key
-        # Selected pre-bar key uses col_primary_hi
-        loc = T.find_text(tb, pt.key)
-        @test loc !== nothing
-        # Prefer chart-side key (pre-bar) if left rail also has key — style at first hit is ok
-        # if left rail is selected (▸) it also uses sel style; assert bold primary on key cell
-        st = T.style_at(tb, loc.x, loc.y)
-        @test st.fg == G4.Theming.col_primary_hi() || st.bold === true
+        # Style on chart-side pre-bar cell (not left-rail find_text hit)
+        rd = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == pt.id, rows)
+        @test rd !== nothing
+        yd = lay.grid_y0 + (rd - lay.row_start)
+        pcol = G4.gantt_point_col(lay.win_start, lay.dpc, pt.due_date, lay.view_ncols)
+        @test pcol !== nothing
+        pre = G4.gantt_pre_bar_key_geom(pcol, lay.view_ncols; gap = 1, key_w = kw)
+        @test pre !== nothing
+        st = T.style_at(tb, lay.chart_x + pre.start, yd)
+        @test st.fg == G4.Theming.col_primary_hi()
+        @test st.bold === true
     end
 
     @testset "PR-V: in-bar key suppressed when pre-bar paints" begin
@@ -1634,6 +1642,47 @@ end
         key_start = key_end - kw + 1
         @test key_start >= 1
         @test String(chars[key_start:key_end]) == a.key
+    end
+
+    @testset "PR-V: in-bar key when pre-bar cannot fit (flush-left bar)" begin
+        # L1.4 positive path: c0≈0 → pre_geom nothing; bw≥5 → key painted inside bar.
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "InBarFlushEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "FlushInBarKey", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(12))
+        g4!(m, 'G')
+        g4!(m, 'z')  # week — full physical width
+        m.gantt_start = Dates.today() - Day(1)
+        @test m.gantt_scale == :week
+        w, h = 120, 14
+        area = T.Rect(1, 1, w, h)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
+        c0, c1 = ext
+        bw = c1 - c0 + 1
+        kw = textwidth(a.key)
+        pre = G4.gantt_pre_bar_key_geom(c0, lay.view_ncols; gap = 1, key_w = kw)
+        @test pre === nothing          # no room left of bar for full key
+        @test c0 < kw + 1              # flush / near-left start
+        @test bw >= max(5, kw + 2)     # wide enough that in-bar paints full key (avail = bw-2)
+        tb = gantt_render(m; w = w, h = h)
+        r = row_with(tb, a.key, h)
+        @test r !== nothing
+        chars = collect(r)
+        bar_ix = [i for (i, c) in enumerate(chars) if c in ('█', '▓', '▌', '▐')]
+        @test length(bar_ix) >= 5
+        # Key lives inside the bar body (not only left rail); caps included in span
+        interior = String(chars[minimum(bar_ix):maximum(bar_ix)])
+        @test occursin(a.key, interior)
+        # No pre-bar key immediately before first bar (gap-1 cell would hold key end)
+        first_bar = minimum(bar_ix)
+        if first_bar > kw + 1
+            before = String(chars[(first_bar - kw - 1):(first_bar - 1)])
+            @test !occursin(a.key, before)
+        end
     end
 end
 
