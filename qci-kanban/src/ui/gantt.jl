@@ -1111,18 +1111,179 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
     _GANTT_HIT_NONE
 end
 
+# ═══════════════════════════ DRAG-RESCHEDULE (M3) ════════════════════════════
+"""
+    gantt_drag_mode_for_bar(c0, c1, col) -> Symbol
+
+Edge vs body hit within a multi-day bar. When `bw ≥ 3`, left/right thirds are
+`:start` / `:end`; otherwise (and for the middle third) `:body`.
+"""
+function gantt_drag_mode_for_bar(c0::Int, c1::Int, col::Int)::Symbol
+    bw = c1 - c0 + 1
+    bw < 3 && return :body
+    third = max(1, bw ÷ 3)
+    col <= c0 + third - 1 && return :start
+    col >= c1 - third + 1 && return :end
+    :body
+end
+
+"""
+    gantt_compute_drag_preview(mode, win_start, dpc, origin_col, cur_col,
+                               orig_start, orig_due) -> (preview_start, preview_due)
+
+Pure date math for M3 shadow preview. Body preserves duration (shift both by
+Δcols·dpc). Edge modes move one endpoint; diamond (`:point`) moves the single
+existing date. Always clamps `start ≤ due` when both are present. Month scale
+snaps via `gantt_date_for_col` (dpc=7).
+"""
+function gantt_compute_drag_preview(mode::Symbol, win_start::Date, dpc::Int,
+                                    origin_col::Int, cur_col::Int,
+                                    orig_start::Union{Nothing,Date},
+                                    orig_due::Union{Nothing,Date})
+    if mode === :point
+        new_d = gantt_date_for_col(win_start, dpc, cur_col)
+        if orig_start !== nothing && orig_due === nothing
+            return (new_d, nothing)
+        elseif orig_due !== nothing && orig_start === nothing
+            return (nothing, new_d)
+        elseif orig_start !== nothing  # both set but treated as point — prefer start
+            return (new_d, nothing)
+        else
+            return (nothing, new_d)
+        end
+    end
+    if mode === :body
+        (orig_start === nothing || orig_due === nothing) && return (orig_start, orig_due)
+        delta = (cur_col - origin_col) * dpc
+        return (orig_start + Day(delta), orig_due + Day(delta))
+    end
+    if mode === :start
+        (orig_start === nothing || orig_due === nothing) && return (orig_start, orig_due)
+        ns = gantt_date_for_col(win_start, dpc, cur_col)
+        ns > orig_due && (ns = orig_due)
+        return (ns, orig_due)
+    end
+    if mode === :end
+        (orig_start === nothing || orig_due === nothing) && return (orig_start, orig_due)
+        nd = gantt_date_for_col(win_start, dpc, cur_col)
+        nd < orig_start && (nd = orig_start)
+        return (orig_start, nd)
+    end
+    (orig_start, orig_due)
+end
+
+"Paint dates for an issue: preview from `gantt_drag` when that issue is dragged."
+function _gantt_paint_dates(m::AppModel, iss::Domain.Issue)
+    drag = m.gantt_drag
+    if drag !== nothing && drag.issue_id == iss.id
+        return (drag.preview_start, drag.preview_due)
+    end
+    (iss.start_date, iss.due_date)
+end
+
+"Chart column under the pointer (0-based), clamped to the visible view strip."
+function _gantt_evt_col(lay::GanttLayout, x::Int)::Int
+    col = x - lay.chart_x
+    clamp(col, 0, max(0, lay.view_ncols - 1))
+end
+
+function _gantt_clear_drag!(m::AppModel)
+    m.gantt_drag = nothing
+    m
+end
+
+function _gantt_begin_drag!(m::AppModel, iss::Domain.Issue, mode::Symbol,
+                            origin_col::Int)
+    m.gantt_drag = (
+        issue_id = iss.id,
+        mode = mode,
+        origin_col = origin_col,
+        orig_start = iss.start_date,
+        orig_due = iss.due_date,
+        preview_start = iss.start_date,
+        preview_due = iss.due_date,
+    )
+    m
+end
+
+function _gantt_update_drag_preview!(m::AppModel, lay::GanttLayout, cur_col::Int)
+    drag = m.gantt_drag
+    drag === nothing && return m
+    ps, pd = gantt_compute_drag_preview(drag.mode, lay.win_start, lay.dpc,
+                                        drag.origin_col, cur_col,
+                                        drag.orig_start, drag.orig_due)
+    m.gantt_drag = (
+        issue_id = drag.issue_id,
+        mode = drag.mode,
+        origin_col = drag.origin_col,
+        orig_start = drag.orig_start,
+        orig_due = drag.orig_due,
+        preview_start = ps,
+        preview_due = pd,
+    )
+    m
+end
+
+"""
+Commit shadow drag dates via `Stores.update_issue!` when permission allows.
+Soft-refresh selection clamp; model issues are re-read from store on next paint.
+"""
+function _gantt_commit_drag!(m::AppModel)
+    drag = m.gantt_drag
+    drag === nothing && return m
+    m.gantt_drag = nothing
+    iss = Stores.get_issue(m.boardstore, drag.issue_id)
+    iss === nothing && return m
+    if !can!(m, :edit_issue; resource = iss)
+        # can! already set Permission denied / Role warning message
+        return m
+    end
+    # Skip no-op commits (press+release without movement).
+    if drag.preview_start == iss.start_date && drag.preview_due == iss.due_date
+        return m
+    end
+    Stores.update_issue!(m.boardstore, drag.issue_id;
+                         start_date = drag.preview_start,
+                         due_date = drag.preview_due)
+    # Soft-refresh: selection stays valid; next gantt_rows reads store.
+    m.gantt_sel = clamp(m.gantt_sel, 1, max(1, length(gantt_issue_rows(m))))
+    key = something(Stores.get_issue(m.boardstore, drag.issue_id), iss).key
+    _set_message!(m, "Rescheduled $(key)")
+    m
+end
+
 """
     _handle_gantt_mouse!(m, evt)
 
-M1 click-select + M2 wheel scroll. Left press on left-rail issue / bar /
-diamond / pre-bar key → issue-only select + keep-in-view. Epic, axis, band,
-empty: no-op for click. Wheel (`mouse_scroll_up`/`down` + `mouse_press`) over
-`gantt_last_area` → `_gantt_scroll!(±1)` (matches `h`/`l`); no zoom. Drag /
-open-on-click out of scope (M3).
+M1 click-select + M2 wheel scroll + M3 drag-reschedule. Left press on left-rail
+issue / pre-bar key → select. Left press on bar/diamond → select + start shadow
+drag when `can!(:edit_issue)` (else message, no drag). `mouse_drag` updates
+preview dates; `mouse_release` commits via store. Wheel over body → scroll.
 """
 function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
     area = m.gantt_last_area
     (area.width < 1 || area.height < 1) && return m
+
+    # M3 — active drag: drag updates preview; release commits; swallow wheel.
+    # A second left-press without release (synthetic tests / rare) commits first
+    # then falls through so the new press can select / start a new drag.
+    if m.gantt_drag !== nothing
+        if evt.button === mouse_left && evt.action === mouse_drag
+            rows = gantt_rows(m)
+            lay = gantt_layout(m, area; rows = rows)
+            return _gantt_update_drag_preview!(m, lay, _gantt_evt_col(lay, evt.x))
+        elseif evt.button === mouse_left && evt.action === mouse_release
+            return _gantt_commit_drag!(m)
+        elseif evt.button === mouse_left && evt.action === mouse_press
+            _gantt_commit_drag!(m)
+            # fall through to M1/M3 press handling below
+        elseif (evt.button === mouse_scroll_up || evt.button === mouse_scroll_down) &&
+               evt.action === mouse_press
+            return m  # swallow wheel during drag
+        else
+            return m  # other buttons / move: leave drag state alone
+        end
+    end
 
     # M2 — wheel horizontal scroll when pointer is over the cached gantt body.
     # Button is scroll_*; require mouse_press for parity with Tachikoma
@@ -1134,7 +1295,7 @@ function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
         return _gantt_scroll!(m, dir)
     end
 
-    # M1 — click-select
+    # M1 select + M3 drag start on left press
     (evt.button === mouse_left && evt.action === mouse_press) || return m
     rows = gantt_rows(m)
     lay = gantt_layout(m, area; rows = rows)
@@ -1144,10 +1305,34 @@ function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
         rows[hit.row_index].kind === :epic && return m
         hit.issue_id === nothing && return m
         return _gantt_select_issue_id!(m, hit.issue_id)
-    elseif hit.kind === gantt_hit_bar || hit.kind === gantt_hit_pre_bar ||
-           hit.kind === gantt_hit_post_bar
+    elseif hit.kind === gantt_hit_pre_bar || hit.kind === gantt_hit_post_bar
         hit.issue_id === nothing && return m
         return _gantt_select_issue_id!(m, hit.issue_id)
+    elseif hit.kind === gantt_hit_bar
+        hit.issue_id === nothing && return m
+        _gantt_select_issue_id!(m, hit.issue_id)
+        iss = Stores.get_issue(m.boardstore, hit.issue_id)
+        iss === nothing && return m
+        # Permission gate: deny starts no drag (message via can!).
+        if !can!(m, :edit_issue; resource = iss)
+            return m
+        end
+        # Determine mode from bar geometry at press col.
+        origin_col = hit.col === nothing ? _gantt_evt_col(lay, evt.x) : hit.col
+        mode = if iss.start_date !== nothing && iss.due_date !== nothing
+            ext = gantt_bar_extent(lay.win_start, lay.dpc, iss.start_date,
+                                   iss.due_date, lay.view_ncols)
+            # Hit-test only reports bar when extent is non-nothing for dual-date;
+            # defensive :body if geometry races with a window scroll mid-press.
+            if ext === nothing
+                :body  # COV_EXCL_LINE (defensive; hit_test requires on-window bar)
+            else
+                gantt_drag_mode_for_bar(ext[1], ext[2], origin_col)
+            end
+        else
+            :point  # diamond: single date
+        end
+        return _gantt_begin_drag!(m, iss, mode, origin_col)
     end
     m
 end
@@ -1381,9 +1566,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             lstyle = selected ? sel_style() : Style(; fg = col_text())
             prefix = selected ? "▸ " : "├ "
             # PR-V: pre-bar key geom (issue key left of bar/diamond); left rail always full id.
+            # M3: while dragging this issue, geometry follows shadow preview dates.
+            psd, pdd = _gantt_paint_dates(m, iss)
             pre_geom = nothing
-            if iss.start_date !== nothing && iss.due_date !== nothing
-                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
+            if psd !== nothing && pdd !== nothing
+                ext = gantt_bar_extent(win_start, dpc, psd, pdd, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
                     pre_geom = gantt_pre_bar_key_geom(c0, view_ncols;
@@ -1397,12 +1584,15 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     end
                 end
             else
-                d = iss.start_date === nothing ? iss.due_date : iss.start_date
+                d = psd === nothing ? pdd : psd
                 col = gantt_point_col(win_start, dpc, d, view_ncols)
                 if col !== nothing
                     pre_geom = gantt_pre_bar_key_geom(col, view_ncols;
                                                       gap = 1, key_w = textwidth(iss.key))
-                    push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
+                    # Shadow diamond uses primary_hi when this issue is mid-drag.
+                    dcol = (m.gantt_drag !== nothing && m.gantt_drag.issue_id == iss.id) ?
+                           col_primary_hi() : priority_color(iss.priority)
+                    push!(diamonds, (chart_x + col, rowy, dcol))
                 end
             end
             pre_geoms[i] = pre_geom
@@ -1478,33 +1668,38 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         rowy = grid_y0 + (i - 1)
         if row.kind === :issue
             iss = row.issue
-            if iss !== nothing && iss.start_date !== nothing && iss.due_date !== nothing
-                ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
-                if ext !== nothing
-                    c0, c1 = ext
-                    # explicit bounds guard (mirrors ruler/band: xx > ... continue); though gantt_bar_extent clamps
-                    if chart_x + c0 < chart_x || chart_x + c1 > area.x + area.width - 1
-                        continue  # COV_EXCL_LINE (defensive; extent always clamps c0/c1 valid for current render paths; see review fix)
-                    end
-                    selected = sel_issue !== nothing && iss.id == sel_issue.id
-                    bar_col = (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
-                    bw = c1 - c0 + 1
-                    # status density fill (partial ▓ or full █ for Done) first
-                    # NOTE (bichrome warning addressed by doc): canvas always uses col_primary() cyan for entire base █ track (per design "Keep base █ from canvas").
-                    # Only prefix (nfill) + ends get bar_col tint; suffix remains cyan unless overwritten by label/caps. This is intentional augmentation, not full recolor.
-                    # Uniform suffix tint would require additional sets over canvas result (not done for minimal + fidelity to "keep base").
-                    p = status_progress(iss)
-                    nfill = max(0, floor(Int, bw * p))
-                    for k in 0:(nfill - 1)
-                        cc = c0 + k
-                        ch = (p >= 0.999 ? '█' : '▓')
-                        set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
-                    end
-                    # In-bar key deferred to post-today identity pass (PR-V: key wins over ┃).
-                    # bar end caps (unicode) LAST so they win over density at edge cells
-                    set_char!(buf, chart_x + c0, rowy, '▌', Style(; fg = bar_col))
-                    if bw >= 2
-                        set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+            if iss !== nothing
+                psd, pdd = _gantt_paint_dates(m, iss)
+                if psd !== nothing && pdd !== nothing
+                    ext = gantt_bar_extent(win_start, dpc, psd, pdd, view_ncols)
+                    if ext !== nothing
+                        c0, c1 = ext
+                        # explicit bounds guard (mirrors ruler/band: xx > ... continue); though gantt_bar_extent clamps
+                        if chart_x + c0 < chart_x || chart_x + c1 > area.x + area.width - 1
+                            continue  # COV_EXCL_LINE (defensive; extent always clamps c0/c1 valid for current render paths; see review fix)
+                        end
+                        selected = sel_issue !== nothing && iss.id == sel_issue.id
+                        dragging = m.gantt_drag !== nothing && m.gantt_drag.issue_id == iss.id
+                        bar_col = dragging ? col_primary_hi() :
+                                  (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
+                        bw = c1 - c0 + 1
+                        # status density fill (partial ▓ or full █ for Done) first
+                        # NOTE (bichrome warning addressed by doc): canvas always uses col_primary() cyan for entire base █ track (per design "Keep base █ from canvas").
+                        # Only prefix (nfill) + ends get bar_col tint; suffix remains cyan unless overwritten by label/caps. This is intentional augmentation, not full recolor.
+                        # Uniform suffix tint would require additional sets over canvas result (not done for minimal + fidelity to "keep base").
+                        p = status_progress(iss)
+                        nfill = max(0, floor(Int, bw * p))
+                        for k in 0:(nfill - 1)
+                            cc = c0 + k
+                            ch = (p >= 0.999 ? '█' : '▓')
+                            set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
+                        end
+                        # In-bar key deferred to post-today identity pass (PR-V: key wins over ┃).
+                        # bar end caps (unicode) LAST so they win over density at edge cells
+                        set_char!(buf, chart_x + c0, rowy, '▌', Style(; fg = bar_col))
+                        if bw >= 2
+                            set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                        end
                     end
                 end
             end
@@ -1566,24 +1761,29 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=key_w and non-empty key ⇒ non-empty fit)
             lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
             set_string!(buf, xx, rowy, lbl, lsty)
-        elseif iss.start_date !== nothing && iss.due_date !== nothing
-            # In-bar fallback when pre-bar cannot fit (L1.4)
-            ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
-            if ext !== nothing
-                c0, c1 = ext
-                bw = c1 - c0 + 1
-                if bw >= 5
-                    avail = max(1, bw - 2)
-                    lbl = fit_width(iss.key, avail)
-                    lsty = selected ? Style(; fg = col_primary_hi(), bold = true) :
-                           Style(; fg = col_text_dim(), dim = true)
-                    set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
-                    # re-assert caps so key never eats bar ends
-                    bar_col = (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
-                    set_char!(buf, chart_x + c0, rowy, '▌',
-                              selected ? Style(; fg = col_primary_hi(), bold = true) :
-                                         Style(; fg = bar_col))
-                    set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+        else
+            # In-bar fallback when pre-bar cannot fit (L1.4); uses paint dates (M3 preview).
+            psd, pdd = _gantt_paint_dates(m, iss)
+            if psd !== nothing && pdd !== nothing
+                ext = gantt_bar_extent(win_start, dpc, psd, pdd, view_ncols)
+                if ext !== nothing
+                    c0, c1 = ext
+                    bw = c1 - c0 + 1
+                    if bw >= 5
+                        avail = max(1, bw - 2)
+                        lbl = fit_width(iss.key, avail)
+                        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) :
+                               Style(; fg = col_text_dim(), dim = true)
+                        set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
+                        # re-assert caps so key never eats bar ends
+                        dragging = m.gantt_drag !== nothing && m.gantt_drag.issue_id == iss.id
+                        bar_col = dragging ? col_primary_hi() :
+                                  (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
+                        set_char!(buf, chart_x + c0, rowy, '▌',
+                                  selected ? Style(; fg = col_primary_hi(), bold = true) :
+                                             Style(; fg = bar_col))
+                        set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                    end
                 end
             end
         end

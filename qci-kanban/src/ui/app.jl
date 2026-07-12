@@ -71,6 +71,9 @@ mutable struct AppModel <: Model
     gantt_scale::Symbol                # :day (1 day/col) | :week (1 day/col) | :month (7 days/col)
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
     gantt_last_area::Rect              # last content Rect passed to render_gantt! (G4.1; zero default)
+    # M3 drag-reschedule shadow state (nothing | NamedTuple with issue_id, mode,
+    # origin_col, orig_start/due, preview_start/due). Preview only until release.
+    gantt_drag::Any
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
@@ -144,7 +147,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  _make_input(), _make_input(),
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
-                 td, :day, 1, Rect(0, 0, 0, 0),
+                 td, :day, 1, Rect(0, 0, 0, 0), nothing,
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
@@ -485,6 +488,12 @@ function update!(m::AppModel, evt::KeyEvent)
         return m           # swallow this key
     end
     m.last_input_at = Dates.now(UTC)
+    # M3: Esc cancels an in-progress gantt bar drag without store commit.
+    if m.gantt_drag !== nothing && evt.key === :escape && m.modal === :none
+        m.gantt_drag = nothing
+        m.message = "Drag cancelled"
+        return m
+    end
     disp = route_to_focus!(m.focus, evt)      # step 1: focused editor wins
     disp === :consumed && return m
     act = lookup_action(context_stack(m), evt)  # steps 2-4 via keymap
@@ -497,8 +506,8 @@ end
     update!(m::AppModel, evt::MouseEvent)
 
 Mouse path (not KEYMAP): idle parity, then Gantt-only handling (M1 click-select
-+ M2 wheel scroll) when logged in, no modal, view is `:gantt`, and
-`gantt_last_area` is non-empty.
++ M2 wheel scroll + M3 drag-reschedule) when logged in, no modal, view is
+`:gantt`, and `gantt_last_area` is non-empty.
 """
 function update!(m::AppModel, evt::MouseEvent)
     m.tick += 1
@@ -714,6 +723,7 @@ end
 function _switch_view!(m::AppModel, v::Symbol)
     m.view = v
     m.modal = :none
+    m.gantt_drag = nothing   # M3: never carry shadow drag across views
     m.message = "$(VIEW_TITLES[v]) view"
     v === :calendar && _cal_init!(m)
     v === :gantt && _gantt_init!(m)
@@ -824,6 +834,7 @@ function _logout!(m::AppModel)
     # Hygiene: drop modal/confirm/edit so post-idle (and normal logout) model
     # state is clean until next login (render already short-circuits unauth).
     m.modal = :none
+    m.gantt_drag = nothing
     m.confirm_kind = :none
     m.confirm_target = nothing
     m.card_issue_id = nothing

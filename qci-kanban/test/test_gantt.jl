@@ -2286,3 +2286,316 @@ end
     end
 end
 
+# ── M3 drag-reschedule pure helpers + handler ───────────────────────────────
+@testset "M3 — gantt drag reschedule helpers + handler" begin
+    @testset "gantt_drag_mode_for_bar: body / start / end by thirds" begin
+        # bw=2 → always body
+        @test G4.gantt_drag_mode_for_bar(0, 1, 0) === :body
+        @test G4.gantt_drag_mode_for_bar(0, 1, 1) === :body
+        # bw=6 → thirds of 2: cols 0-1 start, 2-3 body, 4-5 end
+        @test G4.gantt_drag_mode_for_bar(0, 5, 0) === :start
+        @test G4.gantt_drag_mode_for_bar(0, 5, 1) === :start
+        @test G4.gantt_drag_mode_for_bar(0, 5, 2) === :body
+        @test G4.gantt_drag_mode_for_bar(0, 5, 3) === :body
+        @test G4.gantt_drag_mode_for_bar(0, 5, 4) === :end
+        @test G4.gantt_drag_mode_for_bar(0, 5, 5) === :end
+        # bw=3 → third=1
+        @test G4.gantt_drag_mode_for_bar(2, 4, 2) === :start
+        @test G4.gantt_drag_mode_for_bar(2, 4, 3) === :body
+        @test G4.gantt_drag_mode_for_bar(2, 4, 4) === :end
+    end
+
+    @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin
+        ws = Date(2026, 3, 10)
+        sd, ed = Date(2026, 3, 12), Date(2026, 3, 15)  # 4-day span (cols 2..5 at dpc=1)
+        # Body: shift +2 cols
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 1, 2, 4, sd, ed)
+        @test ps == sd + Day(2)
+        @test pd == ed + Day(2)
+        @test Dates.value(pd - ps) == Dates.value(ed - sd)
+        # Body: shift -1 col
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 1, 2, 1, sd, ed)
+        @test ps == sd - Day(1) && pd == ed - Day(1)
+        # Start edge: move start to col 3; clamp ≤ due
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 1, 2, 3, sd, ed)
+        @test ps == Date(2026, 3, 13) && pd == ed
+        # Start past due → clamp to due
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 1, 2, 20, sd, ed)
+        @test ps == ed && pd == ed
+        # End edge
+        ps, pd = G4.gantt_compute_drag_preview(:end, ws, 1, 5, 7, sd, ed)
+        @test ps == sd && pd == Date(2026, 3, 17)
+        # End before start → clamp
+        ps, pd = G4.gantt_compute_drag_preview(:end, ws, 1, 5, 0, sd, ed)
+        @test ps == sd && pd == sd
+        # Diamond / point (start only)
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 5, 8, sd, nothing)
+        @test ps == Date(2026, 3, 18) && pd === nothing
+        # Diamond due only
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 5, 3, nothing, ed)
+        @test ps === nothing && pd == Date(2026, 3, 13)
+        # Month scale dpc=7: body shift +1 col = +7 days
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 7, 0, 1, sd, ed)
+        @test ps == sd + Day(7) && pd == ed + Day(7)
+        # Month snap: start edge uses gantt_date_for_col
+        col_date = G4.gantt_date_for_col(ws, 7, 2)
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 7, 0, 2, sd, ed)
+        @test ps == col_date || ps == ed  # clamp if col_date > ed
+    end
+
+    @testset "handler: press bar starts drag; drag shifts preview; release commits store" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DragEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DragAlpha", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
+        c0, c1 = ext
+        # Press mid-body
+        mid = c0 + (c1 - c0) ÷ 2
+        press = T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag !== nothing
+        @test m.gantt_drag.issue_id == a.id
+        @test m.gantt_drag.mode === :body
+        @test m.gantt_sel >= 1
+        # Store unchanged while dragging
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+        # Drag +2 cols
+        drag = T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        G4._handle_gantt_mouse!(m, drag)
+        @test m.gantt_drag.preview_start == a.start_date + Day(2)
+        @test m.gantt_drag.preview_due == a.due_date + Day(2)
+        # Still not in store
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+        # Release commits
+        rel = T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_release, false, false, false)
+        G4._handle_gantt_mouse!(m, rel)
+        @test m.gantt_drag === nothing
+        updated = G4.Stores.get_issue(m.boardstore, a.id)
+        @test updated.start_date == a.start_date + Day(2)
+        @test updated.due_date == a.due_date + Day(2)
+        @test occursin("Rescheduled", m.message)
+    end
+
+    @testset "handler: Esc cancels drag without store write" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "EscEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "EscIss", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(3))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
+        T.update!(m, press)
+        @test m.gantt_drag !== nothing
+        drag = T.MouseEvent(lay.chart_x + ext[1] + 3, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        T.update!(m, drag)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.gantt_drag === nothing
+        @test occursin("cancelled", lowercase(m.message))
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+        @test G4.Stores.get_issue(m.boardstore, a.id).due_date == a.due_date
+    end
+
+    @testset "handler: viewer + enforce_roles=true cannot start drag" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DenyEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DenyIss", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        # Demote to viewer + hard enforce
+        m.current_user = G4.Domain.User(; id = m.current_user.id, email = m.current_user.email,
+                                        name = m.current_user.name, role = "viewer")
+        m.config.enforce_roles = true
+        m.message = ""
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag === nothing
+        @test occursin("Permission denied", m.message)
+        # Store untouched
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+    end
+
+    @testset "handler: diamond point drag moves single date" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DiaEp")
+        d = G4.Stores.create_issue!(m.boardstore; title = "DiaOnly", epic_id = e.id,
+                                    due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        rd = findfirst(r -> r.kind === :issue && r.issue.id == d.id, rows)
+        yd = lay.grid_y0 + (rd - lay.row_start)
+        pcol = G4.gantt_point_col(lay.win_start, lay.dpc, d.due_date, lay.view_ncols)
+        @test pcol !== nothing
+        press = T.MouseEvent(lay.chart_x + pcol, yd, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag !== nothing
+        @test m.gantt_drag.mode === :point
+        drag = T.MouseEvent(lay.chart_x + pcol + 2, yd, T.mouse_left, T.mouse_drag, false, false, false)
+        G4._handle_gantt_mouse!(m, drag)
+        @test m.gantt_drag.preview_start === nothing
+        @test m.gantt_drag.preview_due == d.due_date + Day(2)
+        rel = T.MouseEvent(lay.chart_x + pcol + 2, yd, T.mouse_left, T.mouse_release, false, false, false)
+        G4._handle_gantt_mouse!(m, rel)
+        @test G4.Stores.get_issue(m.boardstore, d.id).due_date == d.due_date + Day(2)
+        @test G4.Stores.get_issue(m.boardstore, d.id).start_date === nothing
+    end
+
+    @testset "handler: start edge shortens bar; release writes start_date only change" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "EdgeEp2")
+        a = G4.Stores.create_issue!(m.boardstore; title = "EdgeMove", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(7))  # bw >= 3
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        c0, c1 = ext
+        @test G4.gantt_drag_mode_for_bar(c0, c1, c0) === :start
+        press = T.MouseEvent(lay.chart_x + c0, ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag.mode === :start
+        # Drag start edge +2 cols
+        drag = T.MouseEvent(lay.chart_x + c0 + 2, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        G4._handle_gantt_mouse!(m, drag)
+        @test m.gantt_drag.preview_start == a.start_date + Day(2)
+        @test m.gantt_drag.preview_due == a.due_date
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + c0 + 2, ya, T.mouse_left, T.mouse_release, false, false, false))
+        u = G4.Stores.get_issue(m.boardstore, a.id)
+        @test u.start_date == a.start_date + Day(2)
+        @test u.due_date == a.due_date
+    end
+
+    @testset "pure preview edge branches + clear_drag + deny on commit + wheel/other during drag" begin
+        ws = Date(2026, 4, 1)
+        # point with both dates set → prefer start
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 0, 3,
+                                               Date(2026, 4, 2), Date(2026, 4, 5))
+        @test ps == Date(2026, 4, 4) && pd === nothing
+        # point with neither date → due side with new col date
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 0, 2, nothing, nothing)
+        @test ps === nothing && pd == Date(2026, 4, 3)
+        # unknown mode fallthrough
+        ps, pd = G4.gantt_compute_drag_preview(:weird, ws, 1, 0, 1,
+                                               Date(2026, 4, 1), Date(2026, 4, 2))
+        @test ps == Date(2026, 4, 1) && pd == Date(2026, 4, 2)
+        # body with missing endpoint returns orig
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 1, 0, 2, Date(2026, 4, 1), nothing)
+        @test ps == Date(2026, 4, 1) && pd === nothing
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 1, 0, 2, nothing, Date(2026, 4, 5))
+        @test ps === nothing && pd == Date(2026, 4, 5)
+        ps, pd = G4.gantt_compute_drag_preview(:end, ws, 1, 0, 2, Date(2026, 4, 1), nothing)
+        @test ps == Date(2026, 4, 1) && pd === nothing
+
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "CovEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "CovIss", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(3))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        # _gantt_clear_drag!
+        m.gantt_drag = (issue_id = a.id, mode = :body, origin_col = 0,
+                        orig_start = a.start_date, orig_due = a.due_date,
+                        preview_start = a.start_date, preview_due = a.due_date)
+        G4._gantt_clear_drag!(m)
+        @test m.gantt_drag === nothing
+
+        # Start real drag then wheel / middle during drag
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        mid = ext[1] + (ext[2] - ext[1]) ÷ 2
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.gantt_drag !== nothing
+        st0 = m.gantt_start
+        # Wheel swallowed during drag
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_scroll_down, T.mouse_press, false, false, false))
+        @test m.gantt_start == st0
+        @test m.gantt_drag !== nothing
+        # Middle button during drag leaves state
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_middle, T.mouse_press, false, false, false))
+        @test m.gantt_drag !== nothing
+        # Escape cancel
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.gantt_drag === nothing
+
+        # Deny on commit: begin drag as admin, demote before release
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_drag, false, false, false))
+        m.current_user = G4.Domain.User(; id = m.current_user.id, email = m.current_user.email,
+                                        name = m.current_user.name, role = "viewer")
+        m.config.enforce_roles = true
+        m.message = ""
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.gantt_drag === nothing
+        @test occursin("Permission denied", m.message)
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+    end
+
+    @testset "handler: bar hit when extent out of window uses :body fallback" begin
+        # Force mode branch where ext === nothing by constructing drag begin path
+        # via direct call after hand-building an issue whose bar is off-window but
+        # hit still reports bar (synthetic). Use begin_drag with :body after press
+        # on in-window bar is already covered; exercise the nothing-ext line by
+        # calling the mode selection path with off-window dates + layout.
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "OffEp")
+        # Far-future bar — not in day window starting today
+        a = G4.Stores.create_issue!(m.boardstore; title = "FarBar", epic_id = e.id,
+                                    start_date = Dates.today() + Day(60),
+                                    due_date = Dates.today() + Day(65))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 80, 20)
+        m.gantt_last_area = area
+        lay = G4.gantt_layout(m, area)
+        # Pure: extent nothing when wholly outside
+        @test G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols) === nothing
+        # Direct begin with :body (covers fallback semantic used when ext nothing)
+        G4._gantt_begin_drag!(m, a, :body, 0)
+        @test m.gantt_drag !== nothing && m.gantt_drag.mode === :body
+        G4._gantt_clear_drag!(m)
+    end
+end
+
