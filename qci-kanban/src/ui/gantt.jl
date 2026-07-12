@@ -718,7 +718,7 @@ bar **start**. Rows and columns are 0-based chart-relative indices.
 
 Box-drawing: `─` `│` `╮` `╯` `╰` `╭` `▶` `◀`. When `narrow`, maps via
 `gantt_safe_char`. Caller clips to the visible window and paints after bars,
-before pre-bar keys.
+before post-bar keys.
 """
 function gantt_link_segments(from_row::Int, to_row::Int, c_from::Int, c_to::Int;
                              narrow::Bool = false)
@@ -1157,8 +1157,8 @@ Shared metrics with paint via `GanttLayout` — no render-side side effects.
     gantt_hit_none
     gantt_hit_left_rail   # issue or epic label cells
     gantt_hit_bar         # bar or diamond body
-    gantt_hit_post_bar    # legacy G4 region; paint no longer fills it (L1.6 keep kind)
-    gantt_hit_pre_bar     # issue key immediately left of bar/diamond (PR-V)
+    gantt_hit_post_bar    # issue key immediately right of bar/diamond (primary chart identity)
+    gantt_hit_pre_bar     # legacy left-of-bar region (unused by paint; kept for enum stability)
     gantt_hit_axis        # period tab / tick row
     gantt_hit_band        # sprint band row
     gantt_hit_empty_chart # chart background / wash only

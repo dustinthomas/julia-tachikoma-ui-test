@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════
 # BDD acceptance for Gantt mouse MVP M1–M3
 #   M1 click-to-select via pure hit-test:
-#   • Left-press on left-rail / bar / pre-bar key selects issue (issue-only gantt_sel)
+#   • Left-press on left-rail / bar / post-bar key selects issue (issue-only gantt_sel)
 #   • Epic header / axis / empty area: no-op
 #   • Click does NOT open detail modal (Enter/v remain open path)
 #   • Keyboard j/k/Enter still work after mouse select
