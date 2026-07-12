@@ -20,6 +20,45 @@ p4maxrun(s, ch) = (best = 0; cur = 0; for c in s; cur = c == ch ? cur + 1 : 0; b
 # This keeps the geometry BDD stable across density fill changes for In Progress / Review bars.
 p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c == '▌' || c == '▐'; cur += 1; best = max(best, cur); else; cur = 0; end; end; best)
 
+# G3: dual-row axis at h≥12 shifts tick/grid rows; scan instead of hard-coded offsets.
+p4_screen_blob(tb; h=16) = join([something(T.row_text(tb, i), "") for i in 1:h], "\n")
+function _p4_is_axisish_row(rt::AbstractString)
+    occursin("GANTT", rt) && return false
+    occursin(r"→", rt) && occursin(r"•", rt) && return false
+    occursin(r"QCI-\d+\s*:", rt) && return false
+    true
+end
+function p4_digit_dense_row(tb; h=16, min_digits=4)
+    # Prefer axis strip under ▼ so footer/title digits cannot beat tick row (review Issue 1).
+    function densest(rows)
+        best = nothing; bestn = 0
+        for i in rows
+            (i < 1 || i > h) && continue
+            rt = T.row_text(tb, i)
+            rt === nothing && continue
+            !_p4_is_axisish_row(rt) && continue
+            n = count(isdigit, rt)
+            if n >= min_digits && n > bestn
+                best = rt; bestn = n
+            end
+        end
+        best
+    end
+    loc = T.find_text(tb, "▼")
+    if loc !== nothing
+        got = densest([loc.y + 1, loc.y + 2])
+        got !== nothing && return got
+    end
+    densest(1:h)
+end
+function p4_today_vert_at(tb, x; from_y=1, h=20)
+    for y in (from_y + 1):h
+        ch = T.char_at(tb, x, y)
+        ch in ('┃', '│', '|') && return ch
+    end
+    return nothing
+end
+
 @testset "FEATURE: Phase 4 timeline (BDD acceptance)" begin
 
     @testset "Given a month with issues due on specific days" begin
@@ -101,7 +140,9 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         P4.Stores.create_issue!(m.boardstore; title = "Ongoing", epic_id = e.id,
                                 start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(2))
         p4!(m, 'G')
-        w = 120; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
+        w = 120
+        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         td = Dates.today()
         cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         expected_col = P4.gantt_point_col(cl_start, 1, td, ncols)
@@ -111,13 +152,16 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        # position of marker verified via draw formula (adaptive left_w from PR2/6); use semantic
+        # position of marker verified via draw formula (adaptive left_w from PR2/6 + G4 compact); scan grid below ▼
+        # (G3 dual-row axis shifts band→grid offset — no fixed loc.y+2)
         drawn_x = 1 + left_w + expected_col
-        @test T.char_at(tb, drawn_x, (loc !== nothing ? loc.y : 2) + 2) in ('┃','│','|',' ')
-        # ruler present (h=20>=8); today vertical semantic (┃ or │)
-        @test (T.find_text(tb, "┬") !== nothing || T.find_text(tb, "Mar") !== nothing || T.find_text(tb, "202") !== nothing)
-        chv = T.char_at(tb, drawn_x, (loc !== nothing ? loc.y : 2) + 2)
-        @test chv == '┃' || chv == '│' || chv == '|' || chv == ' '  # space guard for edge cases in verify
+        chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
+        @test chv in ('┃', '│', '|')
+        # ruler / period chrome present (h=20≥12 dual tabs or ticks)
+        blob = p4_screen_blob(tb; h = 20)
+        @test (T.find_text(tb, "┬") !== nothing || occursin("Mar", blob) || occursin("202", blob) ||
+               occursin(Dates.monthname(td), blob) || occursin(r"W\d+", blob))
+        @test chv == '┃' || chv == '│' || chv == '|'
     end
 
     @testset "Given an issue spanning today When rendered wide at day Then day cap applies (end <= today+14)" begin
@@ -126,7 +170,9 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         P4.Stores.create_issue!(m.boardstore; title = "C", epic_id = e.id,
                                 start_date = Dates.today() - Day(3), due_date = Dates.today() + Day(3))
         p4!(m, 'G')
-        w = 100; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
+        w = 100
+        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         td = Dates.today()
         cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         tcol = P4.gantt_point_col(cl_start, 1, td, ncols)
@@ -138,7 +184,8 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
         drawn_x = 1 + left_w + tcol
-        @test T.char_at(tb, drawn_x, (loc !== nothing ? loc.y : 5) + 2) in ('┃','│','|',' ')
+        chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
+        @test chv in ('┃', '│', '|')
     end
 
     @testset "Given day view When scrolled right Then scroll pins future at cap" begin
@@ -168,7 +215,9 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
                                 start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(40))
         p4!(m, 'G')
         # re-render after 'G' update! (discipline, matching z-cycle pattern in same file)
-        w = 120; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
+        w = 120
+        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         tb = T.TestBackend(w, 16); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 16))
         p4!(m, 'z')  # day -> week
@@ -192,10 +241,15 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         tb = T.TestBackend(90, 12); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 90, 12))
         @test T.find_text(tb, "[day]") !== nothing
-        axis = T.row_text(tb, 3)
+        # h≥12 dual: scan for digit-dense tick row (not fixed row 3 — that is tabs)
+        axis = p4_digit_dense_row(tb; h = 12, min_digits = 8)
         @test axis !== nothing
         @test count(isdigit, axis) >= 8
         @test occursin(string(Dates.day(Dates.today() - Day(1))), axis)
+        # Full month name tab at dual height
+        blob = p4_screen_blob(tb; h = 12)
+        td = Dates.today()
+        @test occursin(Dates.monthname(td), blob) || occursin(Dates.format(td, "U"), blob)
         # Pure helpers used by render also expose period + tick APIs
         ticks = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 1, 14)
         @test length([t for t in ticks if occursin(r"^\d{1,2}$", t[2])]) >= 7
@@ -215,22 +269,25 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         tbw = T.TestBackend(100, 12); T.reset!(tbw.buf)
         P4.render_gantt!(m, tbw.buf, T.Rect(1, 1, 100, 12))
         @test T.find_text(tbw, "[week]") !== nothing
-        aw = T.row_text(tbw, 3)
+        aw = p4_digit_dense_row(tbw; h = 12, min_digits = 4)
         @test aw !== nothing
         chart_w = aw[min(end, 20):end]
         @test count(isdigit, chart_w) >= 4
         @test count(==(' '), chart_w) >= 6
+        @test occursin(r"W\d+", p4_screen_blob(tbw; h = 12))
         # Month
         p4!(m, 'z')
         @test m.gantt_scale == :month
         tbm = T.TestBackend(100, 12); T.reset!(tbm.buf)
         P4.render_gantt!(m, tbm.buf, T.Rect(1, 1, 100, 12))
         @test T.find_text(tbm, "[month]") !== nothing
-        am = T.row_text(tbm, 3)
+        am = p4_digit_dense_row(tbm; h = 12, min_digits = 3)
         @test am !== nothing
         chart_m = am[min(end, 20):end]
         @test count(isdigit, chart_m) >= 3
         @test count(==(' '), chart_m) >= 6
+        mblob = p4_screen_blob(tbm; h = 12)
+        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December", mblob)
         # Pure contract: wide week + month ticks leave gaps (not a digit wall)
         wt = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 1, 60)
         @test any(begin
@@ -239,6 +296,29 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         end for i in 2:length(wt))
         mt = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 7, 40)
         @test length(mt) < 40
+    end
+
+    @testset "Given Gantt When z cycles scale at h≥12 Then full period tab strings appear" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "PeriodTabs")
+        P4.Stores.create_issue!(m.boardstore; title = "PT", epic_id = e.id,
+                                start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(25))
+        p4!(m, 'G')
+        @test m.view == :gantt && m.gantt_scale == :day
+        td = Dates.today()
+        tb = T.TestBackend(110, 14); T.reset!(tb.buf)
+        P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 110, 14))
+        day_blob = p4_screen_blob(tb; h = 14)
+        @test occursin(Dates.monthname(td), day_blob) || occursin(Dates.format(td, "U"), day_blob)
+        p4!(m, 'z'); @test m.gantt_scale == :week
+        tbw = T.TestBackend(110, 14); T.reset!(tbw.buf)
+        P4.render_gantt!(m, tbw.buf, T.Rect(1, 1, 110, 14))
+        @test occursin(r"W\d+", p4_screen_blob(tbw; h = 14))
+        p4!(m, 'z'); @test m.gantt_scale == :month
+        tbm = T.TestBackend(110, 14); T.reset!(tbm.buf)
+        P4.render_gantt!(m, tbm.buf, T.Rect(1, 1, 110, 14))
+        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December",
+                       p4_screen_blob(tbm; h = 14))
     end
 
     @testset "Given an off-window future issue When j selects it Then keep-in-view reveals its bar" begin
@@ -317,6 +397,37 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
         @test p4bar_run(r1) >= 1 || occursin("▌", r1) || occursin("█", r1) || occursin("▓", r1)
         title = T.row_text(tb1, 1)
         @test title !== nothing && occursin("GANTT", title)
+    end
+
+    @testset "Given a short Gantt bar When rendered Then distinctive title is visible after the bar" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "PostBarBDD")
+        a = P4.Stores.create_issue!(m.boardstore; title = "UniqueBDDPostLabel", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(3))
+        p4!(m, 'G')
+        # Week scale: post-bar uses full chart width (label_ncols == view)
+        p4!(m, 'z')
+        @test m.view == :gantt && m.gantt_scale == :week
+        tb = T.TestBackend(120, 16); T.reset!(tb.buf)
+        P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 16))
+        @test T.find_text(tb, "UniqueBDDPostLabel") !== nothing
+        r = nothing
+        for i in 1:16
+            rt = T.row_text(tb, i)
+            rt !== nothing && occursin(a.key, rt) && (r = rt; break)
+        end
+        @test r !== nothing
+        @test occursin("UniqueBDDPostLabel", r)
+        last_bar = 0
+        for (i, c) in enumerate(r)
+            if c == '█' || c == '▓' || c == '▌' || c == '▐'
+                last_bar = i
+            end
+        end
+        @test last_bar > 0
+        ti = findfirst("UniqueBDDPostLabel", r)
+        @test ti !== nothing && first(ti) > last_bar
     end
 
     @testset "No-conflict: printable chars in the calendar create modal edit only the field" begin

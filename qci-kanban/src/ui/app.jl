@@ -70,6 +70,7 @@ mutable struct AppModel <: Model
     gantt_start::Date                  # left edge (earliest visible date) of the Gantt window
     gantt_scale::Symbol                # :day (1 day/col) | :week (1 day/col) | :month (7 days/col)
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
+    gantt_last_area::Rect              # last content Rect passed to render_gantt! (G4.1; zero default)
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
@@ -143,7 +144,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  _make_input(), _make_input(),
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
-                 td, :day, 1,
+                 td, :day, 1, Rect(0, 0, 0, 0),
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
@@ -489,6 +490,29 @@ function update!(m::AppModel, evt::KeyEvent)
     act = lookup_action(context_stack(m), evt)  # steps 2-4 via keymap
     act === nothing && return m
     _do_action!(m, act)
+    m
+end
+
+"""
+    update!(m::AppModel, evt::MouseEvent)
+
+Mouse path (not KEYMAP): idle parity, then Gantt-only handling (M1 click-select
++ M2 wheel scroll) when logged in, no modal, view is `:gantt`, and
+`gantt_last_area` is non-empty.
+"""
+function update!(m::AppModel, evt::MouseEvent)
+    m.tick += 1
+    if _idle_expired!(m)
+        return m
+    end
+    m.last_input_at = Dates.now(UTC)
+
+    m.current_user === nothing && return m
+    m.modal !== :none && return m
+    m.view !== :gantt && return m
+    (m.gantt_last_area.width < 1 || m.gantt_last_area.height < 1) && return m
+
+    _handle_gantt_mouse!(m, evt)
     m
 end
 

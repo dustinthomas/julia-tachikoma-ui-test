@@ -101,6 +101,93 @@ function gantt_clamped_start_for_day(win_start::Date, today::Date, dpc::Int, nco
     return max(win_start, preferred)
 end
 
+# ── G1 period identity / shade / tabs / post-bar geom (pure; shade=G2, tabs=G3) ─
+"""
+    gantt_iso_week_id(d::Date) -> (iso_week_year::Int, iso_week::Int)
+
+ISO-8601 week date: week-year is the year of the Thursday of that ISO week.
+`iso_week` is `Dates.week(d)` (1..53). Do not use calendar year with week number.
+"""
+function gantt_iso_week_id(d::Date)::Tuple{Int,Int}
+    thu = d + Day(4 - Dates.dayofweek(d))
+    return (Dates.year(thu), Dates.week(d))
+end
+
+"""
+    gantt_period_key(d::Date, scale::Symbol) -> Tuple
+
+Stable key for the scale's period (tabs + grouping):
+- :day   → (year, month, day)
+- :week  → gantt_iso_week_id(d)  # (iso_week_year, iso_week)
+- :month → (year, month)
+"""
+function gantt_period_key(d::Date, scale::Symbol)
+    scale === :month && return (Dates.year(d), Dates.month(d))
+    scale === :week  && return gantt_iso_week_id(d)
+    return (Dates.year(d), Dates.month(d), Dates.day(d))
+end
+
+# Fixed Monday epoch for proleptic week ordinal (1970-01-05 is a Monday).
+const GANTT_WEEK_EPOCH = Date(1970, 1, 5)  # dayofweek == 1
+
+"""
+    gantt_week_ordinal(d::Date) -> Int
+
+Proleptic week index: floor((d - Monday_epoch) / 7).
+Adjacent calendar weeks always differ by 1 → parity always alternates.
+"""
+gantt_week_ordinal(d::Date)::Int = fld(Dates.value(d) - Dates.value(GANTT_WEEK_EPOCH), 7)
+
+"""
+    gantt_period_parity(d, scale) -> Bool  # true = receive alt wash
+
+Consecutive periods in calendar order MUST alternate.
+- :day   → isodd(Dates.value(d))
+- :week  → isodd(gantt_week_ordinal(d))
+- :month → isodd(year*12 + month)
+"""
+function gantt_period_parity(d::Date, scale::Symbol)::Bool
+    if scale === :month
+        return isodd(Dates.year(d) * 12 + Dates.month(d))
+    elseif scale === :week
+        return isodd(gantt_week_ordinal(d))
+    else
+        return isodd(Dates.value(d))
+    end
+end
+
+"""
+    gantt_period_shade_cols(win_start, dpc, ncols, scale) -> Vector{Int}
+
+0-based columns whose period parity is true (receive alt wash).
+"""
+function gantt_period_shade_cols(win_start::Date, dpc::Int, ncols::Int, scale::Symbol)::Vector{Int}
+    [c for c in 0:(ncols-1)
+     if gantt_period_parity(gantt_date_for_col(win_start, dpc, c), scale)]
+end
+
+"""
+    gantt_post_bar_label_geom(c0, c1, label_ncols; gap=1, max_w=nothing, tcol=nothing)
+        -> Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}
+
+Label starts at c1 + 1 + gap (0-based chart cols).
+`label_ncols` is the right clip edge. Returns nothing if start ≥ label_ncols or avail < 1.
+If `tcol` is a column with start ≤ tcol, max_chars stops before tcol.
+"""
+function gantt_post_bar_label_geom(c0::Int, c1::Int, label_ncols::Int;
+                                   gap::Int=1, max_w::Union{Nothing,Int}=nothing,
+                                   tcol::Union{Nothing,Int}=nothing)
+    start = c1 + 1 + gap
+    start >= label_ncols && return nothing
+    avail = label_ncols - start
+    if tcol !== nothing && tcol >= start
+        avail = min(avail, tcol - start)
+    end
+    max_w !== nothing && (avail = min(avail, max_w))
+    avail < 1 && return nothing
+    (; start, max_chars = avail)
+end
+
 # ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
 # Overhaul (2026-07): denser product-style axis — period labels (months) plus
 # numeric day/period ticks so the chart is readable without relying only on a
@@ -221,6 +308,111 @@ function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=f
         end
     end
     filter!(t -> 0 <= t[1] < ncols, dedup)
+end
+
+"""
+    gantt_axis_period_tabs(win_start, dpc, ncols, scale; narrow=false)
+        -> Vector{NamedTuple{(:c0,:c1,:label,:center), Tuple{Int,Int,String,Int}}}
+
+One entry per distinct period intersecting the window.
+`c0,c1` = inclusive visible column span; `center` = c0 + (c1-c0)÷2.
+- :day   → calendar months (full name; year on first/Jan/multi-year)
+- :week  → ISO Mon..Sun; "W{n} {u} {d}" when span≥7 && !narrow else "W{n}"
+- :month → calendar months (same year rule as :day)
+"""
+function gantt_axis_period_tabs(win_start::Date, dpc::Int, ncols::Int, scale::Symbol;
+                                narrow::Bool=false)
+    NT = NamedTuple{(:c0, :c1, :label, :center), Tuple{Int,Int,String,Int}}
+    out = NT[]
+    ncols <= 0 && return out
+
+    # Multi-year window? (for year-suffix rule on month-style tabs)
+    d_first = gantt_date_for_col(win_start, dpc, 0)
+    d_last  = gantt_date_for_col(win_start, dpc, ncols - 1)
+    multi_year = Dates.year(d_first) != Dates.year(d_last)
+
+    # Collect ordered periods: (key, c0, c1, sample_date)
+    periods = Tuple{Any,Int,Int,Date}[]
+    if scale === :week
+        seen = Dict{Tuple{Int,Int},Int}()  # key -> index in periods
+        for c in 0:(ncols-1)
+            d = gantt_date_for_col(win_start, dpc, c)
+            key = gantt_iso_week_id(d)
+            if haskey(seen, key)
+                i = seen[key]
+                k, c0, _c1, sd = periods[i]
+                periods[i] = (k, c0, c, sd)
+            else
+                push!(periods, (key, c, c, d))
+                seen[key] = length(periods)
+            end
+        end
+    else
+        # :day and :month → one tab per calendar month
+        seen = Dict{Tuple{Int,Int},Int}()
+        for c in 0:(ncols-1)
+            d = gantt_date_for_col(win_start, dpc, c)
+            key = (Dates.year(d), Dates.month(d))
+            if haskey(seen, key)
+                i = seen[key]
+                k, c0, _c1, sd = periods[i]
+                periods[i] = (k, c0, c, sd)
+            else
+                push!(periods, (key, c, c, d))
+                seen[key] = length(periods)
+            end
+        end
+    end
+
+    for (idx, (key, c0, c1, sample)) in enumerate(periods)
+        span = c1 - c0 + 1
+        center = c0 + (c1 - c0) ÷ 2
+        lab = if scale === :week
+            iso_y, iso_w = key::Tuple{Int,Int}
+            mon = sample - Day(Dates.dayofweek(sample) - 1)
+            # Full week visible (span≥7) and wide terminal → include Monday date
+            if !narrow && span >= 7
+                "W$(iso_w) $(Dates.format(mon, "u")) $(Dates.day(mon))"
+            else
+                "W$(iso_w)"
+            end
+        else
+            y, mo = key::Tuple{Int,Int}
+            d_lab = Date(y, mo, 1)
+            # Full name when wide; always keep abbr for packing fallback (avoid "Augus")
+            base = Dates.format(d_lab, narrow ? "u" : "U")
+            abbr = Dates.format(d_lab, "u")
+            want_year = (idx == 1) || (mo == 1) || multi_year
+            # Packing order (design Criterion 2): year+full → full → abbr → fit_width(abbr)
+            if want_year
+                with_y = string(base, " ", y)
+                if textwidth(with_y) <= span
+                    with_y
+                elseif textwidth(base) <= span
+                    base
+                elseif textwidth(abbr) <= span
+                    abbr
+                else
+                    fit_width(abbr, max(1, span))
+                end
+            else
+                if textwidth(base) <= span
+                    base
+                elseif textwidth(abbr) <= span
+                    abbr
+                else
+                    fit_width(abbr, max(1, span))
+                end
+            end
+        end
+        # Full-week long form ("W12 Mar 16") is kept intact for pure oracles.
+        # Narrow / partial-week short "W{n}" clips when the token exceeds span.
+        if scale === :week && (narrow || span < 7) && textwidth(lab) > span
+            lab = fit_width(lab, max(1, span))
+        end
+        push!(out, (c0=c0, c1=c1, label=lab, center=center))
+    end
+    out
 end
 
 # ── Keep-in-view / selection orientation (pure) ─────────────────────────────
@@ -356,18 +548,33 @@ function gantt_sprint_bands(m::AppModel, win_start::Date, dpc::Int, ncols::Int)
 end
 
 """
-    gantt_left_width(rows, area_w) -> Int
+    gantt_left_label(row::GanttRow; compact::Bool=false) -> String
 
-Adaptive left label width (PR2). Guarantees chart space; uses longest label on data.
+compact=true  → issue rows: key only; epic rows: epic name (unchanged).
+compact=false → full row.label (key + title for issues).
 """
-function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
+function gantt_left_label(row::GanttRow; compact::Bool=false)::String
+    row.kind === :epic && return row.label
+    compact || return row.label
+    row.issue !== nothing ? row.issue.key : row.label
+end
+
+"""
+    gantt_left_width(rows, area_w; compact=false) -> Int
+
+Adaptive left label width (PR2). When compact=true, measure epic labels + issue
+keys (not full titles) so chart columns expand. compact=false matches prior
+behavior (max textwidth of full labels).
+"""
+function gantt_left_width(rows::Vector{GanttRow}, area_w::Int; compact::Bool=false)::Int
     # Note: callers from render_gantt! are guarded to area_w >=24 before call;
     # direct pure-helper tests use w>=55. No <24 path exercised in normal use.
     if isempty(rows)
         return clamp(area_w ÷ 3, 14, 22)
     end
-    maxl = maximum((textwidth(r.label) for r in rows), init = 0)
-    desired = clamp(max(14, min(24, maxl + 3)), 14, area_w ÷ 3)
+    maxl = maximum(textwidth(gantt_left_label(r; compact=compact)) for r in rows; init=0)
+    lo = compact ? 10 : 14
+    desired = clamp(max(lo, min(24, maxl + 3)), lo, area_w ÷ 3)
     min(desired, area_w - 20)
 end
 
@@ -421,12 +628,37 @@ function _gantt_scroll!(m::AppModel, dir::Int)
     m
 end
 
+"""
+    _gantt_select!(m, sel)
+
+Shared select helper for keyboard and mouse: set issue-only `gantt_sel`
+(1-based into `gantt_issue_rows`) and run horizontal keep-in-view.
+"""
+function _gantt_select!(m::AppModel, sel::Int)
+    n = length(gantt_issue_rows(m))
+    n == 0 && return m
+    m.gantt_sel = clamp(sel, 1, n)
+    _gantt_ensure_selection_visible!(m)
+    m
+end
+
+"""
+    _gantt_select_issue_id!(m, issue_id)
+
+Map an issue id → issue-only selection index, then `_gantt_select!`.
+Never assigns a full-list `gantt_rows` index into `gantt_sel`.
+"""
+function _gantt_select_issue_id!(m::AppModel, issue_id)
+    irows = gantt_issue_rows(m)
+    idx = findfirst(r -> r.issue !== nothing && r.issue.id == issue_id, irows)
+    idx === nothing && return m
+    _gantt_select!(m, idx)
+end
+
 function _gantt_row!(m::AppModel, delta::Int)
     n = length(gantt_issue_rows(m))
     n == 0 && return m
-    m.gantt_sel = clamp(m.gantt_sel + delta, 1, n)
-    _gantt_ensure_selection_visible!(m)
-    m
+    _gantt_select!(m, m.gantt_sel + delta)
 end
 
 function _gantt_zoom!(m::AppModel)
@@ -508,36 +740,338 @@ _gantt_open_detail!(m::AppModel) = _open_detail_issue!(m, _gantt_selected_issue(
 "Open the card-edit modal for the currently selected gantt row issue."
 _gantt_open_edit!(m::AppModel) = _open_edit_issue!(m, _gantt_selected_issue(m))
 
-# ═══════════════════════════ RENDER ═════════════════════════════════════════
-function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
-    if area.width < 24 || area.height < 6
-        set_string!(buf, area.x, area.y,
-                    _short("Gantt needs a bigger window", area.width), Style(; fg = col_text_dim()))
-        return
-    end
+# ═══════════════════════════ LAYOUT (G4.1) ═══════════════════════════════════
+"""
+Snapshot of Gantt chart geometry for a given AppModel + content Rect.
+Built by pure computation from m + area (same formulas as `render_gantt!`).
+Introduced in G4.1; consumed by paint (and later by hit-testing).
+"""
+struct GanttLayout
+    area::Rect
+    left_w::Int
+    chart_x::Int
+    physical_ncols::Int
+    view_ncols::Int
+    label_ncols::Int
+    dpc::Int
+    scale::Symbol
+    win_start::Date
+    is_narrow::Bool
+    compact::Bool
+    has_ruler::Bool
+    has_dual::Bool
+    has_footer::Bool
+    band_y::Int
+    tab_y::Int
+    tick_y::Int
+    ruler_y::Int              # tick / single-axis paint y (== tick_y when ruler present)
+    grid_y0::Int
+    content_start::Int
+    nshow::Int
+    row_start::Int            # first visible row index into gantt_rows (1-based)
+    footer_y::Union{Nothing,Int}
+    ruler_rows::Int           # 0 | 1 | 2 after G3
+    paint_weekends::Bool
+    paint_week_seps::Bool
+end
+
+"""
+    gantt_layout(m, area; rows=nothing) -> GanttLayout
+
+Post-G4 height matrix, compact left, view vs physical ncols, dual-axis y
+positions, content_start, chart_x, grid_y0, selection keep-in-view `row_start`.
+Same pure helpers as `render_gantt!` — paint must consume this snapshot.
+
+Pass precomputed `rows` (from `gantt_rows(m)`) to avoid a second row build when
+the caller already needs the paint list (e.g. `render_gantt!`).
+"""
+function gantt_layout(m::AppModel, area::Rect;
+                      rows::Union{Nothing,Vector{GanttRow}} = nothing)::GanttLayout
     dpc = gantt_days_per_col(m.gantt_scale)
-    rows = gantt_rows(m)
-    # Use/confirm adaptive left_w (PR2) + responsive narrow adjustment (PR6).
-    # Guarantees chart space; longest label driven when data present.
-    left_w = gantt_left_width(rows, area.width)
+    rws = rows === nothing ? gantt_rows(m) : rows
+    # G4: compact left on wide terminals (keys only; titles after bars). Sizes left_w from
+    # compact strings so chart/physical gutter grows. Narrow keeps full labels.
     is_narrow = area.width < 60
+    compact = area.width >= 60  # same as !is_narrow; explicit width gate (design V1)
+    left_w = gantt_left_width(rws, area.width; compact = compact)
     if is_narrow
         left_w = min(14, max(10, area.width - 20))
     end
     left_w = max(10, min(left_w, area.width - 10))
     chart_x = area.x + left_w
-    ncols = area.width - left_w   # physical chart columns (for legend fit, narrow checks, guards)
-    # Day view uses *per-day columns* and a hard-capped 14-day window (GANTT_DAY_VIEW_WINDOW)
-    # so the header always shows a ~2 week range and never months. view_ncols drives
-    # geometry, canvas, bars, shading, axis, and today marker.
-    view_ncols = m.gantt_scale === :day ? min(ncols, GANTT_DAY_VIEW_WINDOW) : ncols
-    sel_issue_early = _gantt_selected_issue(m)
-    sel_span = sel_issue_early === nothing ? nothing : gantt_issue_span(sel_issue_early)
+    physical_ncols = area.width - left_w   # physical chart columns
+    # Day view: hard-capped 14-day window. view_ncols drives bars/axis/today;
+    # label_ncols may use the physical gutter past the day strip (G4).
+    view_ncols = m.gantt_scale === :day ? min(physical_ncols, GANTT_DAY_VIEW_WINDOW) : physical_ncols
+    label_ncols = m.gantt_scale === :day ? physical_ncols : view_ncols
+    sel_issue = _gantt_selected_issue(m)
+    sel_span = sel_issue === nothing ? nothing : gantt_issue_span(sel_issue)
     win_start = gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, view_ncols, sel_span)
+
+    has_ruler = area.height >= 8
+    # PR5: has_footer = h>=10 && rows>0 && !narrow
+    has_footer = area.height >= 10 && length(rws) > 0 && !is_narrow
+    # G3 height budget: dual-row axis only at h≥12; single at 8–11; none <8.
+    has_dual = area.height >= 12 && has_ruler
+    tab_rows = has_dual ? 1 : 0
+    tick_rows = has_ruler ? 1 : 0
+    ruler_rows = tab_rows + tick_rows   # 0 | 1 | 2
+    footer_rows = has_footer ? 1 : 0
+    content_start = 1 + 1 + ruler_rows  # title + band + axis strip
+    band_y = area.y + 1
+    tab_y = has_dual ? area.y + 2 : 0
+    # Single-row axis lands at band+1; dual tick row is band+2 (under tabs).
+    tick_y = has_ruler ? (has_dual ? area.y + 3 : area.y + 2) : 0
+    ruler_y = tick_y  # TODAY label + single-row axis paint target
+    grid_y0 = area.y + content_start
+    nshow = max(0, min(length(rws), area.height - content_start - footer_rows - 1))
+    # Selection keep-in-view (U5): scroll row window so selected issue is drawn.
+    row_start = 1
+    if sel_issue !== nothing && nshow > 0
+        sri = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == sel_issue.id, rws)
+        (sri !== nothing && sri > nshow) && (row_start = sri - nshow + 1)
+    end
+    footer_y = has_footer ? grid_y0 + nshow : nothing
+    # G2 paint gates: weekend ░ + week seps ┆ off at :month (period wash stays on).
+    paint_weekends = m.gantt_scale !== :month
+    paint_week_seps = m.gantt_scale !== :month
+
+    GanttLayout(area, left_w, chart_x, physical_ncols, view_ncols, label_ncols,
+                dpc, m.gantt_scale, win_start, is_narrow, compact,
+                has_ruler, has_dual, has_footer,
+                band_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
+                nshow, row_start, footer_y, ruler_rows,
+                paint_weekends, paint_week_seps)
+end
+
+# ═══════════════════════════ HIT-TEST (M1) ═══════════════════════════════════
+"""
+Hit kinds for pure Gantt mouse hit-testing (M1 click-select).
+Shared metrics with paint via `GanttLayout` — no render-side side effects.
+"""
+@enum GanttHitKind begin
+    gantt_hit_none
+    gantt_hit_left_rail   # issue or epic label cells
+    gantt_hit_bar         # bar or diamond body
+    gantt_hit_post_bar    # title after bar (G4 region)
+    gantt_hit_axis        # period tab / tick row
+    gantt_hit_band        # sprint band row
+    gantt_hit_empty_chart # chart background / wash only
+end
+
+"""
+Result of `gantt_hit_test`. `issue_sel` is the 1-based index into
+`gantt_issue_rows` (same space as `m.gantt_sel`) — never a full-list index.
+"""
+struct GanttHit
+    kind::GanttHitKind
+    row_index::Union{Nothing,Int}      # into full gantt_rows (includes epics)
+    issue_id::Union{Nothing,String}    # Domain issue id when issue-related
+    issue_sel::Union{Nothing,Int}      # 1-based issue-only index
+    col::Union{Nothing,Int}            # 0-based chart col when in chart strip
+    date::Union{Nothing,Date}          # gantt_date_for_col when col in view strip
+end
+
+const _GANTT_HIT_NONE = GanttHit(gantt_hit_none, nothing, nothing, nothing, nothing, nothing)
+
+"Issue-only selection index for a full-list row, or nothing if not an issue row."
+function _gantt_issue_sel_at(rows::Vector{GanttRow}, row_index::Int)::Union{Nothing,Int}
+    (1 <= row_index <= length(rows)) || return nothing
+    rows[row_index].kind === :issue || return nothing
+    n = 0
+    for i in 1:row_index
+        rows[i].kind === :issue && (n += 1)
+    end
+    n
+end
+
+"""
+    gantt_hit_test(layout, rows, x, y) -> GanttHit
+
+Pure hit-test against a `GanttLayout` snapshot + the full paint row list.
+Coordinates are absolute terminal cells (same space as `MouseEvent.x/y` and
+`layout.area`). Does not mutate model state.
+"""
+function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
+                        x::Int, y::Int)::GanttHit
+    area = layout.area
+    (area.width < 1 || area.height < 1) && return _GANTT_HIT_NONE
+    if x < area.x || x >= area.x + area.width ||
+       y < area.y || y >= area.y + area.height
+        return _GANTT_HIT_NONE
+    end
+
+    # Band (sprint strip under title)
+    if y == layout.band_y
+        return GanttHit(gantt_hit_band, nothing, nothing, nothing, nothing, nothing)
+    end
+
+    # Axis rows (dual tab+tick, or single tick/axis)
+    if layout.has_ruler
+        if layout.has_dual
+            if y == layout.tab_y || y == layout.tick_y
+                return GanttHit(gantt_hit_axis, nothing, nothing, nothing, nothing, nothing)
+            end
+        elseif y == layout.tick_y
+            return GanttHit(gantt_hit_axis, nothing, nothing, nothing, nothing, nothing)
+        end
+    end
+
+    # Grid body
+    if layout.nshow > 0 && y >= layout.grid_y0 && y < layout.grid_y0 + layout.nshow
+        vis_i = y - layout.grid_y0 + 1
+        row_index = layout.row_start + vis_i - 1
+        (1 <= row_index <= length(rows)) || return _GANTT_HIT_NONE
+        row = rows[row_index]
+        issue_id = row.issue === nothing ? nothing : row.issue.id
+        issue_sel = _gantt_issue_sel_at(rows, row_index)
+
+        # Left rail (labels)
+        if x < layout.chart_x
+            return GanttHit(gantt_hit_left_rail, row_index, issue_id, issue_sel,
+                            nothing, nothing)
+        end
+
+        col = x - layout.chart_x  # 0-based into chart strip
+        if col < 0 || col >= layout.physical_ncols
+            return _GANTT_HIT_NONE
+        end
+        date = col < layout.view_ncols ?
+               gantt_date_for_col(layout.win_start, layout.dpc, col) : nothing
+
+        if row.kind === :epic
+            return GanttHit(gantt_hit_empty_chart, row_index, nothing, nothing,
+                            col < layout.view_ncols ? col : nothing, date)
+        end
+
+        # Issue: bar / diamond / post-bar (x-disjoint; post-bar after c1 + gap)
+        iss = row.issue
+        if iss !== nothing
+            tcol = gantt_point_col(layout.win_start, layout.dpc, Dates.today(),
+                                   layout.view_ncols)
+            if iss.start_date !== nothing && iss.due_date !== nothing
+                ext = gantt_bar_extent(layout.win_start, layout.dpc,
+                                       iss.start_date, iss.due_date, layout.view_ncols)
+                if ext !== nothing
+                    c0, c1 = ext
+                    if c0 <= col <= c1
+                        return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
+                                        col, date)
+                    end
+                    post = gantt_post_bar_label_geom(c0, c1, layout.label_ncols;
+                                                     gap = 1, tcol = tcol)
+                    if post !== nothing &&
+                       post.start <= col < post.start + post.max_chars
+                        return GanttHit(gantt_hit_post_bar, row_index, issue_id,
+                                        issue_sel, col, date)
+                    end
+                end
+            else
+                d = iss.start_date === nothing ? iss.due_date : iss.start_date
+                pcol = gantt_point_col(layout.win_start, layout.dpc, d, layout.view_ncols)
+                if pcol !== nothing
+                    if col == pcol
+                        return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
+                                        col, date)
+                    end
+                    post = gantt_post_bar_label_geom(pcol, pcol, layout.label_ncols;
+                                                     gap = 1, tcol = tcol)
+                    if post !== nothing &&
+                       post.start <= col < post.start + post.max_chars
+                        return GanttHit(gantt_hit_post_bar, row_index, issue_id,
+                                        issue_sel, col, date)
+                    end
+                end
+            end
+        end
+        return GanttHit(gantt_hit_empty_chart, row_index, issue_id, issue_sel,
+                        col < layout.view_ncols ? col : nothing, date)
+    end
+
+    _GANTT_HIT_NONE
+end
+
+"""
+    _handle_gantt_mouse!(m, evt)
+
+M1 click-select + M2 wheel scroll. Left press on left-rail issue / bar /
+diamond / post-bar → issue-only select + keep-in-view. Epic, axis, band,
+empty: no-op for click. Wheel (`mouse_scroll_up`/`down` + `mouse_press`) over
+`gantt_last_area` → `_gantt_scroll!(±1)` (matches `h`/`l`); no zoom. Drag /
+open-on-click out of scope (M3).
+"""
+function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
+    area = m.gantt_last_area
+    (area.width < 1 || area.height < 1) && return m
+
+    # M2 — wheel horizontal scroll when pointer is over the cached gantt body.
+    # Button is scroll_*; require mouse_press for parity with Tachikoma
+    # list_scroll / widget handlers (SGR always emits press for wheel). No zoom.
+    if (evt.button === mouse_scroll_up || evt.button === mouse_scroll_down) &&
+       evt.action === mouse_press
+        Base.contains(area, evt.x, evt.y) || return m
+        dir = evt.button === mouse_scroll_up ? -1 : +1
+        return _gantt_scroll!(m, dir)
+    end
+
+    # M1 — click-select
+    (evt.button === mouse_left && evt.action === mouse_press) || return m
+    rows = gantt_rows(m)
+    lay = gantt_layout(m, area; rows = rows)
+    hit = gantt_hit_test(lay, rows, evt.x, evt.y)
+    if hit.kind === gantt_hit_left_rail
+        hit.row_index === nothing && return m
+        rows[hit.row_index].kind === :epic && return m
+        hit.issue_id === nothing && return m
+        return _gantt_select_issue_id!(m, hit.issue_id)
+    elseif hit.kind === gantt_hit_bar || hit.kind === gantt_hit_post_bar
+        hit.issue_id === nothing && return m
+        return _gantt_select_issue_id!(m, hit.issue_id)
+    end
+    m
+end
+
+# ═══════════════════════════ RENDER ═════════════════════════════════════════
+function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
+    # G4.1: cache area for future mouse hit-tests (M1/M2); zero default on AppModel.
+    m.gantt_last_area = area
+    if area.width < 24 || area.height < 6
+        set_string!(buf, area.x, area.y,
+                    _short("Gantt needs a bigger window", area.width), Style(; fg = col_text_dim()))
+        return
+    end
+    # Single gantt_rows build shared by layout + paint (N2: no double list work).
+    rows = gantt_rows(m)
+    lay = gantt_layout(m, area; rows = rows)
+    # Destructure layout metrics (single source of geometry for this paint).
+    left_w = lay.left_w
+    chart_x = lay.chart_x
+    ncols = lay.physical_ncols
+    view_ncols = lay.view_ncols
+    label_ncols = lay.label_ncols
+    dpc = lay.dpc
+    win_start = lay.win_start
+    is_narrow = lay.is_narrow
+    compact = lay.compact
+    has_ruler = lay.has_ruler
+    has_dual = lay.has_dual
+    has_footer = lay.has_footer
+    band_y = lay.band_y
+    tab_y = lay.tab_y
+    tick_y = lay.tick_y
+    ruler_y = lay.ruler_y
+    grid_y0 = lay.grid_y0
+    content_start = lay.content_start
+    nshow = lay.nshow
+    row_start = lay.row_start
+    paint_weekends = lay.paint_weekends
+    paint_week_seps = lay.paint_week_seps
+
     win_end = gantt_window_end(win_start, dpc, view_ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
-    scale_lbl = m.gantt_scale === :month ? "month" :
-                m.gantt_scale === :day   ? "day"   : "week"
+    sel_issue_early = _gantt_selected_issue(m)
+    scale_lbl = lay.scale === :month ? "month" :
+                lay.scale === :day   ? "day"   : "week"
     base = "GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]"
     # Compact legend (PR6): ensure visible; shorten base on narrow to fit legend + responsive.
     if is_narrow && ncols >= 8
@@ -558,29 +1092,16 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 _short(title, area.width),
                 Style(; fg = col_primary(), bold = true))
 
-    has_ruler = area.height >= 8
-    is_narrow = area.width < 60
-    # PR5: has_footer = h>=10 && rows>0 && !narrow (responsive hide on small terminals)
-    # predicate approx per design; nshow accounts for footer_rows to reserve space.
-    has_footer = area.height >= 10 && length(rows) > 0 && !is_narrow
-    # Keep single axis row (ruler_rows=1) so band→grid geometry stays band_y+2 = first
-    # grid row (today ┃ asserts). Density comes from numeric day ticks on that row;
-    # period labels appear when height allows a second axis strip *above* ticks only
-    # if we still preserve band_y+2 grid — so we draw period text into the left label
-    # gutter of the axis row / as non-colliding overlays, not an extra content offset.
-    ruler_rows = has_ruler ? 1 : 0
-    footer_rows = has_footer ? 1 : 0
-    content_start = 1 + 1 + ruler_rows
-    # Compute layout rows always (bands loop is no-op for empty; ruler now drawn
-    # for empty tall cases too so no blank ruler row when h>=8).
-    band_y = area.y + 1
-    ruler_y = area.y + 2
-    grid_y0 = area.y + content_start
-    nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
+    # z1 — alternating period wash on band (under weekend + sprint)
+    for c in gantt_period_shade_cols(win_start, dpc, view_ncols, lay.scale)
+        set_char!(buf, chart_x + c, band_y, ' ', Style(; bg = col_gantt_period_alt()))
+    end
     # weekend shading on band row first (polish consistency), band will overlay its range
-    for c in gantt_weekend_cols(win_start, dpc, view_ncols)
-        ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
-        set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+    if paint_weekends
+        for c in gantt_weekend_cols(win_start, dpc, view_ncols)
+            ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
+            set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+        end
     end
     # Sprint bands polish (PR6): cleaner edges (▓/safe at ends), better name placement
     # (inside after edge when room; underline+dim always), aggressive truncate narrow.
@@ -614,32 +1135,79 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     if has_ruler
-        # Product-style dense axis: numeric day ticks + period labels where free.
-        # Also paint a short month tag in the left gutter (under labels) when room.
-        for (c, lab) in gantt_axis_period_labels(win_start, dpc, view_ncols; narrow = is_narrow)
-            # Period label in left gutter only (first period), keeps chart ticks dense
-            if c == 0 && left_w >= 4
-                set_string!(buf, area.x, ruler_y, _short(lab, min(left_w - 1, textwidth(lab) + 1)),
-                            Style(; fg = col_text_dim()))
+        # G3: dual-row (h≥12) = period tabs (full names) + tick row; single (h=8–11) =
+        # digit-first combine on day/week, tabs-prefer on month. Pack labels into span.
+        if has_dual
+            # Tab row — full period names from gantt_axis_period_tabs (bold primary)
+            for t in gantt_axis_period_tabs(win_start, dpc, view_ncols, lay.scale; narrow = is_narrow)
+                span = t.c1 - t.c0 + 1
+                span < 1 && continue
+                lab = t.label
+                textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
+                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_c = clamp(start_c, t.c0, t.c1)
+                xx = chart_x + start_c
+                xx > area.x + area.width - 1 && continue
+                # Clip to remaining period cells (t.c1), not just original span from c0
+                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                set_string!(buf, xx, tab_y, _short(lab, avail),
+                            Style(; fg = col_primary(), bold = true))
             end
-        end
-        ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
-        for (c, lab) in ax
-            (c < 0 || c >= view_ncols) && continue
-            xx = chart_x + c
-            xx > area.x + area.width - 1 && continue
-            if textwidth(lab) <= 1
-                tch = lab == "┬" ? gantt_safe_char('┬', is_narrow) : (isempty(lab) ? ' ' : lab[1])
-                if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
-                set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
-            else
-                set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
+            # Tick row — numeric day-of-month with breathing room (muted)
+            for (c, lab) in gantt_axis_tick_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+                (c < 0 || c >= view_ncols) && continue
+                xx = chart_x + c
+                xx > area.x + area.width - 1 && continue
+                if textwidth(lab) <= 1
+                    tch = isempty(lab) ? ' ' : lab[1]
+                    if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
+                    set_char!(buf, xx, tick_y, tch, Style(; fg = col_text_muted(), dim = true))
+                else
+                    set_string!(buf, xx, tick_y, _short(lab, max(1, view_ncols - c)),
+                                Style(; fg = col_text_muted(), dim = true))
+                end
+            end
+        elseif lay.scale === :month
+            # Single-row month: prefer full period tabs over dense day ticks
+            for t in gantt_axis_period_tabs(win_start, dpc, view_ncols, :month; narrow = is_narrow)
+                span = t.c1 - t.c0 + 1
+                span < 1 && continue
+                lab = t.label
+                textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
+                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_c = clamp(start_c, t.c0, t.c1)
+                xx = chart_x + start_c
+                xx > area.x + area.width - 1 && continue
+                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                set_string!(buf, xx, ruler_y, _short(lab, avail),
+                            Style(; fg = col_primary(), bold = true))
+            end
+        else
+            # Single-row day/week: digit-first combine + period gutter (pre-G3 path)
+            for (c, lab) in gantt_axis_period_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+                if c == 0 && left_w >= 4
+                    set_string!(buf, area.x, ruler_y, _short(lab, min(left_w - 1, textwidth(lab) + 1)),
+                                Style(; fg = col_text_dim()))
+                end
+            end
+            ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+            for (c, lab) in ax
+                (c < 0 || c >= view_ncols) && continue
+                xx = chart_x + c
+                xx > area.x + area.width - 1 && continue
+                if textwidth(lab) <= 1
+                    tch = lab == "┬" ? gantt_safe_char('┬', is_narrow) : (isempty(lab) ? ' ' : lab[1])
+                    if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
+                    set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
+                else
+                    set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
+                end
             end
         end
     end
 
     if isempty(rows)
-        empty_y = has_ruler ? area.y + 3 : area.y + 2
+        empty_y = area.y + content_start
         # PR5: richer empty state + hint (no data change; hint from design)
         empty_msg = "No scheduled issues (press e on board or n on calendar to date items)"
         set_string!(buf, area.x, empty_y, _short(empty_msg, area.width),
@@ -655,13 +1223,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     selected_vis_i = nothing
     selected_bar_ext = nothing
 
-    # Scroll the row window so the selected issue is always drawn (U5): without
-    # this a j-navigated selection below the fold is invisible yet actionable.
-    row_start = 1
-    if sel_issue !== nothing
-        sri = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == sel_issue.id, rows)
-        (sri !== nothing && sri > nshow) && (row_start = sri - nshow + 1)
-    end
+    # G4: cache post-bar geom per visible row (shared by left-rail / in-bar / z10 paint).
+    post_geoms = Vector{Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}}(nothing, max(0, nshow))
 
     for i in 1:nshow
         ri = row_start + i - 1
@@ -676,11 +1239,13 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             selected = sel_issue !== nothing && iss.id == sel_issue.id
             lstyle = selected ? sel_style() : Style(; fg = col_text())
             prefix = selected ? "▸ " : "├ "
-            set_string!(buf, area.x, rowy, _short(prefix * row.label, left_w - 1), lstyle)
+            # G4: post-bar geom decides left-rail compact vs full (identity never lost).
+            post_geom = nothing
             if iss.start_date !== nothing && iss.due_date !== nothing
                 ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
+                    post_geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
                     for dx in (2 * c0):(2 * c1 + 1), dy in (2 * (i - 1)):(2 * (i - 1) + 1)
                         set_point!(canvas, dx, dy)
                     end
@@ -692,29 +1257,64 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             else
                 d = iss.start_date === nothing ? iss.due_date : iss.start_date
                 col = gantt_point_col(win_start, dpc, d, view_ncols)
-                col === nothing || push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
+                if col !== nothing
+                    post_geom = gantt_post_bar_label_geom(col, col, label_ncols; gap = 1, tcol = tcol)
+                    push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
+                end
             end
+            post_geoms[i] = post_geom
+            # Compact left when post-bar paints the title; full left when no post-bar room
+            # (identity never lost). Under compact-sized left_w, full labels are key-first
+            # so ellipsis cannot swallow key digits (QCI-100 vs QCI-101).
+            use_compact_left = compact && post_geom !== nothing
+            avail = max(1, left_w - 1 - textwidth(prefix))
+            if use_compact_left
+                llab = gantt_left_label(row; compact = true)
+            else
+                full = gantt_left_label(row; compact = false)
+                if textwidth(full) <= avail
+                    llab = full
+                else
+                    # issue rows always carry iss (GanttRow construction); key-first truncate
+                    k = iss.key
+                    rest = avail - textwidth(k) - 1
+                    llab = rest >= 1 ? k * " " * fit_width(iss.title, rest) : fit_width(k, avail)
+                end
+            end
+            set_string!(buf, area.x, rowy, _short(prefix * llab, left_w - 1), lstyle)
         end
     end
 
+    # z1 — period wash on all visible grid rows (incl. epic headers), under weekend/seps/bars/today.
+    for c in gantt_period_shade_cols(win_start, dpc, view_ncols, lay.scale)
+        for ii in 1:nshow
+            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ' ',
+                      Style(; bg = col_gantt_period_alt()))
+        end
+    end
     # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
     # Week separators ┆ (dim muted) on grid at week starts; skip today col to avoid clobber.
+    # G2: both gated off at :month scale (paint only; pure helpers unchanged).
     wcols = gantt_weekend_cols(win_start, dpc, view_ncols)
     scols = gantt_week_sep_cols(win_start, dpc, view_ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
-    for c in wcols
-        for ii in 1:nshow
-            ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
-            if textwidth(ch) != 1; ch = '#'; end
-            set_string!(buf, chart_x + c, grid_y0 + ii - 1, string(ch), Style(; fg = col_text_muted(), dim = true))
+    if paint_weekends
+        for c in wcols
+            for ii in 1:nshow
+                ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+                if textwidth(ch) != 1; ch = '#'; end
+                set_string!(buf, chart_x + c, grid_y0 + ii - 1, string(ch), Style(; fg = col_text_muted(), dim = true))
+            end
         end
     end
-    for c in scols
-        c == tcol && continue
-        for ii in 1:nshow
-            ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
-            if textwidth(ch) != 1; ch = '|'; end
-            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
+    if paint_week_seps
+        for c in scols
+            c == tcol && continue
+            for ii in 1:nshow
+                ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+                if textwidth(ch) != 1; ch = '|'; end
+                set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
+            end
         end
     end
 
@@ -723,8 +1323,6 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
     # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
     # Theming only. Recompute rowy/selection here (same scroll logic as build pass; no y/layout change).
-    # NOTE (nit fix): row_start/ri/rowy/selected logic is intentionally duplicated from canvas pass (~338) for PR3 minimality;
-    # both copies must stay identical while layout unchanged (see PR2).
     for i in 1:nshow
         ri = row_start + i - 1
         ri > length(rows) && break
@@ -754,8 +1352,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                         ch = (p >= 0.999 ? '█' : '▓')
                         set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
                     end
-                    # inside label when bar wide enough (overwrites density if collides)
-                    if bw >= 5
+                    # G4: suppress in-bar key when post-bar geom will paint; keep when no room after bar.
+                    # Uses cached post_geoms[i] from the build pass (same args / tcol).
+                    if bw >= 5 && post_geoms[i] === nothing
                         avail = max(1, bw - 2)
                         lbl = fit_width(iss.key, avail)
                         lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
@@ -786,6 +1385,39 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
+    # G4 z10 — post-bar issue titles (after bar right edge / diamond; before today z11).
+    # Truncate before tcol so TestBackend row_text does not interleave ┃ inside titles.
+    # Geom cached in post_geoms during the build pass (left-rail / in-bar share the same values).
+    for i in 1:nshow
+        ri = row_start + i - 1
+        ri > length(rows) && break
+        row = rows[ri]
+        row.kind === :issue || continue
+        iss = row.issue
+        iss === nothing && continue
+        rowy = grid_y0 + (i - 1)
+        geom = post_geoms[i]
+        geom === nothing && continue
+        xx = chart_x + geom.start
+        xx > area.x + area.width - 1 && continue
+        maxc = min(geom.max_chars, area.x + area.width - xx)
+        maxc < 1 && continue
+        # Content: title default; key+title when room. Domain forbids empty title
+        # (Issue ctor); key-only fallback is design priority 3 but unreachable in-store.
+        title = iss.title
+        key = iss.key
+        content = if maxc >= textwidth(key) + 1 + 8
+            key * " " * title
+        else
+            title
+        end
+        lbl = fit_width(content, maxc)
+        isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=1 and non-empty title ⇒ non-empty fit)
+        selected = sel_issue !== nothing && iss.id == sel_issue.id
+        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
+        set_string!(buf, xx, rowy, lbl, lsty)
+    end
+
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
     # Use gantt_safe_char + textwidth guard (PR6).
     if tcol !== nothing
@@ -794,7 +1426,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         for i in 1:nshow
             set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
         end
-        if has_ruler && (view_ncols - tcol) > 5
+        # "TODAY" on tick/single axis row. Skip on single-row month where tabs are the
+        # primary axis content (TODAY would clobber month chips). Dual keeps TODAY on ticks.
+        if has_ruler && (view_ncols - tcol) > 5 && !(!has_dual && lay.scale === :month)
             lx = chart_x + tcol + 1
             if lx + 4 < chart_x + view_ncols
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
@@ -804,8 +1438,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     # PR5: selected item footer (when has_footer): exact dates, duration, status, priority (theming).
     # Draw below grid; priority token uses priority_color; rest col_text_dim. Responsive already in predicate.
+    # has_footer ⇒ footer_y is always set (gantt_layout invariant).
     if has_footer
-        fy = grid_y0 + nshow
+        fy = lay.footer_y::Int
         if fy <= area.y + area.height - 1
             sel = _gantt_selected_issue(m)
             if sel !== nothing

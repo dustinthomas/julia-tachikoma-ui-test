@@ -16,6 +16,9 @@ const TH = QciKanban.Theming
         @test TH.col_ok()         == T.ColorRGB(78, 204, 94)
         @test TH.col_warn()       == T.ColorRGB(240, 198, 116)
         @test TH.col_err()        == T.ColorRGB(224, 60, 49)
+        # G2: Gantt alternating period wash (between BG and SURFACE)
+        @test TH.col_gantt_period_alt() == T.ColorRGB(20, 24, 48)
+        @test TH.GANTT_PERIOD_ALT == T.ColorRGB(20, 24, 48)
     end
 
     @testset "selection style is cyan-on-navy bold" begin
