@@ -114,7 +114,7 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
             @test GM._gantt_selected_issue(m).id == a.id
         end
 
-        @testset "When pre-bar key is clicked Then the issue is selected" begin
+        @testset "When post-bar key is clicked Then the issue is selected" begin
             GM._gantt_select!(m, 1)
             # Recompute layout after any prior scrolls/selects (window fixed above)
             rows2 = GM.gantt_rows(m)
@@ -123,9 +123,11 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
             yb2 = lay2.grid_y0 + (rb2 - lay2.row_start)
             ext2 = GM.gantt_bar_extent(lay2.win_start, lay2.dpc, b.start_date, b.due_date, lay2.view_ncols)
             @test ext2 !== nothing
-            pre = GM.gantt_pre_bar_key_geom(ext2[1], lay2.view_ncols; gap = 1, key_w = textwidth(b.key))
-            @test pre !== nothing
-            T.update!(m, gm_click(lay2.chart_x + pre.start, yb2))
+            kwb = textwidth(b.key)
+            post = GM.gantt_post_bar_label_geom(ext2[1], ext2[2], lay2.label_ncols;
+                                                gap = 1, max_w = kwb)
+            @test post !== nothing && post.max_chars >= kwb
+            T.update!(m, gm_click(lay2.chart_x + post.start, yb2))
             @test m.gantt_sel == 2
             @test GM._gantt_selected_issue(m).id == b.id
             @test m.modal === :none

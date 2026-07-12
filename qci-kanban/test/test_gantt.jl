@@ -1588,18 +1588,17 @@ end
         @test count(isdigit, tick_rt) > count(isdigit, tab_rt)
     end
 
-    # ── PR-V: full left labels + pre-bar key only (no post-bar titles) ────────
-    @testset "PR-V: full left title + key before first bar glyph (render)" begin
+    # ── Labels: full left + key RIGHT of bar (post-bar identifier only) ──────
+    @testset "PR-V: full left title + key after last bar glyph (render)" begin
         m = gantt_login()
-        e = G4.Stores.create_epic!(m.boardstore; name = "PreBarEp")
-        # Distinctive title; bar starts far enough right for pre-bar key room
+        e = G4.Stores.create_epic!(m.boardstore; name = "PostBarEp")
+        # Distinctive title; bar ends with room for post-bar key
         a = G4.Stores.create_issue!(m.boardstore; title = "ZebraLeftTitle", epic_id = e.id,
-                                    start_date = Dates.today() + Day(8),
-                                    due_date = Dates.today() + Day(12))
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
         g4!(m, 'G')
         g4!(m, 'z')  # week scale
         @test m.gantt_scale == :week
-        # Pin window so bar is not left-flush (room for pre-bar key)
         m.gantt_start = Dates.today() - Day(1)
         tb = gantt_render(m; w = 120, h = 16)
         r = row_with(tb, a.key, 16)
@@ -1614,25 +1613,29 @@ end
             c in ('█', '▓', '▌', '▐') && (last_bar = i)
         end
         @test last_bar > 0
-        # Title lives on left (before first bar), not post-bar after last bar glyph
+        # Title lives on left (before first bar)
         ti = findfirst("ZebraLeft", r)
         @test ti !== nothing && first(ti) < first_bar
-        after = String(chars[(last_bar + 1):end])
-        @test !occursin("ZebraLeft", after)
-        # Key appears immediately before first bar glyph (gap 1)
+        # Key appears immediately AFTER last bar glyph (gap 1), not before first bar
         kw = textwidth(a.key)
-        key_end = first_bar - 2  # gap=1 blank before bar
-        key_start = key_end - kw + 1
-        @test key_start >= 1
+        key_start = last_bar + 2  # gap=1 blank after bar
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
         @test String(chars[key_start:key_end]) == a.key
+        # Key is not immediately before first bar (old pre-bar contract)
+        pre_end = first_bar - 2
+        pre_start = pre_end - kw + 1
+        if pre_start >= 1
+            @test String(chars[pre_start:pre_end]) != a.key
+        end
     end
 
-    @testset "PR-V: day scale pre-bar key + full left (no gutter title)" begin
+    @testset "PR-V: day scale post-bar key + full left (identifier after bar)" begin
         m = gantt_login()
-        e = G4.Stores.create_epic!(m.boardstore; name = "DayPreEp")
+        e = G4.Stores.create_epic!(m.boardstore; name = "DayPostEp")
         a = G4.Stores.create_issue!(m.boardstore; title = "DayPreTitleX", epic_id = e.id,
-                                    start_date = Dates.today() + Day(8),
-                                    due_date = Dates.today() + Day(11))
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
         g4!(m, 'G')
         @test m.gantt_scale == :day
         m.gantt_start = Dates.today() - Day(1)
@@ -1648,24 +1651,31 @@ end
         for (i, c) in enumerate(chars)
             c in ('█', '▓', '▌', '▐') && (last_bar = i)
         end
-        # Title on left, not after bar
+        # Title on left
         frag = occursin("DayPreTitleX", r) ? "DayPreTitleX" : "DayPre"
         ti = findfirst(frag, r)
         @test ti !== nothing && first(ti) < first_bar
-        @test !occursin(frag, String(chars[(last_bar + 1):end]))
-        # Pure pre-bar geom for this bar
+        # Pure post-bar geom for this bar (key-only clip)
         rows = G4.gantt_rows(m)
         left_w = G4.gantt_left_width(rows, w; compact = false)
         physical = w - left_w
         view_n = min(physical, G4.GANTT_DAY_VIEW_WINDOW)
+        label_n = physical  # day scale: post-bar may use physical gutter
         win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), 1, view_n,
                                           G4.gantt_issue_span(a))
         ext = G4.gantt_bar_extent(win, 1, a.start_date, a.due_date, view_n)
         @test ext !== nothing
-        c0, _ = ext
-        pre = G4.gantt_pre_bar_key_geom(c0, view_n; gap = 1, key_w = textwidth(a.key))
-        @test pre !== nothing
-        @test pre.start + pre.max_chars + 1 == c0  # gap=1
+        c0, c1 = ext
+        kw = textwidth(a.key)
+        post = G4.gantt_post_bar_label_geom(c0, c1, label_n; gap = 1, max_w = kw)
+        @test post !== nothing
+        @test post.max_chars >= kw
+        @test post.start == c1 + 1 + 1  # gap=1
+        # Render: key after last bar glyph
+        key_start = last_bar + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
+        @test String(chars[key_start:key_end]) == a.key
     end
 
     @testset "PR-V: narrow / flush-right no crash; left shows identity" begin
@@ -1737,7 +1747,7 @@ end
         @test (w - w_comp) > (w - lay.left_w)
     end
 
-    @testset "PR-V: diamond pre-bar key + selected style path" begin
+    @testset "PR-V: diamond post-bar key + selected style path" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "DiaEp")
         pt = G4.Stores.create_issue!(m.boardstore; title = "DiamondTitleZ", epic_id = e.id,
@@ -1758,37 +1768,37 @@ end
         chars = collect(r)
         dia = findfirst(==('◆'), chars)
         @test dia !== nothing
-        # Title on left of diamond; key immediately before diamond (gap 1)
+        # Title on left of diamond; key immediately AFTER diamond (gap 1)
         ti = findfirst("DiamondTitleZ", r)
         if ti === nothing
             ti = findfirst("Diamond", r)
         end
         @test ti !== nothing && first(ti) < dia
         kw = textwidth(pt.key)
-        key_end = dia - 2
-        key_start = key_end - kw + 1
-        @test key_start >= 1
+        key_start = dia + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
         @test String(chars[key_start:key_end]) == pt.key
-        # Style on chart-side pre-bar cell (not left-rail find_text hit)
+        # Style on chart-side post-bar cell (not left-rail find_text hit)
         rd = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == pt.id, rows)
         @test rd !== nothing
         yd = lay.grid_y0 + (rd - lay.row_start)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, pt.due_date, lay.view_ncols)
         @test pcol !== nothing
-        pre = G4.gantt_pre_bar_key_geom(pcol, lay.view_ncols; gap = 1, key_w = kw)
-        @test pre !== nothing
-        st = T.style_at(tb, lay.chart_x + pre.start, yd)
+        post = G4.gantt_post_bar_label_geom(pcol, pcol, lay.label_ncols; gap = 1, max_w = kw)
+        @test post !== nothing && post.max_chars >= kw
+        st = T.style_at(tb, lay.chart_x + post.start, yd)
         @test st.fg == G4.Theming.col_primary_hi()
         @test st.bold === true
     end
 
-    @testset "PR-V: in-bar key suppressed when pre-bar paints" begin
+    @testset "PR-V: in-bar key suppressed when post-bar paints" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "InBarEp")
-        # Wide bar with room left of bar for full key (pre-bar paints → suppress in-bar)
-        a = G4.Stores.create_issue!(m.boardstore; title = "PreBarOnlyTitle", epic_id = e.id,
-                                    start_date = Dates.today() + Day(8),
-                                    due_date = Dates.today() + Day(16))
+        # Short bar ending mid-window so post-bar key fits → suppress in-bar
+        a = G4.Stores.create_issue!(m.boardstore; title = "PostBarOnlyTitle", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(8))
         g4!(m, 'G')
         g4!(m, 'z')  # week
         m.gantt_start = Dates.today() - Day(1)
@@ -1796,33 +1806,31 @@ end
         tb = gantt_render(m; w = 120, h = 14)
         r = row_with(tb, a.key, 14)
         @test r !== nothing
-        # Distinctive title fragment on left rail (may be width-truncated)
-        @test occursin("PreBarOnly", r)
+        @test occursin("PostBarOnly", r)
         chars = collect(r)
         bar_ix = [i for (i, c) in enumerate(chars) if c in ('█', '▓', '▌', '▐')]
-        @test length(bar_ix) >= 5  # wide enough that in-bar key would fire if not suppressed
+        @test length(bar_ix) >= 5
         interior = String(chars[minimum(bar_ix):maximum(bar_ix)])
         @test !occursin(a.key, interior)
-        # Title on left, not post-bar
         first_bar = minimum(bar_ix)
-        ti = findfirst("PreBarOnly", r)
+        last_bar = maximum(bar_ix)
+        ti = findfirst("PostBarOnly", r)
         @test ti !== nothing && first(ti) < first_bar
-        @test !occursin("PreBarOnly", String(chars[(maximum(bar_ix) + 1):end]))
-        # Pre-bar key immediately before first bar (gap 1)
+        # Post-bar key after last bar glyph
         kw = textwidth(a.key)
-        key_end = first_bar - 2
-        key_start = key_end - kw + 1
-        @test key_start >= 1
+        key_start = last_bar + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
         @test String(chars[key_start:key_end]) == a.key
     end
 
-    @testset "PR-V: in-bar key when pre-bar cannot fit (flush-left bar)" begin
-        # L1.4 positive path: c0≈0 → pre_geom nothing; bw≥5 → key painted inside bar.
+    @testset "PR-V: in-bar key when post-bar cannot fit (flush-right bar)" begin
+        # Bar ends at right edge → post_geom nothing; bw≥5 → key painted inside bar.
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "InBarFlushEp")
         a = G4.Stores.create_issue!(m.boardstore; title = "FlushInBarKey", epic_id = e.id,
                                     start_date = Dates.today() - Day(1),
-                                    due_date = Dates.today() + Day(12))
+                                    due_date = Dates.today() + Day(200))
         g4!(m, 'G')
         g4!(m, 'z')  # week — full physical width
         m.gantt_start = Dates.today() - Day(1)
@@ -1836,25 +1844,19 @@ end
         c0, c1 = ext
         bw = c1 - c0 + 1
         kw = textwidth(a.key)
-        pre = G4.gantt_pre_bar_key_geom(c0, lay.view_ncols; gap = 1, key_w = kw)
-        @test pre === nothing          # no room left of bar for full key
-        @test c0 < kw + 1              # flush / near-left start
-        @test bw >= max(5, kw + 2)     # wide enough that in-bar paints full key (avail = bw-2)
+        post = G4.gantt_post_bar_label_geom(c0, c1, lay.label_ncols; gap = 1, max_w = kw)
+        # Flush-right: no room after bar for full key
+        @test post === nothing || post.max_chars < kw
+        @test bw >= max(5, kw + 2)
         tb = gantt_render(m; w = w, h = h)
         r = row_with(tb, a.key, h)
         @test r !== nothing
         chars = collect(r)
         bar_ix = [i for (i, c) in enumerate(chars) if c in ('█', '▓', '▌', '▐')]
         @test length(bar_ix) >= 5
-        # Key lives inside the bar body (not only left rail); caps included in span
+        # Key lives inside the bar body (not only left rail)
         interior = String(chars[minimum(bar_ix):maximum(bar_ix)])
         @test occursin(a.key, interior)
-        # No pre-bar key immediately before first bar (gap-1 cell would hold key end)
-        first_bar = minimum(bar_ix)
-        if first_bar > kw + 1
-            before = String(chars[(first_bar - kw - 1):(first_bar - 1)])
-            @test !occursin(a.key, before)
-        end
     end
 end
 
@@ -2110,17 +2112,18 @@ end
         @test hit_bar.col == c0a
         @test hit_bar.date isa Date
 
-        # Pre-bar key on A (before c0, gap 1)
-        pre_a = G4.gantt_pre_bar_key_geom(c0a, lay.view_ncols; gap = 1, key_w = textwidth(a.key))
-        @test pre_a !== nothing
-        hit_pre = G4.gantt_hit_test(lay, rows, lay.chart_x + pre_a.start, ya)
-        @test hit_pre.kind === G4.gantt_hit_pre_bar
-        @test hit_pre.issue_id == a.id
-        @test hit_pre.issue_sel == expected_sel_a
+        # Post-bar key on A (after c1, gap 1)
+        kw_a = textwidth(a.key)
+        post_a = G4.gantt_post_bar_label_geom(c0a, c1a, lay.label_ncols; gap = 1, max_w = kw_a)
+        @test post_a !== nothing && post_a.max_chars >= kw_a
+        hit_post = G4.gantt_hit_test(lay, rows, lay.chart_x + post_a.start, ya)
+        @test hit_post.kind === G4.gantt_hit_post_bar
+        @test hit_post.issue_id == a.id
+        @test hit_post.issue_sel == expected_sel_a
 
-        # Gap between pre-bar key and bar is empty chart (not bar)
-        gap_col = c0a - 1
-        if gap_col >= 0
+        # Gap between bar end and post-bar key is empty chart (not bar)
+        gap_col = c1a + 1
+        if gap_col < lay.view_ncols
             hit_gap = G4.gantt_hit_test(lay, rows, lay.chart_x + gap_col, ya)
             @test hit_gap.kind === G4.gantt_hit_empty_chart
         end
@@ -2299,16 +2302,17 @@ end
         @test hit_ep_chart.row_index == 1
         @test hit_ep_chart.issue_id === nothing
 
-        # Diamond pre-bar key region
+        # Diamond post-bar key region
         rd = findfirst(r -> r.kind === :issue && r.issue.id == dmd.id, rows)
         yd = lay_w.grid_y0 + (rd - lay_w.row_start)
         pcol = G4.gantt_point_col(lay_w.win_start, lay_w.dpc, dmd.due_date, lay_w.view_ncols)
         @test pcol !== nothing
-        pre_d = G4.gantt_pre_bar_key_geom(pcol, lay_w.view_ncols; gap = 1, key_w = textwidth(dmd.key))
-        @test pre_d !== nothing
-        hit_dpre = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x + pre_d.start, yd)
-        @test hit_dpre.kind === G4.gantt_hit_pre_bar
-        @test hit_dpre.issue_id == dmd.id
+        kwd = textwidth(dmd.key)
+        post_d = G4.gantt_post_bar_label_geom(pcol, pcol, lay_w.label_ncols; gap = 1, max_w = kwd)
+        @test post_d !== nothing && post_d.max_chars >= kwd
+        hit_dpost = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x + post_d.start, yd)
+        @test hit_dpost.kind === G4.gantt_hit_post_bar
+        @test hit_dpost.issue_id == dmd.id
 
         # Stale layout vs shorter rows: row_index out of range → none
         short = rows[1:1]  # epic only

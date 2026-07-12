@@ -397,12 +397,12 @@ end
         @test title !== nothing && occursin("GANTT", title)
     end
 
-    @testset "Given a Gantt bar When rendered Then full left title and key left of bar" begin
+    @testset "Given a Gantt bar When rendered Then full left title and key right of bar" begin
         m = p4login()
-        e = P4.Stores.create_epic!(m.boardstore; name = "PreBarBDD")
+        e = P4.Stores.create_epic!(m.boardstore; name = "PostBarBDD")
         a = P4.Stores.create_issue!(m.boardstore; title = "UniqueBDDLeftLabel", epic_id = e.id,
-                                    start_date = Dates.today() + Day(8),
-                                    due_date = Dates.today() + Day(12))
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
         p4!(m, 'G')
         p4!(m, 'z')
         @test m.view == :gantt && m.gantt_scale == :week
@@ -426,15 +426,14 @@ end
             c in ('█', '▓', '▌', '▐') && (last_bar = i)
         end
         @test last_bar > 0
-        # Full identity on left rail (before bar), not post-bar after bar end
+        # Full identity on left rail (before bar)
         ti = findfirst("UniqueBDDLeft", r)
         @test ti !== nothing && first(ti) < first_bar
-        @test !occursin("UniqueBDDLeft", String(chars[(last_bar + 1):end]))
-        # Key immediately before first bar glyph (gap 1)
+        # Key immediately AFTER last bar glyph (gap 1) — identifier right of bar
         kw = textwidth(a.key)
-        key_end = first_bar - 2
-        key_start = key_end - kw + 1
-        @test key_start >= 1
+        key_start = last_bar + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
         @test String(chars[key_start:key_end]) == a.key
     end
 
