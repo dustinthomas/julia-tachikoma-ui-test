@@ -463,6 +463,30 @@ function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
     asg = iss.assignee_id === nothing ? "Unassigned" : _user_name(m, iss.assignee_id)
     due = iss.due_date === nothing ? "—" : string(iss.due_date)
     set_string!(buf, x, y, _short("Assignee:$(asg)  Due:$(due)", inner.width - 2), Style(; fg = col_text_dim())); y += 1
+    # G6b: read-only blocks / blocked-by summary (create/delete via Gantt L/U)
+    if y <= maxy
+        lnks = Stores.list_links(m.boardstore; issue_id = iss.id, kind = "blocks")
+        if !isempty(lnks)
+            out_keys = String[]
+            in_keys = String[]
+            for ln in lnks
+                if ln.from_id == iss.id
+                    other = Stores.get_issue(m.boardstore, ln.to_id)
+                    push!(out_keys, other === nothing ? ln.to_id : other.key)
+                elseif ln.to_id == iss.id
+                    other = Stores.get_issue(m.boardstore, ln.from_id)
+                    push!(in_keys, other === nothing ? ln.from_id : other.key)
+                end
+            end
+            parts = String[]
+            isempty(out_keys) || push!(parts, "blocks→" * join(out_keys, ","))
+            isempty(in_keys) || push!(parts, "blocked←" * join(in_keys, ","))
+            if !isempty(parts)
+                set_string!(buf, x, y, _short("Links: " * join(parts, "  "), inner.width - 2),
+                            Style(; fg = col_text_muted())); y += 1
+            end
+        end
+    end
     if !isempty(iss.description)
         set_string!(buf, x, y, _short(iss.description, inner.width - 2), Style(; fg = col_text())); y += 1
     end

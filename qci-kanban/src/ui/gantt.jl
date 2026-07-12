@@ -697,7 +697,101 @@ gantt_safe_char(ch::Char, narrow::Bool=false)::Char =
     ch == '▌' ? '[' :
     ch == '▐' ? ']' :
     ch == '┬' ? '+' :
-    ch == '▬' ? '-' : ch
+    ch == '▬' ? '-' :
+    # G6b dependency polyline (box-drawing → ASCII)
+    ch == '─' ? '-' :
+    ch == '│' ? '|' :
+    ch == '╮' ? '+' :
+    ch == '╯' ? '+' :
+    ch == '╰' ? '+' :
+    ch == '╭' ? '+' :
+    ch == '▶' ? '>' :
+    ch == '◀' ? '<' : ch
+
+"""
+    gantt_link_segments(from_row, to_row, c_from, c_to; narrow=false)
+        -> Vector{NamedTuple{(:x,:y,:ch),Tuple{Int,Int,Char}}}
+
+Pure finish-to-start orthogonal polyline for a `blocks` edge (G6b / Criterion 4).
+`(c_from, from_row)` is the source bar **end**; `(c_to, to_row)` is the target
+bar **start**. Rows and columns are 0-based chart-relative indices.
+
+Box-drawing: `─` `│` `╮` `╯` `╰` `╭` `▶` `◀`. When `narrow`, maps via
+`gantt_safe_char`. Caller clips to the visible window and paints after bars,
+before pre-bar keys.
+"""
+function gantt_link_segments(from_row::Int, to_row::Int, c_from::Int, c_to::Int;
+                             narrow::Bool = false)
+    segs = NamedTuple{(:x, :y, :ch), Tuple{Int, Int, Char}}[]
+    function pushseg!(x::Int, y::Int, ch::Char)
+        push!(segs, (x = x, y = y, ch = gantt_safe_char(ch, narrow)))
+        nothing
+    end
+
+    if from_row == to_row
+        if c_from == c_to
+            pushseg!(c_to, to_row, '▶')
+            return segs
+        elseif c_from < c_to
+            for x in c_from:(c_to - 1)
+                pushseg!(x, from_row, '─')
+            end
+            pushseg!(c_to, to_row, '▶')
+        else
+            for x in (c_to + 1):c_from
+                pushseg!(x, from_row, '─')
+            end
+            pushseg!(c_to, to_row, '◀')
+        end
+        return segs
+    end
+
+    going_down = to_row > from_row
+    # Start corner at source bar end; vertical along c_from.
+    pushseg!(c_from, from_row, going_down ? '╮' : '╯')
+    if going_down
+        for y in (from_row + 1):(to_row - 1)
+            pushseg!(c_from, y, '│')
+        end
+    else
+        for y in (to_row + 1):(from_row - 1)
+            pushseg!(c_from, y, '│')
+        end
+    end
+
+    if c_to == c_from
+        pushseg!(c_to, to_row, '▶')
+    elseif c_to > c_from
+        pushseg!(c_from, to_row, going_down ? '╰' : '╭')
+        for x in (c_from + 1):(c_to - 1)
+            pushseg!(x, to_row, '─')
+        end
+        pushseg!(c_to, to_row, '▶')
+    else
+        pushseg!(c_from, to_row, going_down ? '╯' : '╮')
+        for x in (c_to + 1):(c_from - 1)
+            pushseg!(x, to_row, '─')
+        end
+        pushseg!(c_to, to_row, '◀')
+    end
+    segs
+end
+
+"""
+    gantt_issue_endpoint_cols(win_start, dpc, sd, ed, ncols) -> (c0, c1) | nothing
+
+Bar start/end columns for FS arrows. Dual-date → `gantt_bar_extent`; single-date
+diamond → `(col, col)`. `nothing` when wholly outside the window.
+"""
+function gantt_issue_endpoint_cols(win_start::Date, dpc::Int, sd, ed, ncols::Int)
+    if sd !== nothing && ed !== nothing
+        return gantt_bar_extent(win_start, dpc, sd, ed, ncols)
+    end
+    d = sd === nothing ? ed : sd
+    col = gantt_point_col(win_start, dpc, d, ncols)
+    col === nothing && return nothing
+    (col, col)
+end
 
 """
     status_progress(iss) -> Float64
@@ -843,6 +937,99 @@ _gantt_open_detail!(m::AppModel) = _open_detail_issue!(m, _gantt_selected_issue(
 
 "Open the card-edit modal for the currently selected gantt row issue."
 _gantt_open_edit!(m::AppModel) = _open_edit_issue!(m, _gantt_selected_issue(m))
+
+# ── G6b thin blocks-link UI (two-step L create, U delete) ───────────────────
+"""
+    _gantt_link_blocks!(m)
+
+Two-step finish-to-start `blocks` link create on the Gantt view:
+1. First `L` — stash selected issue as source (`gantt_link_from_id`).
+2. Second `L` on a different issue — `Stores.create_link!(...; kind=\"blocks\")`.
+Cycle / project / validation errors surface as `m.message`. Esc clears the
+pending source (see `update!`). Requires `can!(:edit_issue)` on the source.
+"""
+function _gantt_link_blocks!(m::AppModel)
+    iss = _gantt_selected_issue(m)
+    if iss === nothing
+        m.message = "No issue selected"
+        return m
+    end
+    if m.gantt_link_from_id === nothing
+        m.gantt_link_from_id = iss.id
+        m.message = "Blocks source: $(iss.key) — select target, press L"
+        return m
+    end
+    from_id = m.gantt_link_from_id
+    m.gantt_link_from_id = nothing
+    if from_id == iss.id
+        m.message = "Link cancelled (same issue)"
+        return m
+    end
+    from = Stores.get_issue(m.boardstore, from_id)
+    if from === nothing
+        m.message = "Link source gone"
+        return m
+    end
+    can!(m, :edit_issue; resource = from) || return m
+    try
+        Stores.create_link!(m.boardstore; from_id = from_id, to_id = iss.id, kind = "blocks")
+        _set_message!(m, "Linked $(from.key) blocks $(iss.key)")
+    catch err
+        m.message = sprint(showerror, err)
+    end
+    m
+end
+
+"""
+    _gantt_unlink_blocks!(m)
+
+Delete a `blocks` link involving the selected Gantt issue. Prefer the edge from
+a pending `gantt_link_from_id` → selection; else first outgoing; else any
+incoming. Surfaces missing-link / permission as `m.message`.
+"""
+function _gantt_unlink_blocks!(m::AppModel)
+    iss = _gantt_selected_issue(m)
+    if iss === nothing
+        m.message = "No issue selected"
+        return m
+    end
+    can!(m, :edit_issue; resource = iss) || return m
+    pid = m.active_project_id
+    links = Stores.list_links(m.boardstore; issue_id = iss.id, kind = "blocks",
+                              project_id = pid)
+    target = nothing
+    if m.gantt_link_from_id !== nothing
+        for ln in links
+            if ln.from_id == m.gantt_link_from_id && ln.to_id == iss.id
+                target = ln
+                break
+            end
+        end
+    end
+    if target === nothing
+        for ln in links
+            if ln.from_id == iss.id
+                target = ln
+                break
+            end
+        end
+    end
+    if target === nothing && !isempty(links)
+        target = links[1]
+    end
+    if target === nothing
+        m.message = "No blocks link on $(iss.key)"
+        return m
+    end
+    m.gantt_link_from_id = nothing
+    Stores.delete_link!(m.boardstore, target.id)
+    fr = Stores.get_issue(m.boardstore, target.from_id)
+    to = Stores.get_issue(m.boardstore, target.to_id)
+    fk = fr === nothing ? target.from_id : fr.key
+    tk = to === nothing ? target.to_id : to.key
+    _set_message!(m, "Unlinked $fk blocks $tk")
+    m
+end
 
 # ═══════════════════════════ LAYOUT (G4.1) ═══════════════════════════════════
 """
@@ -1718,6 +1905,45 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         ax = chart_x + c0
         if ax <= area.x + area.width - 1
             set_char!(buf, ax, rowy, '▌', Style(; fg = col_primary_hi(), bold = true))
+        end
+    end
+
+    # G6b — finish-to-start dependency arrows for project `blocks` links.
+    # Z-order: after bars/diamonds/selection, before today + pre-bar keys (keys win on collision).
+    # Only when both endpoints are in the nshow window and have visible bar/diamond geometry.
+    if m.active_project_id !== nothing && nshow > 0
+        # Map issue id → (0-based vis row, c0, c1) for visible issue rows only.
+        ep_map = Dict{String, Tuple{Int,Int,Int}}()
+        for i in 1:nshow
+            ri = row_start + i - 1
+            ri > length(rows) && break
+            row = rows[ri]
+            row.kind === :issue || continue
+            iss = row.issue
+            iss === nothing && continue
+            psd, pdd = _gantt_paint_dates(m, iss)
+            cols = gantt_issue_endpoint_cols(win_start, dpc, psd, pdd, view_ncols)
+            cols === nothing && continue
+            c0e, c1e = cols
+            ep_map[iss.id] = (i - 1, c0e, c1e)
+        end
+        if !isempty(ep_map)
+            for ln in Stores.list_links(m.boardstore; project_id = m.active_project_id,
+                                        kind = "blocks")
+                fr = get(ep_map, ln.from_id, nothing)
+                to = get(ep_map, ln.to_id, nothing)
+                (fr === nothing || to === nothing) && continue
+                from_y, _, c_from = fr
+                to_y, c_to, _ = to
+                for seg in gantt_link_segments(from_y, to_y, c_from, c_to; narrow = is_narrow)
+                    (seg.x < 0 || seg.x >= view_ncols) && continue
+                    (seg.y < 0 || seg.y >= nshow) && continue
+                    xx = chart_x + seg.x
+                    xx > area.x + area.width - 1 && continue
+                    yy = grid_y0 + seg.y
+                    set_char!(buf, xx, yy, seg.ch, Style(; fg = col_text_muted()))
+                end
+            end
         end
     end
 

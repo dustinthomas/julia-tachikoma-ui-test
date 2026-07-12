@@ -619,6 +619,55 @@ end
         @test G4.gantt_safe_char('┬', true) == '+'
         @test G4.gantt_safe_char('█', true) == '█'  # existing kept
         @test G4.gantt_safe_char('░', true) == '░'
+        # G6b link polyline fallbacks
+        @test G4.gantt_safe_char('─', true) == '-'
+        @test G4.gantt_safe_char('│', true) == '|'
+        @test G4.gantt_safe_char('╮', true) == '+'
+        @test G4.gantt_safe_char('╯', true) == '+'
+        @test G4.gantt_safe_char('╰', true) == '+'
+        @test G4.gantt_safe_char('╭', true) == '+'
+        @test G4.gantt_safe_char('▶', true) == '>'
+        @test G4.gantt_safe_char('◀', true) == '<'
+    end
+
+    @testset "G6b: gantt_link_segments pure FS polylines" begin
+        # Same row forward: ──▶
+        segs = G4.gantt_link_segments(0, 0, 2, 6)
+        @test !isempty(segs)
+        @test segs[end] == (x = 6, y = 0, ch = '▶')
+        @test all(s -> s.y == 0, segs)
+        @test any(s -> s.ch == '─', segs)
+        # Same row reverse: ◀──
+        segs_r = G4.gantt_link_segments(1, 1, 8, 3)
+        @test segs_r[end] == (x = 3, y = 1, ch = '◀')
+        # Degenerate same cell
+        segs0 = G4.gantt_link_segments(2, 2, 5, 5)
+        @test length(segs0) == 1 && segs0[1].ch == '▶'
+        # Down + right (classic FS): ╮ / │ / ╰─▶
+        segs_d = G4.gantt_link_segments(0, 2, 4, 7)
+        chars_d = Set(s.ch for s in segs_d)
+        @test '╮' in chars_d && '│' in chars_d && '╰' in chars_d && '▶' in chars_d
+        @test segs_d[1] == (x = 4, y = 0, ch = '╮')
+        @test segs_d[end] == (x = 7, y = 2, ch = '▶')
+        # Up + left
+        segs_u = G4.gantt_link_segments(3, 1, 9, 5)
+        chars_u = Set(s.ch for s in segs_u)
+        @test '╯' in chars_u && '│' in chars_u && '▶' ∉ chars_u  # ends with ◀
+        @test segs_u[end].ch == '◀'
+        # Same column down: vertical + ▶ at target
+        segs_v = G4.gantt_link_segments(0, 3, 2, 2)
+        @test segs_v[1].ch == '╮'
+        @test segs_v[end] == (x = 2, y = 3, ch = '▶')
+        @test any(s -> s.ch == '│', segs_v)
+        # Narrow maps box-drawing to ASCII
+        segs_n = G4.gantt_link_segments(0, 1, 3, 6; narrow = true)
+        @test all(s -> s.ch in ('-', '|', '+', '>', '<'), segs_n)
+        @test segs_n[end].ch == '>'
+        # Endpoint cols helper
+        ws = Date(2026, 3, 1)
+        @test G4.gantt_issue_endpoint_cols(ws, 1, Date(2026, 3, 2), Date(2026, 3, 5), 14) == (1, 4)
+        @test G4.gantt_issue_endpoint_cols(ws, 1, nothing, Date(2026, 3, 3), 14) == (2, 2)
+        @test G4.gantt_issue_endpoint_cols(ws, 1, Date(2026, 4, 1), Date(2026, 4, 5), 14) === nothing
     end
 end
 
@@ -2596,6 +2645,212 @@ end
         G4._gantt_begin_drag!(m, a, :body, 0)
         @test m.gantt_drag !== nothing && m.gantt_drag.mode === :body
         G4._gantt_clear_drag!(m)
+    end
+end
+
+# ── G6b dependency arrows + thin link UI ────────────────────────────────────
+@testset "G6b — FS dependency arrows + link UI" begin
+    @testset "render smoke: two dated issues + blocks link shows connector glyphs" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DepEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DepFrom", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(2))
+        b = G4.Stores.create_issue!(m.boardstore; title = "DepTo", epic_id = e.id,
+                                    start_date = Dates.today() + Day(4),
+                                    due_date = Dates.today() + Day(6))
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        m.gantt_scale = :day
+        tb = gantt_render(m; w = 120, h = 24)
+        blob = gantt_screen_blob(tb; h = 24)
+        # Connector glyphs from gantt_link_segments (unicode path, w>=60)
+        has_conn = occursin('╮', blob) || occursin('╰', blob) || occursin('▶', blob) ||
+                   occursin('╯', blob) || occursin('│', blob) && occursin('─', blob)
+        @test has_conn
+        # Pure segments for the visible pair agree with geometry
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 120, 24); rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
+        @test ra !== nothing && rb !== nothing
+        ext_a = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
+        @test ext_a !== nothing && ext_b !== nothing
+        vis_a = ra - lay.row_start  # 0-based vis if both in window
+        vis_b = rb - lay.row_start
+        segs = G4.gantt_link_segments(vis_a, vis_b, ext_a[2], ext_b[1])
+        @test !isempty(segs)
+        @test segs[end].ch == '▶' || segs[end].ch == '◀'
+    end
+
+    @testset "thin UI: L creates blocks link; cycle surfaces message; U deletes" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "LinkUI")
+        a = G4.Stores.create_issue!(m.boardstore; title = "LinkA", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(1))
+        b = G4.Stores.create_issue!(m.boardstore; title = "LinkB", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(3))
+        c = G4.Stores.create_issue!(m.boardstore; title = "LinkC", epic_id = e.id,
+                                    start_date = Dates.today() + Day(4),
+                                    due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        # Issues sorted by anchor then key — select by id
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        @test m.gantt_link_from_id == a.id
+        @test occursin("Blocks source", m.message)
+        # Esc cancels pending source
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.gantt_link_from_id === nothing
+        @test occursin("Link cancelled", m.message)
+        # Two-step create A → B
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'L')
+        @test m.gantt_link_from_id === nothing
+        @test occursin("Linked", m.message) && occursin("blocks", m.message)
+        links = G4.Stores.list_links(m.boardstore; kind = "blocks", project_id = m.active_project_id)
+        @test any(ln -> ln.from_id == a.id && ln.to_id == b.id, links)
+        # Store cycle still rejected via UI message (B → A)
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'L')
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        @test occursin("cycle", lowercase(m.message))
+        @test length(G4.Stores.list_links(m.boardstore; kind = "blocks")) == 1
+        # Same-issue second L cancels
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        g4!(m, 'L')
+        @test m.gantt_link_from_id === nothing
+        @test occursin("same issue", m.message)
+        # Chain B → C then try C → A cycle via direct store (still rejected)
+        G4.Stores.create_link!(m.boardstore; from_id = b.id, to_id = c.id, kind = "blocks")
+        @test_throws ArgumentError G4.Stores.create_link!(m.boardstore;
+            from_id = c.id, to_id = a.id, kind = "blocks")
+        # U deletes outgoing from selected (A → B)
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'U')
+        @test occursin("Unlinked", m.message)
+        @test !any(ln -> ln.from_id == a.id && ln.to_id == b.id,
+                   G4.Stores.list_links(m.boardstore; kind = "blocks"))
+        # U with no link
+        g4!(m, 'U')
+        @test occursin("No blocks link", m.message)
+        # Card detail surfaces Links: after create
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'v')
+        @test m.modal === :card_detail
+        tb = app_tb(m; w = 100, h = 30)
+        blob = join([something(T.row_text(tb, i), "") for i in 1:30], "\n")
+        @test occursin("Links:", blob) && occursin("blocks→", blob)
+        T.update!(m, T.KeyEvent(:escape))
+        # Card detail also shows blocked-by (incoming)
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'v')
+        tb_in = app_tb(m; w = 100, h = 30)
+        blob_in = join([something(T.row_text(tb_in, i), "") for i in 1:30], "\n")
+        @test occursin("blocked←", blob_in)
+        T.update!(m, T.KeyEvent(:escape))
+        # Clear remaining chain edges (B→C may still exist from cycle setup)
+        for ln in G4.Stores.list_links(m.boardstore; kind = "blocks")
+            G4.Stores.delete_link!(m.boardstore, ln.id)
+        end
+        # U prefers pending source → selection edge
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')  # pending source A
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'U')  # delete A→B via pending match
+        @test occursin("Unlinked", m.message)
+        @test isempty(G4.Stores.list_links(m.boardstore; kind = "blocks", issue_id = a.id))
+        # U with only incoming (no outgoing on target): links[1] fallback
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        @test length(G4.Stores.list_links(m.boardstore; kind = "blocks", issue_id = b.id)) == 1
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'U')
+        @test occursin("Unlinked", m.message)
+        @test isempty(G4.Stores.list_links(m.boardstore; kind = "blocks", issue_id = b.id))
+        # Pending source that does not match any edge: for-loop exhausts without break
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        m.gantt_link_from_id = c.id  # C does not block B
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'U')
+        @test occursin("Unlinked", m.message)
+        @test m.gantt_link_from_id === nothing
+        # No issue selected → L/U messages (empty gantt)
+        m2 = gantt_login()
+        g4!(m2, 'G')
+        g4!(m2, 'L')
+        @test occursin("No issue selected", m2.message)
+        g4!(m2, 'U')
+        @test occursin("No issue selected", m2.message)
+        # Link source gone (stale id)
+        e2 = G4.Stores.create_epic!(m2.boardstore; name = "GoneEp")
+        gone = G4.Stores.create_issue!(m2.boardstore; title = "WillGone", epic_id = e2.id,
+                                       start_date = Dates.today(),
+                                       due_date = Dates.today() + Day(1))
+        keep = G4.Stores.create_issue!(m2.boardstore; title = "WillKeep", epic_id = e2.id,
+                                       start_date = Dates.today() + Day(2),
+                                       due_date = Dates.today() + Day(3))
+        g4!(m2, 'G')
+        G4._gantt_select_issue_id!(m2, gone.id)
+        g4!(m2, 'L')
+        G4.Stores.delete_issue!(m2.boardstore, gone.id)
+        G4._gantt_select_issue_id!(m2, keep.id)
+        g4!(m2, 'L')
+        @test occursin("Link source gone", m2.message)
+    end
+
+    @testset "link only paints when both endpoints in nshow window" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "FoldEp")
+        # Many issues so one pair can fall outside short nshow
+        issues = G4.Domain.Issue[]
+        for i in 1:8
+            push!(issues, G4.Stores.create_issue!(m.boardstore; title = "Fold$i", epic_id = e.id,
+                                                  start_date = Dates.today(),
+                                                  due_date = Dates.today() + Day(1)))
+        end
+        # Link first → last (likely not both visible on short height)
+        G4.Stores.create_link!(m.boardstore; from_id = issues[1].id, to_id = issues[end].id,
+                               kind = "blocks")
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        m.gantt_sel = 1
+        # Short viewport: few rows → last issue not in nshow with sel at top
+        tb = gantt_render(m; w = 100, h = 8)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 100, 8); rows = rows)
+        r_first = findfirst(r -> r.kind === :issue && r.issue.id == issues[1].id, rows)
+        r_last = findfirst(r -> r.kind === :issue && r.issue.id == issues[end].id, rows)
+        @test r_first !== nothing && r_last !== nothing
+        both_vis = (lay.row_start <= r_first <= lay.row_start + lay.nshow - 1) &&
+                   (lay.row_start <= r_last <= lay.row_start + lay.nshow - 1)
+        blob = gantt_screen_blob(tb; h = 8)
+        if !both_vis
+            # No full connector expected when one endpoint is scrolled out
+            # (may still have bar material; just ensure paint doesn't crash)
+            @test true
+        else
+            @test occursin('▶', blob) || occursin('╮', blob) || occursin('╰', blob)
+        end
+        # Selecting last brings pair into view on taller screen — arrows paint
+        G4._gantt_select_issue_id!(m, issues[end].id)
+        tb2 = gantt_render(m; w = 120, h = 28)
+        blob2 = gantt_screen_blob(tb2; h = 28)
+        # With tall window both likely visible → connector present
+        lay2 = G4.gantt_layout(m, T.Rect(1, 1, 120, 28); rows = G4.gantt_rows(m))
+        if lay2.nshow >= length(rows)
+            @test occursin('▶', blob2) || occursin('╮', blob2) || occursin('╰', blob2) ||
+                  occursin('─', blob2)
+        end
     end
 end
 

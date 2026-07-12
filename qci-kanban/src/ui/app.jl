@@ -74,6 +74,8 @@ mutable struct AppModel <: Model
     # M3 drag-reschedule shadow state (nothing | NamedTuple with issue_id, mode,
     # origin_col, orig_start/due, preview_start/due). Preview only until release.
     gantt_drag::Any
+    # G6b two-step blocks-link source (nothing | issue id). First L stashes; second creates.
+    gantt_link_from_id::Union{String,Nothing}
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
@@ -147,7 +149,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  _make_input(), _make_input(),
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
-                 td, :day, 1, Rect(0, 0, 0, 0), nothing,
+                 td, :day, 1, Rect(0, 0, 0, 0), nothing, nothing,
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
@@ -489,10 +491,17 @@ function update!(m::AppModel, evt::KeyEvent)
     end
     m.last_input_at = Dates.now(UTC)
     # M3: Esc cancels an in-progress gantt bar drag without store commit.
-    if m.gantt_drag !== nothing && evt.key === :escape && m.modal === :none
-        m.gantt_drag = nothing
-        m.message = "Drag cancelled"
-        return m
+    # G6b: Esc also clears a pending two-step blocks-link source.
+    if evt.key === :escape && m.modal === :none
+        if m.gantt_drag !== nothing
+            m.gantt_drag = nothing
+            m.message = "Drag cancelled"
+            return m
+        elseif m.gantt_link_from_id !== nothing
+            m.gantt_link_from_id = nothing
+            m.message = "Link cancelled"
+            return m
+        end
     end
     disp = route_to_focus!(m.focus, evt)      # step 1: focused editor wins
     disp === :consumed && return m
@@ -675,6 +684,10 @@ function _do_action!(m::AppModel, act::Symbol)
         _gantt_open_detail!(m)
     elseif act === :gantt_edit_card
         _gantt_open_edit!(m)
+    elseif act === :gantt_link_blocks
+        _gantt_link_blocks!(m)
+    elseif act === :gantt_unlink_blocks
+        _gantt_unlink_blocks!(m)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
     elseif act === :project_switch
         _open_project_switch!(m)
@@ -723,7 +736,8 @@ end
 function _switch_view!(m::AppModel, v::Symbol)
     m.view = v
     m.modal = :none
-    m.gantt_drag = nothing   # M3: never carry shadow drag across views
+    m.gantt_drag = nothing          # M3: never carry shadow drag across views
+    m.gantt_link_from_id = nothing  # G6b: drop pending link source
     m.message = "$(VIEW_TITLES[v]) view"
     v === :calendar && _cal_init!(m)
     v === :gantt && _gantt_init!(m)
@@ -835,6 +849,7 @@ function _logout!(m::AppModel)
     # state is clean until next login (render already short-circuits unauth).
     m.modal = :none
     m.gantt_drag = nothing
+    m.gantt_link_from_id = nothing
     m.confirm_kind = :none
     m.confirm_target = nothing
     m.card_issue_id = nothing
