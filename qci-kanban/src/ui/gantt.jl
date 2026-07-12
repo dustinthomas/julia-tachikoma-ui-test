@@ -101,7 +101,7 @@ function gantt_clamped_start_for_day(win_start::Date, today::Date, dpc::Int, nco
     return max(win_start, preferred)
 end
 
-# ── G1 period identity / shade / tabs / post-bar geom (pure; not yet wired) ─
+# ── G1 period identity / shade / tabs / post-bar geom (pure; shade=G2, tabs=G3) ─
 """
     gantt_iso_week_id(d::Date) -> (iso_week_year::Int, iso_week::Int)
 
@@ -760,18 +760,21 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # PR5: has_footer = h>=10 && rows>0 && !narrow (responsive hide on small terminals)
     # predicate approx per design; nshow accounts for footer_rows to reserve space.
     has_footer = area.height >= 10 && length(rows) > 0 && !is_narrow
-    # Keep single axis row (ruler_rows=1) so band→grid geometry stays band_y+2 = first
-    # grid row (today ┃ asserts). Density comes from numeric day ticks on that row;
-    # period labels appear when height allows a second axis strip *above* ticks only
-    # if we still preserve band_y+2 grid — so we draw period text into the left label
-    # gutter of the axis row / as non-colliding overlays, not an extra content offset.
-    ruler_rows = has_ruler ? 1 : 0
+    # G3 height budget (locked): dual-row axis only at h≥12; single at 8–11; none <8.
+    # Footer stays at h≥10 with single axis for h=10–11 (footer wins over dual there).
+    has_dual = area.height >= 12 && has_ruler
+    tab_rows = has_dual ? 1 : 0
+    tick_rows = has_ruler ? 1 : 0
+    ruler_rows = tab_rows + tick_rows   # 0 | 1 | 2
     footer_rows = has_footer ? 1 : 0
-    content_start = 1 + 1 + ruler_rows
+    content_start = 1 + 1 + ruler_rows  # title + band + axis strip
     # Compute layout rows always (bands loop is no-op for empty; ruler now drawn
     # for empty tall cases too so no blank ruler row when h>=8).
     band_y = area.y + 1
-    ruler_y = area.y + 2
+    tab_y = has_dual ? area.y + 2 : 0
+    # Single-row axis lands at band+1; dual tick row is band+2 (under tabs).
+    tick_y = has_ruler ? (has_dual ? area.y + 3 : area.y + 2) : 0
+    ruler_y = tick_y  # TODAY label + single-row axis paint target
     grid_y0 = area.y + content_start
     nshow = max(0, min(length(rows), area.height - content_start - footer_rows - 1))
     # G2 paint gates: weekend ░ + week seps ┆ off at :month (period wash stays on).
@@ -821,32 +824,76 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
 
     if has_ruler
-        # Product-style dense axis: numeric day ticks + period labels where free.
-        # Also paint a short month tag in the left gutter (under labels) when room.
-        for (c, lab) in gantt_axis_period_labels(win_start, dpc, view_ncols; narrow = is_narrow)
-            # Period label in left gutter only (first period), keeps chart ticks dense
-            if c == 0 && left_w >= 4
-                set_string!(buf, area.x, ruler_y, _short(lab, min(left_w - 1, textwidth(lab) + 1)),
-                            Style(; fg = col_text_dim()))
+        # G3: dual-row (h≥12) = period tabs (full names) + tick row; single (h=8–11) =
+        # digit-first combine on day/week, tabs-prefer on month. Pack labels into span.
+        if has_dual
+            # Tab row — full period names from gantt_axis_period_tabs (bold primary)
+            for t in gantt_axis_period_tabs(win_start, dpc, view_ncols, m.gantt_scale; narrow = is_narrow)
+                span = t.c1 - t.c0 + 1
+                span < 1 && continue
+                lab = t.label
+                textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
+                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_c = clamp(start_c, t.c0, t.c1)
+                xx = chart_x + start_c
+                xx > area.x + area.width - 1 && continue
+                set_string!(buf, xx, tab_y, _short(lab, max(1, min(span, view_ncols - start_c))),
+                            Style(; fg = col_primary(), bold = true))
             end
-        end
-        ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
-        for (c, lab) in ax
-            (c < 0 || c >= view_ncols) && continue
-            xx = chart_x + c
-            xx > area.x + area.width - 1 && continue
-            if textwidth(lab) <= 1
-                tch = lab == "┬" ? gantt_safe_char('┬', is_narrow) : (isempty(lab) ? ' ' : lab[1])
-                if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
-                set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
-            else
-                set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
+            # Tick row — numeric day-of-month with breathing room (muted)
+            for (c, lab) in gantt_axis_tick_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+                (c < 0 || c >= view_ncols) && continue
+                xx = chart_x + c
+                xx > area.x + area.width - 1 && continue
+                if textwidth(lab) <= 1
+                    tch = isempty(lab) ? ' ' : lab[1]
+                    if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
+                    set_char!(buf, xx, tick_y, tch, Style(; fg = col_text_muted(), dim = true))
+                else
+                    set_string!(buf, xx, tick_y, _short(lab, max(1, view_ncols - c)),
+                                Style(; fg = col_text_muted(), dim = true))
+                end
+            end
+        elseif m.gantt_scale === :month
+            # Single-row month: prefer full period tabs over dense day ticks
+            for t in gantt_axis_period_tabs(win_start, dpc, view_ncols, :month; narrow = is_narrow)
+                span = t.c1 - t.c0 + 1
+                span < 1 && continue
+                lab = t.label
+                textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
+                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_c = clamp(start_c, t.c0, t.c1)
+                xx = chart_x + start_c
+                xx > area.x + area.width - 1 && continue
+                set_string!(buf, xx, ruler_y, _short(lab, max(1, min(span, view_ncols - start_c))),
+                            Style(; fg = col_primary(), bold = true))
+            end
+        else
+            # Single-row day/week: digit-first combine + period gutter (pre-G3 path)
+            for (c, lab) in gantt_axis_period_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+                if c == 0 && left_w >= 4
+                    set_string!(buf, area.x, ruler_y, _short(lab, min(left_w - 1, textwidth(lab) + 1)),
+                                Style(; fg = col_text_dim()))
+                end
+            end
+            ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
+            for (c, lab) in ax
+                (c < 0 || c >= view_ncols) && continue
+                xx = chart_x + c
+                xx > area.x + area.width - 1 && continue
+                if textwidth(lab) <= 1
+                    tch = lab == "┬" ? gantt_safe_char('┬', is_narrow) : (isempty(lab) ? ' ' : lab[1])
+                    if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
+                    set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
+                else
+                    set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
+                end
             end
         end
     end
 
     if isempty(rows)
-        empty_y = has_ruler ? area.y + 3 : area.y + 2
+        empty_y = area.y + content_start
         # PR5: richer empty state + hint (no data change; hint from design)
         empty_msg = "No scheduled issues (press e on board or n on calendar to date items)"
         set_string!(buf, area.x, empty_y, _short(empty_msg, area.width),
