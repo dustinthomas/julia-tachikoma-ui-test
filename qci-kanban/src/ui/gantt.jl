@@ -101,6 +101,93 @@ function gantt_clamped_start_for_day(win_start::Date, today::Date, dpc::Int, nco
     return max(win_start, preferred)
 end
 
+# ── G1 period identity / shade / tabs / post-bar geom (pure; not yet wired) ─
+"""
+    gantt_iso_week_id(d::Date) -> (iso_week_year::Int, iso_week::Int)
+
+ISO-8601 week date: week-year is the year of the Thursday of that ISO week.
+`iso_week` is `Dates.week(d)` (1..53). Do not use calendar year with week number.
+"""
+function gantt_iso_week_id(d::Date)::Tuple{Int,Int}
+    thu = d + Day(4 - Dates.dayofweek(d))
+    return (Dates.year(thu), Dates.week(d))
+end
+
+"""
+    gantt_period_key(d::Date, scale::Symbol) -> Tuple
+
+Stable key for the scale's period (tabs + grouping):
+- :day   → (year, month, day)
+- :week  → gantt_iso_week_id(d)  # (iso_week_year, iso_week)
+- :month → (year, month)
+"""
+function gantt_period_key(d::Date, scale::Symbol)
+    scale === :month && return (Dates.year(d), Dates.month(d))
+    scale === :week  && return gantt_iso_week_id(d)
+    return (Dates.year(d), Dates.month(d), Dates.day(d))
+end
+
+# Fixed Monday epoch for proleptic week ordinal (1970-01-05 is a Monday).
+const GANTT_WEEK_EPOCH = Date(1970, 1, 5)  # dayofweek == 1
+
+"""
+    gantt_week_ordinal(d::Date) -> Int
+
+Proleptic week index: floor((d - Monday_epoch) / 7).
+Adjacent calendar weeks always differ by 1 → parity always alternates.
+"""
+gantt_week_ordinal(d::Date)::Int = fld(Dates.value(d) - Dates.value(GANTT_WEEK_EPOCH), 7)
+
+"""
+    gantt_period_parity(d, scale) -> Bool  # true = receive alt wash
+
+Consecutive periods in calendar order MUST alternate.
+- :day   → isodd(Dates.value(d))
+- :week  → isodd(gantt_week_ordinal(d))
+- :month → isodd(year*12 + month)
+"""
+function gantt_period_parity(d::Date, scale::Symbol)::Bool
+    if scale === :month
+        return isodd(Dates.year(d) * 12 + Dates.month(d))
+    elseif scale === :week
+        return isodd(gantt_week_ordinal(d))
+    else
+        return isodd(Dates.value(d))
+    end
+end
+
+"""
+    gantt_period_shade_cols(win_start, dpc, ncols, scale) -> Vector{Int}
+
+0-based columns whose period parity is true (receive alt wash).
+"""
+function gantt_period_shade_cols(win_start::Date, dpc::Int, ncols::Int, scale::Symbol)::Vector{Int}
+    [c for c in 0:(ncols-1)
+     if gantt_period_parity(gantt_date_for_col(win_start, dpc, c), scale)]
+end
+
+"""
+    gantt_post_bar_label_geom(c0, c1, label_ncols; gap=1, max_w=nothing, tcol=nothing)
+        -> Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}
+
+Label starts at c1 + 1 + gap (0-based chart cols).
+`label_ncols` is the right clip edge. Returns nothing if start ≥ label_ncols or avail < 1.
+If `tcol` is a column with start ≤ tcol, max_chars stops before tcol.
+"""
+function gantt_post_bar_label_geom(c0::Int, c1::Int, label_ncols::Int;
+                                   gap::Int=1, max_w::Union{Nothing,Int}=nothing,
+                                   tcol::Union{Nothing,Int}=nothing)
+    start = c1 + 1 + gap
+    start >= label_ncols && return nothing
+    avail = label_ncols - start
+    if tcol !== nothing && tcol >= start
+        avail = min(avail, tcol - start)
+    end
+    max_w !== nothing && (avail = min(avail, max_w))
+    avail < 1 && return nothing
+    (; start, max_chars = avail)
+end
+
 # ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
 # Overhaul (2026-07): denser product-style axis — period labels (months) plus
 # numeric day/period ticks so the chart is readable without relying only on a
@@ -221,6 +308,101 @@ function gantt_axis_labels(win_start::Date, dpc::Int, ncols::Int; narrow::Bool=f
         end
     end
     filter!(t -> 0 <= t[1] < ncols, dedup)
+end
+
+"""
+    gantt_axis_period_tabs(win_start, dpc, ncols, scale; narrow=false)
+        -> Vector{NamedTuple{(:c0,:c1,:label,:center), Tuple{Int,Int,String,Int}}}
+
+One entry per distinct period intersecting the window.
+`c0,c1` = inclusive visible column span; `center` = c0 + (c1-c0)÷2.
+- :day   → calendar months (full name; year on first/Jan/multi-year)
+- :week  → ISO Mon..Sun; "W{n} {u} {d}" when span≥7 && !narrow else "W{n}"
+- :month → calendar months (same year rule as :day)
+"""
+function gantt_axis_period_tabs(win_start::Date, dpc::Int, ncols::Int, scale::Symbol;
+                                narrow::Bool=false)
+    NT = NamedTuple{(:c0, :c1, :label, :center), Tuple{Int,Int,String,Int}}
+    out = NT[]
+    ncols <= 0 && return out
+
+    # Multi-year window? (for year-suffix rule on month-style tabs)
+    d_first = gantt_date_for_col(win_start, dpc, 0)
+    d_last  = gantt_date_for_col(win_start, dpc, ncols - 1)
+    multi_year = Dates.year(d_first) != Dates.year(d_last)
+
+    # Collect ordered periods: (key, c0, c1, sample_date)
+    periods = Tuple{Any,Int,Int,Date}[]
+    if scale === :week
+        seen = Dict{Tuple{Int,Int},Int}()  # key -> index in periods
+        for c in 0:(ncols-1)
+            d = gantt_date_for_col(win_start, dpc, c)
+            key = gantt_iso_week_id(d)
+            if haskey(seen, key)
+                i = seen[key]
+                k, c0, _c1, sd = periods[i]
+                periods[i] = (k, c0, c, sd)
+            else
+                push!(periods, (key, c, c, d))
+                seen[key] = length(periods)
+            end
+        end
+    else
+        # :day and :month → one tab per calendar month
+        seen = Dict{Tuple{Int,Int},Int}()
+        for c in 0:(ncols-1)
+            d = gantt_date_for_col(win_start, dpc, c)
+            key = (Dates.year(d), Dates.month(d))
+            if haskey(seen, key)
+                i = seen[key]
+                k, c0, _c1, sd = periods[i]
+                periods[i] = (k, c0, c, sd)
+            else
+                push!(periods, (key, c, c, d))
+                seen[key] = length(periods)
+            end
+        end
+    end
+
+    for (idx, (key, c0, c1, sample)) in enumerate(periods)
+        span = c1 - c0 + 1
+        center = c0 + (c1 - c0) ÷ 2
+        lab = if scale === :week
+            iso_y, iso_w = key::Tuple{Int,Int}
+            mon = sample - Day(Dates.dayofweek(sample) - 1)
+            # Full week visible (span≥7) and wide terminal → include Monday date
+            if !narrow && span >= 7
+                "W$(iso_w) $(Dates.format(mon, "u")) $(Dates.day(mon))"
+            else
+                "W$(iso_w)"
+            end
+        else
+            y, mo = key::Tuple{Int,Int}
+            d_lab = Date(y, mo, 1)
+            base = Dates.format(d_lab, narrow ? "u" : "U")
+            want_year = (idx == 1) || (mo == 1) || multi_year
+            if want_year
+                with_y = string(base, " ", y)
+                # Prefer dropping year before abbreviating month when tight
+                if textwidth(with_y) <= span
+                    with_y
+                elseif textwidth(base) <= span
+                    base
+                else
+                    fit_width(base, max(1, span))
+                end
+            else
+                textwidth(base) <= span ? base : fit_width(base, max(1, span))
+            end
+        end
+        # Full-week long form ("W12 Mar 16") is kept intact for pure oracles.
+        # Narrow / partial-week short "W{n}" clips when the token exceeds span.
+        if scale === :week && (narrow || span < 7) && textwidth(lab) > span
+            lab = fit_width(lab, max(1, span))
+        end
+        push!(out, (c0=c0, c1=c1, label=lab, center=center))
+    end
+    out
 end
 
 # ── Keep-in-view / selection orientation (pure) ─────────────────────────────
@@ -356,18 +538,33 @@ function gantt_sprint_bands(m::AppModel, win_start::Date, dpc::Int, ncols::Int)
 end
 
 """
-    gantt_left_width(rows, area_w) -> Int
+    gantt_left_label(row::GanttRow; compact::Bool=false) -> String
 
-Adaptive left label width (PR2). Guarantees chart space; uses longest label on data.
+compact=true  → issue rows: key only; epic rows: epic name (unchanged).
+compact=false → full row.label (key + title for issues).
 """
-function gantt_left_width(rows::Vector{GanttRow}, area_w::Int)::Int
+function gantt_left_label(row::GanttRow; compact::Bool=false)::String
+    row.kind === :epic && return row.label
+    compact || return row.label
+    row.issue !== nothing ? row.issue.key : row.label
+end
+
+"""
+    gantt_left_width(rows, area_w; compact=false) -> Int
+
+Adaptive left label width (PR2). When compact=true, measure epic labels + issue
+keys (not full titles) so chart columns expand. compact=false matches prior
+behavior (max textwidth of full labels).
+"""
+function gantt_left_width(rows::Vector{GanttRow}, area_w::Int; compact::Bool=false)::Int
     # Note: callers from render_gantt! are guarded to area_w >=24 before call;
     # direct pure-helper tests use w>=55. No <24 path exercised in normal use.
     if isempty(rows)
         return clamp(area_w ÷ 3, 14, 22)
     end
-    maxl = maximum((textwidth(r.label) for r in rows), init = 0)
-    desired = clamp(max(14, min(24, maxl + 3)), 14, area_w ÷ 3)
+    maxl = maximum(textwidth(gantt_left_label(r; compact=compact)) for r in rows; init=0)
+    lo = compact ? 10 : 14
+    desired = clamp(max(lo, min(24, maxl + 3)), lo, area_w ÷ 3)
     min(desired, area_w - 20)
 end
 

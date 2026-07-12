@@ -124,6 +124,221 @@ end
         @test G4.gantt_left_width(er, 120) <= 24
         @test G4.gantt_left_width(er, 120) >= 14
         @test G4.gantt_left_width(G4.GanttRow[], 80) == clamp(80 ÷ 3, 14, 22)
+        # compact= kw default preserves non-compact sizing
+        @test G4.gantt_left_width(er, 120; compact=false) == G4.gantt_left_width(er, 120)
+    end
+
+    # ── G1 pure helpers: ISO week / period parity / shade / tabs / post-bar ──
+    @testset "G1: gantt_iso_week_id / period_key / week_ordinal (ISO Dec–Jan)" begin
+        # 2025-12-28 is Sunday of ISO W52 2025; 12-29..01-04 is ISO W1 2026
+        d_w52 = Date(2025, 12, 28)
+        d_w1s = Date(2025, 12, 29):Day(1):Date(2026, 1, 4)
+        d_w2  = Date(2026, 1, 5)
+        @test G4.gantt_iso_week_id(d_w52) == (2025, 52)
+        @test G4.gantt_period_key(d_w52, :week) == (2025, 52)
+        w1_keys = [G4.gantt_period_key(d, :week) for d in d_w1s]
+        @test all(k == (2026, 1) for k in w1_keys)
+        @test all(G4.gantt_iso_week_id(d) == (2026, 1) for d in d_w1s)
+        @test G4.gantt_period_key(d_w2, :week) == (2026, 2)
+        # W52 ≠ W1
+        @test G4.gantt_period_key(d_w52, :week) != G4.gantt_period_key(Date(2025, 12, 29), :week)
+        # All W1 days share the same parity; W52 differs
+        w1_par = [G4.gantt_period_parity(d, :week) for d in d_w1s]
+        @test all(p == w1_par[1] for p in w1_par)
+        @test G4.gantt_period_parity(d_w52, :week) != w1_par[1]
+        # day/month keys
+        @test G4.gantt_period_key(Date(2026, 3, 10), :day) == (2026, 3, 10)
+        @test G4.gantt_period_key(Date(2026, 3, 10), :month) == (2026, 3)
+        # proleptic ordinal: Monday epoch 1970-01-05
+        @test G4.GANTT_WEEK_EPOCH == Date(1970, 1, 5)
+        @test G4.gantt_week_ordinal(Date(1970, 1, 5)) == 0
+        @test G4.gantt_week_ordinal(Date(1970, 1, 12)) == 1
+    end
+
+    @testset "G1: 53-week boundary period_parity alternates" begin
+        # 2020 has ISO week 53; late 2020 → early 2021
+        mondays = Date(2020, 12, 14):Day(7):Date(2021, 1, 18)
+        pars = [G4.gantt_period_parity(d, :week) for d in mondays]
+        for i in 2:length(pars)
+            @test pars[i] != pars[i - 1]
+        end
+        # keys still distinct across W52 / W53 / W1
+        @test G4.gantt_period_key(Date(2020, 12, 21), :week) == (2020, 52)
+        @test G4.gantt_period_key(Date(2020, 12, 28), :week) == (2020, 53)
+        @test G4.gantt_period_key(Date(2021, 1, 4), :week) == (2021, 1)
+        # multi-year sample: adjacent weeks never share parity
+        for y in (2015, 2019, 2020, 2025, 2026)
+            for mon in Date(y, 1, 1):Day(7):Date(y, 12, 25)
+                p0 = G4.gantt_period_parity(mon, :week)
+                p1 = G4.gantt_period_parity(mon + Day(7), :week)
+                @test p0 != p1
+            end
+        end
+    end
+
+    @testset "G1: gantt_period_shade_cols day/week/month shapes" begin
+        # :day — 14-col alternate day-by-day
+        ws = Date(2026, 3, 10)
+        day_cols = G4.gantt_period_shade_cols(ws, 1, 14, :day)
+        expected_day = [c for c in 0:13 if isodd(Dates.value(ws + Day(c)))]
+        @test day_cols == expected_day
+        # consecutive day parities flip
+        for c in 0:12
+            @test G4.gantt_period_parity(ws + Day(c), :day) !=
+                  G4.gantt_period_parity(ws + Day(c + 1), :day)
+        end
+
+        # :week — 14-col starting Monday: runs of length 7 when fully visible
+        mon = Date(2026, 3, 9)  # Monday
+        @test Dates.dayofweek(mon) == 1
+        week_cols = G4.gantt_period_shade_cols(mon, 1, 14, :week)
+        # week0 parity for cols 0..6, week1 for 7..13 — one week shaded, one not
+        p0 = G4.gantt_period_parity(mon, :week)
+        p1 = G4.gantt_period_parity(mon + Day(7), :week)
+        @test p0 != p1
+        expected_week = [c for c in 0:13 if G4.gantt_period_parity(mon + Day(c), :week)]
+        @test week_cols == expected_week
+        # runs of length 7
+        if p0
+            @test week_cols == collect(0:6)
+        else
+            @test week_cols == collect(7:13)
+        end
+
+        # :month — dpc=7, ncols≥8 spanning 2+ months — multi-col runs
+        mws = Date(2026, 3, 10)
+        dpc = 7
+        ncols = 12
+        mcols = G4.gantt_period_shade_cols(mws, dpc, ncols, :month)
+        # March cols 0-3, April 4-7, May 8-11 — adjacent months differ
+        p_mar = G4.gantt_period_parity(Date(2026, 3, 15), :month)
+        p_apr = G4.gantt_period_parity(Date(2026, 4, 15), :month)
+        p_may = G4.gantt_period_parity(Date(2026, 5, 15), :month)
+        @test p_mar != p_apr
+        @test p_apr != p_may
+        mar_cs = [c for c in 0:11 if Dates.month(G4.gantt_date_for_col(mws, dpc, c)) == 3]
+        apr_cs = [c for c in 0:11 if Dates.month(G4.gantt_date_for_col(mws, dpc, c)) == 4]
+        @test all(c -> (c in mcols) == p_mar, mar_cs)
+        @test all(c -> (c in mcols) == p_apr, apr_cs)
+        # multi-col run: all March cols share shade membership
+        @test length(mar_cs) >= 2
+    end
+
+    @testset "G1: gantt_post_bar_label_geom worked examples" begin
+        g = G4.gantt_post_bar_label_geom(0, 5, 14; gap=1)
+        @test g !== nothing
+        @test g.start == 7 && g.max_chars == 7
+        @test G4.gantt_post_bar_label_geom(0, 12, 14) === nothing
+        g2 = G4.gantt_post_bar_label_geom(0, 10, 80)
+        @test g2 !== nothing
+        @test g2.start == 12 && g2.max_chars == 68  # gutter used
+        g3 = G4.gantt_post_bar_label_geom(0, 3, 20; tcol=8)
+        @test g3 !== nothing
+        @test g3.start == 5 && g3.max_chars == 3  # stops before today
+        # max_w caps avail; gap custom; flush
+        g4 = G4.gantt_post_bar_label_geom(2, 2, 20; gap=1, max_w=4)
+        @test g4 !== nothing && g4.start == 4 && g4.max_chars == 4
+        @test G4.gantt_post_bar_label_geom(0, 18, 20; gap=1) === nothing
+        # tcol before start is ignored for clipping (start=7, avail=20-7=13)
+        g5 = G4.gantt_post_bar_label_geom(0, 5, 20; tcol=3)
+        @test g5 !== nothing && g5.start == 7 && g5.max_chars == 13
+    end
+
+    @testset "G1: gantt_axis_period_tabs worked examples" begin
+        # week: two full ISO weeks Mon 2026-03-09
+        wtabs = G4.gantt_axis_period_tabs(Date(2026, 3, 9), 1, 14, :week; narrow=false)
+        @test length(wtabs) == 2
+        @test wtabs[1].c0 == 0 && wtabs[1].c1 == 6
+        @test wtabs[2].c0 == 7 && wtabs[2].c1 == 13
+        @test wtabs[1].center == 0 + (6 - 0) ÷ 2
+        @test wtabs[2].center == 7 + (13 - 7) ÷ 2
+        @test occursin("W11", wtabs[1].label)
+        @test occursin("W12", wtabs[2].label)
+        # long form (span of full week ≥7 and !narrow): include Mon abbr + day
+        @test occursin("Mar", wtabs[1].label)
+        @test occursin("9", wtabs[1].label)
+        @test occursin("Mar", wtabs[2].label)
+        @test occursin("16", wtabs[2].label)
+        # narrow week → short W{n}
+        wtabs_n = G4.gantt_axis_period_tabs(Date(2026, 3, 9), 1, 14, :week; narrow=true)
+        @test length(wtabs_n) == 2
+        @test wtabs_n[1].label == "W11" || startswith(wtabs_n[1].label, "W11")
+        @test wtabs_n[2].label == "W12" || startswith(wtabs_n[2].label, "W12")
+
+        # day: month tab(s), not 14 weekday tabs
+        dtabs = G4.gantt_axis_period_tabs(Date(2026, 3, 10), 1, 14, :day; narrow=false)
+        @test length(dtabs) == 1  # Mar 10..23 stays in March
+        @test occursin("March", dtabs[1].label) || occursin("Mar", dtabs[1].label)
+        @test dtabs[1].c0 == 0 && dtabs[1].c1 == 13
+        # first visible tab gets year
+        @test occursin("2026", dtabs[1].label)
+
+        # month scale: Mar/Apr/May style (dpc=7 → short spans; names may pack)
+        mtabs = G4.gantt_axis_period_tabs(Date(2026, 3, 10), 7, 12, :month; narrow=false)
+        @test length(mtabs) == 3
+        labs = join([t.label for t in mtabs], " ")
+        @test occursin("Mar", labs) || occursin("March", labs)
+        @test occursin("Apr", labs) || occursin("April", labs)
+        @test occursin("May", labs)
+        # c0/c1 cover Mar / Apr / May column runs
+        @test mtabs[1].c0 == 0 && mtabs[1].c1 == 3
+        @test mtabs[2].c0 == 4 && mtabs[2].c1 == 7
+        @test mtabs[3].c0 == 8 && mtabs[3].c1 == 11
+        # year suffix on first tab when span allows (wide day strip already checked);
+        # multi-year window always tags year when room
+        mytabs = G4.gantt_axis_period_tabs(Date(2025, 12, 1), 1, 40, :day; narrow=false)
+        @test length(mytabs) >= 2
+        @test any(occursin("2025", t.label) || occursin("2026", t.label) for t in mytabs)
+        # narrow abbreviates
+        mtabs_n = G4.gantt_axis_period_tabs(Date(2026, 3, 10), 7, 12, :month; narrow=true)
+        @test length(mtabs_n) == 3
+        @test any(occursin("Mar", t.label) for t in mtabs_n)
+
+        # ISO year-boundary week: Dec 29 2025 = Monday of ISO W1 2026
+        itabs = G4.gantt_axis_period_tabs(Date(2025, 12, 29), 1, 7, :week; narrow=false)
+        @test length(itabs) == 1
+        @test itabs[1].c0 == 0 && itabs[1].c1 == 6
+        @test occursin("W1", itabs[1].label)
+        @test occursin("Dec", itabs[1].label)
+        @test occursin("29", itabs[1].label)
+        # all 7 cols same period key
+        for c in 0:6
+            d = G4.gantt_date_for_col(Date(2025, 12, 29), 1, c)
+            @test G4.gantt_period_key(d, :week) == (2026, 1)
+        end
+        # empty / partial week + packing branches
+        @test isempty(G4.gantt_axis_period_tabs(Date(2026, 3, 9), 1, 0, :week))
+        # single Sunday column → span=1 forces fit_width on "W{n}"
+        stub = G4.gantt_axis_period_tabs(Date(2026, 3, 15), 1, 1, :week; narrow=true)
+        @test length(stub) == 1
+        @test textwidth(stub[1].label) <= 1
+        # January year cue (not only first-tab) on multi-tab window starting mid-year prior
+        jtabs = G4.gantt_axis_period_tabs(Date(2025, 12, 20), 1, 25, :day; narrow=false)
+        @test any(t -> occursin("Jan", t.label) && occursin("2026", t.label), jtabs) ||
+              any(t -> occursin("January", t.label), jtabs)
+        # short month tail at left edge (gantt_axis_period_labels span<3 path)
+        short_p = G4.gantt_axis_period_labels(Date(2026, 3, 30), 1, 5; narrow=true)
+        @test any(t -> t[1] == 0 && occursin("Mar", t[2]), short_p)
+    end
+
+    @testset "G1: gantt_left_label + compact left_width" begin
+        iss = G4.Domain.Issue(; id="g1", key="QCI-99",
+            title="Very Long Issue Title That Would Dominate The Left Rail")
+        issue_row = G4.GanttRow(:issue, "QCI-99 Very Long Issue Title That Would Dominate The Left Rail", iss, "e1")
+        epic_row = G4.GanttRow(:epic, "Epic Long Name", nothing, "e1")
+        @test G4.gantt_left_label(epic_row) == "Epic Long Name"
+        @test G4.gantt_left_label(epic_row; compact=true) == "Epic Long Name"
+        @test G4.gantt_left_label(issue_row; compact=false) == issue_row.label
+        @test G4.gantt_left_label(issue_row; compact=true) == "QCI-99"
+        # issue without struct falls back to label
+        orphan = G4.GanttRow(:issue, "QCI-1 Title", nothing, "")
+        @test G4.gantt_left_label(orphan; compact=true) == "QCI-1 Title"
+        rows = [epic_row, issue_row]
+        w_full = G4.gantt_left_width(rows, 120; compact=false)
+        w_comp = G4.gantt_left_width(rows, 120; compact=true)
+        @test w_comp < w_full
+        @test w_comp >= 10
+        @test w_full >= 14
     end
 
     @testset "overhaul: denser numeric axis ticks (pure)" begin
@@ -913,6 +1128,24 @@ end
             # still no footer junk
             @test T.find_text(tbe, "(5d)") === nothing
         end
+    end
+
+    @testset "period gutter label when short month tail anchors at col 0 (coverage)" begin
+        # Render path: period label with c==0 paints into the left gutter.
+        # dpc=1 near-term clamp keeps start ≥ today-1; use a *future* late-month
+        # start so clamp is identity and gantt_axis_period_labels yields c==0.
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "GutterCov")
+        fut = Date(Dates.year(Dates.today()) + 1, 3, 30)  # next Mar 30
+        G4.Stores.create_issue!(m.boardstore; title = "GutterBar", epic_id = e.id,
+                                start_date = fut, due_date = fut + Day(10))
+        g4!(m, 'G')
+        g4!(m, 'z')  # week (dpc=1, full width; start not forced to near-term only when ≥ today-1)
+        m.gantt_start = fut
+        @test any(t -> t[1] == 0, G4.gantt_axis_period_labels(fut, 1, 40))
+        tb = gantt_render(m; w = 100, h = 20)
+        @test T.find_text(tb, "GANTT") !== nothing
+        @test T.find_text(tb, "Mar") !== nothing
     end
 end
 
