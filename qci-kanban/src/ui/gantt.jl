@@ -188,6 +188,28 @@ function gantt_post_bar_label_geom(c0::Int, c1::Int, label_ncols::Int;
     (; start, max_chars = avail)
 end
 
+"""
+    gantt_pre_bar_key_geom(c0, view_ncols; gap=1, key_w) -> (; start, max_chars) | nothing
+
+Paint issue key ending just before bar start `c0` (or diamond col), with `gap`
+blank columns between key and bar. Returns nothing when the full key cannot fit
+in chart cols `[0, c0)` (no bleed into left rail; no partial key). Clip edge is
+`view_ncols` (keys live in the bar window, not the day physical gutter).
+"""
+function gantt_pre_bar_key_geom(c0::Int, view_ncols::Int;
+                                gap::Int=1, key_w::Int)
+    key_w < 1 && return nothing
+    gap < 0 && return nothing
+    # last key col sits gap cells left of bar start
+    last = c0 - gap - 1
+    last < 0 && return nothing
+    start = last - key_w + 1
+    start < 0 && return nothing
+    # entire key must sit inside the chart view strip
+    last >= view_ncols && return nothing
+    (; start, max_chars = key_w)
+end
+
 # ── PR2 ruler/axis + left width (pure) ──────────────────────────────────────
 # Overhaul (2026-07): denser product-style axis — period labels (months) plus
 # numeric day/period ticks so the chart is readable without relying only on a
@@ -778,22 +800,24 @@ end
 """
     gantt_layout(m, area; rows=nothing) -> GanttLayout
 
-Post-G4 height matrix, compact left, view vs physical ncols, dual-axis y
+Height matrix, full-identity left rail, view vs physical ncols, dual-axis y
 positions, content_start, chart_x, grid_y0, selection keep-in-view `row_start`.
 Same pure helpers as `render_gantt!` — paint must consume this snapshot.
 
 Pass precomputed `rows` (from `gantt_rows(m)`) to avoid a second row build when
 the caller already needs the paint list (e.g. `render_gantt!`).
+
+Product lock (PR-V): left rail always full labels (`compact=false`); chart shows
+issue key only immediately left of each bar/diamond.
 """
 function gantt_layout(m::AppModel, area::Rect;
                       rows::Union{Nothing,Vector{GanttRow}} = nothing)::GanttLayout
     dpc = gantt_days_per_col(m.gantt_scale)
     rws = rows === nothing ? gantt_rows(m) : rows
-    # G4: compact left on wide terminals (keys only; titles after bars). Sizes left_w from
-    # compact strings so chart/physical gutter grows. Narrow keeps full labels.
+    # PR-V: always full-label left width (never compact-keys-only on wide terminals).
     is_narrow = area.width < 60
-    compact = area.width >= 60  # same as !is_narrow; explicit width gate (design V1)
-    left_w = gantt_left_width(rws, area.width; compact = compact)
+    compact = false
+    left_w = gantt_left_width(rws, area.width; compact = false)
     if is_narrow
         left_w = min(14, max(10, area.width - 20))
     end
@@ -801,7 +825,7 @@ function gantt_layout(m::AppModel, area::Rect;
     chart_x = area.x + left_w
     physical_ncols = area.width - left_w   # physical chart columns
     # Day view: hard-capped 14-day window. view_ncols drives bars/axis/today;
-    # label_ncols may use the physical gutter past the day strip (G4).
+    # label_ncols may use the physical gutter past the day strip (legacy G4 geom).
     view_ncols = m.gantt_scale === :day ? min(physical_ncols, GANTT_DAY_VIEW_WINDOW) : physical_ncols
     label_ncols = m.gantt_scale === :day ? physical_ncols : view_ncols
     sel_issue = _gantt_selected_issue(m)
@@ -853,7 +877,8 @@ Shared metrics with paint via `GanttLayout` — no render-side side effects.
     gantt_hit_none
     gantt_hit_left_rail   # issue or epic label cells
     gantt_hit_bar         # bar or diamond body
-    gantt_hit_post_bar    # title after bar (G4 region)
+    gantt_hit_post_bar    # legacy post-bar geom region (not primary paint UX)
+    gantt_hit_pre_bar     # issue key immediately left of bar/diamond (PR-V)
     gantt_hit_axis        # period tab / tick row
     gantt_hit_band        # sprint band row
     gantt_hit_empty_chart # chart background / wash only
@@ -944,11 +969,10 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
                             col < layout.view_ncols ? col : nothing, date)
         end
 
-        # Issue: bar / diamond / post-bar (x-disjoint; post-bar after c1 + gap)
+        # Issue: bar / diamond / pre-bar key (x-disjoint; pre-bar ends before c0)
         iss = row.issue
         if iss !== nothing
-            tcol = gantt_point_col(layout.win_start, layout.dpc, Dates.today(),
-                                   layout.view_ncols)
+            key_w = textwidth(iss.key)
             if iss.start_date !== nothing && iss.due_date !== nothing
                 ext = gantt_bar_extent(layout.win_start, layout.dpc,
                                        iss.start_date, iss.due_date, layout.view_ncols)
@@ -958,11 +982,11 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
                         return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
                                         col, date)
                     end
-                    post = gantt_post_bar_label_geom(c0, c1, layout.label_ncols;
-                                                     gap = 1, tcol = tcol)
-                    if post !== nothing &&
-                       post.start <= col < post.start + post.max_chars
-                        return GanttHit(gantt_hit_post_bar, row_index, issue_id,
+                    pre = gantt_pre_bar_key_geom(c0, layout.view_ncols;
+                                                 gap = 1, key_w = key_w)
+                    if pre !== nothing &&
+                       pre.start <= col < pre.start + pre.max_chars
+                        return GanttHit(gantt_hit_pre_bar, row_index, issue_id,
                                         issue_sel, col, date)
                     end
                 end
@@ -974,11 +998,11 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
                         return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
                                         col, date)
                     end
-                    post = gantt_post_bar_label_geom(pcol, pcol, layout.label_ncols;
-                                                     gap = 1, tcol = tcol)
-                    if post !== nothing &&
-                       post.start <= col < post.start + post.max_chars
-                        return GanttHit(gantt_hit_post_bar, row_index, issue_id,
+                    pre = gantt_pre_bar_key_geom(pcol, layout.view_ncols;
+                                                 gap = 1, key_w = key_w)
+                    if pre !== nothing &&
+                       pre.start <= col < pre.start + pre.max_chars
+                        return GanttHit(gantt_hit_pre_bar, row_index, issue_id,
                                         issue_sel, col, date)
                     end
                 end
@@ -995,7 +1019,7 @@ end
     _handle_gantt_mouse!(m, evt)
 
 M1 click-select + M2 wheel scroll. Left press on left-rail issue / bar /
-diamond / post-bar → issue-only select + keep-in-view. Epic, axis, band,
+diamond / pre-bar key → issue-only select + keep-in-view. Epic, axis, band,
 empty: no-op for click. Wheel (`mouse_scroll_up`/`down` + `mouse_press`) over
 `gantt_last_area` → `_gantt_scroll!(±1)` (matches `h`/`l`); no zoom. Drag /
 open-on-click out of scope (M3).
@@ -1024,7 +1048,8 @@ function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
         rows[hit.row_index].kind === :epic && return m
         hit.issue_id === nothing && return m
         return _gantt_select_issue_id!(m, hit.issue_id)
-    elseif hit.kind === gantt_hit_bar || hit.kind === gantt_hit_post_bar
+    elseif hit.kind === gantt_hit_bar || hit.kind === gantt_hit_pre_bar ||
+           hit.kind === gantt_hit_post_bar
         hit.issue_id === nothing && return m
         return _gantt_select_issue_id!(m, hit.issue_id)
     end
@@ -1048,11 +1073,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     chart_x = lay.chart_x
     ncols = lay.physical_ncols
     view_ncols = lay.view_ncols
-    label_ncols = lay.label_ncols
     dpc = lay.dpc
     win_start = lay.win_start
     is_narrow = lay.is_narrow
-    compact = lay.compact
     has_ruler = lay.has_ruler
     has_dual = lay.has_dual
     has_footer = lay.has_footer
@@ -1223,8 +1246,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     selected_vis_i = nothing
     selected_bar_ext = nothing
 
-    # G4: cache post-bar geom per visible row (shared by left-rail / in-bar / z10 paint).
-    post_geoms = Vector{Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}}(nothing, max(0, nshow))
+    # PR-V: cache pre-bar key geom per visible row (shared by in-bar suppress + z10 paint).
+    pre_geoms = Vector{Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}}(nothing, max(0, nshow))
 
     for i in 1:nshow
         ri = row_start + i - 1
@@ -1239,13 +1262,14 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             selected = sel_issue !== nothing && iss.id == sel_issue.id
             lstyle = selected ? sel_style() : Style(; fg = col_text())
             prefix = selected ? "▸ " : "├ "
-            # G4: post-bar geom decides left-rail compact vs full (identity never lost).
-            post_geom = nothing
+            # PR-V: pre-bar key geom (issue key left of bar/diamond); left rail always full id.
+            pre_geom = nothing
             if iss.start_date !== nothing && iss.due_date !== nothing
                 ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
-                    post_geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
+                    pre_geom = gantt_pre_bar_key_geom(c0, view_ncols;
+                                                      gap = 1, key_w = textwidth(iss.key))
                     for dx in (2 * c0):(2 * c1 + 1), dy in (2 * (i - 1)):(2 * (i - 1) + 1)
                         set_point!(canvas, dx, dy)
                     end
@@ -1258,28 +1282,21 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 d = iss.start_date === nothing ? iss.due_date : iss.start_date
                 col = gantt_point_col(win_start, dpc, d, view_ncols)
                 if col !== nothing
-                    post_geom = gantt_post_bar_label_geom(col, col, label_ncols; gap = 1, tcol = tcol)
+                    pre_geom = gantt_pre_bar_key_geom(col, view_ncols;
+                                                      gap = 1, key_w = textwidth(iss.key))
                     push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
                 end
             end
-            post_geoms[i] = post_geom
-            # Compact left when post-bar paints the title; full left when no post-bar room
-            # (identity never lost). Under compact-sized left_w, full labels are key-first
-            # so ellipsis cannot swallow key digits (QCI-100 vs QCI-101).
-            use_compact_left = compact && post_geom !== nothing
+            pre_geoms[i] = pre_geom
+            # Always full identity on left rail (key + title); key-first truncate if rail tight.
             avail = max(1, left_w - 1 - textwidth(prefix))
-            if use_compact_left
-                llab = gantt_left_label(row; compact = true)
+            full = gantt_left_label(row; compact = false)
+            if textwidth(full) <= avail
+                llab = full
             else
-                full = gantt_left_label(row; compact = false)
-                if textwidth(full) <= avail
-                    llab = full
-                else
-                    # issue rows always carry iss (GanttRow construction); key-first truncate
-                    k = iss.key
-                    rest = avail - textwidth(k) - 1
-                    llab = rest >= 1 ? k * " " * fit_width(iss.title, rest) : fit_width(k, avail)
-                end
+                k = iss.key
+                rest = avail - textwidth(k) - 1
+                llab = rest >= 1 ? k * " " * fit_width(iss.title, rest) : fit_width(k, avail)
             end
             set_string!(buf, area.x, rowy, _short(prefix * llab, left_w - 1), lstyle)
         end
@@ -1352,9 +1369,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                         ch = (p >= 0.999 ? '█' : '▓')
                         set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
                     end
-                    # G4: suppress in-bar key when post-bar geom will paint; keep when no room after bar.
-                    # Uses cached post_geoms[i] from the build pass (same args / tcol).
-                    if bw >= 5 && post_geoms[i] === nothing
+                    # PR-V: in-bar key only when pre-bar key cannot fit; suppress if pre-bar paints.
+                    if bw >= 5 && pre_geoms[i] === nothing
                         avail = max(1, bw - 2)
                         lbl = fit_width(iss.key, avail)
                         lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
@@ -1385,41 +1401,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         end
     end
 
-    # G4 z10 — post-bar issue titles (after bar right edge / diamond; before today z11).
-    # Truncate before tcol so TestBackend row_text does not interleave ┃ inside titles.
-    # Geom cached in post_geoms during the build pass (left-rail / in-bar share the same values).
-    for i in 1:nshow
-        ri = row_start + i - 1
-        ri > length(rows) && break
-        row = rows[ri]
-        row.kind === :issue || continue
-        iss = row.issue
-        iss === nothing && continue
-        rowy = grid_y0 + (i - 1)
-        geom = post_geoms[i]
-        geom === nothing && continue
-        xx = chart_x + geom.start
-        xx > area.x + area.width - 1 && continue
-        maxc = min(geom.max_chars, area.x + area.width - xx)
-        maxc < 1 && continue
-        # Content: title default; key+title when room. Domain forbids empty title
-        # (Issue ctor); key-only fallback is design priority 3 but unreachable in-store.
-        title = iss.title
-        key = iss.key
-        content = if maxc >= textwidth(key) + 1 + 8
-            key * " " * title
-        else
-            title
-        end
-        lbl = fit_width(content, maxc)
-        isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=1 and non-empty title ⇒ non-empty fit)
-        selected = sel_issue !== nothing && iss.id == sel_issue.id
-        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
-        set_string!(buf, xx, rowy, lbl, lsty)
-    end
-
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
-    # Use gantt_safe_char + textwidth guard (PR6).
+    # Use gantt_safe_char + textwidth guard (PR6). Painted before pre-bar keys so issue
+    # identifiers win over today on collision (PR-V primary chart identity).
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
         today_ch = is_narrow ? '│' : '┃'
@@ -1434,6 +1418,30 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
             end
         end
+    end
+
+    # PR-V — pre-bar issue keys (immediately left of bar/diamond; after today so key wins).
+    # Full key only (geom already requires room); no post-bar titles.
+    for i in 1:nshow
+        ri = row_start + i - 1
+        ri > length(rows) && break
+        row = rows[ri]
+        row.kind === :issue || continue
+        iss = row.issue
+        iss === nothing && continue
+        rowy = grid_y0 + (i - 1)
+        geom = pre_geoms[i]
+        geom === nothing && continue
+        xx = chart_x + geom.start
+        xx > area.x + area.width - 1 && continue
+        maxc = min(geom.max_chars, area.x + area.width - xx)
+        maxc < 1 && continue
+        key = iss.key
+        lbl = fit_width(key, maxc)
+        isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=key_w and non-empty key ⇒ non-empty fit)
+        selected = sel_issue !== nothing && iss.id == sel_issue.id
+        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
+        set_string!(buf, xx, rowy, lbl, lsty)
     end
 
     # PR5: selected item footer (when has_footer): exact dates, duration, status, priority (theming).

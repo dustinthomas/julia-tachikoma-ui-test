@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════
 # BDD acceptance for Gantt mouse MVP M1–M2
 #   M1 click-to-select via pure hit-test:
-#   • Left-press on left-rail / bar / post-bar selects issue (issue-only gantt_sel)
+#   • Left-press on left-rail / bar / pre-bar key selects issue (issue-only gantt_sel)
 #   • Epic header / axis / empty area: no-op
 #   • Click does NOT open detail modal (Enter/v remain open path)
 #   • Keyboard j/k/Enter still work after mouse select
@@ -26,12 +26,13 @@ gm_wheel(col, row, btn) = T.MouseEvent(col, row, btn, T.mouse_press, false, fals
         m = gmlogin()
         e = GM.Stores.create_epic!(m.boardstore; name = "MouseRoadmap")
         a = GM.Stores.create_issue!(m.boardstore; title = "MouseAlpha", epic_id = e.id,
-                                    start_date = Dates.today(),
-                                    due_date = Dates.today() + Day(3))
+                                    start_date = Dates.today() + Day(8),
+                                    due_date = Dates.today() + Day(11))
         b = GM.Stores.create_issue!(m.boardstore; title = "MouseBeta", epic_id = e.id,
-                                    start_date = Dates.today() + Day(1),
-                                    due_date = Dates.today() + Day(5))
+                                    start_date = Dates.today() + Day(9),
+                                    due_date = Dates.today() + Day(13))
         gm!(m, 'G')
+        m.gantt_start = Dates.today() - Day(1)
         @test m.view === :gantt
         @test m.gantt_sel == 1
         @test GM._gantt_selected_issue(m).id == a.id
@@ -106,15 +107,21 @@ gm_wheel(col, row, btn) = T.MouseEvent(col, row, btn, T.mouse_press, false, fals
             @test GM._gantt_selected_issue(m).id == a.id
         end
 
-        @testset "When post-bar title is clicked Then the issue is selected" begin
+        @testset "When pre-bar key is clicked Then the issue is selected" begin
             GM._gantt_select!(m, 1)
-            post = GM.gantt_post_bar_label_geom(ext_b[1], ext_b[2], lay.label_ncols; gap = 1)
-            if post !== nothing
-                T.update!(m, gm_click(lay.chart_x + post.start, yb))
-                @test m.gantt_sel == 2
-                @test GM._gantt_selected_issue(m).id == b.id
-                @test m.modal === :none
-            end
+            # Recompute layout after any prior scrolls/selects (window fixed above)
+            rows2 = GM.gantt_rows(m)
+            lay2 = GM.gantt_layout(m, m.gantt_last_area; rows = rows2)
+            rb2 = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows2)
+            yb2 = lay2.grid_y0 + (rb2 - lay2.row_start)
+            ext2 = GM.gantt_bar_extent(lay2.win_start, lay2.dpc, b.start_date, b.due_date, lay2.view_ncols)
+            @test ext2 !== nothing
+            pre = GM.gantt_pre_bar_key_geom(ext2[1], lay2.view_ncols; gap = 1, key_w = textwidth(b.key))
+            @test pre !== nothing
+            T.update!(m, gm_click(lay2.chart_x + pre.start, yb2))
+            @test m.gantt_sel == 2
+            @test GM._gantt_selected_issue(m).id == b.id
+            @test m.modal === :none
         end
     end
 
