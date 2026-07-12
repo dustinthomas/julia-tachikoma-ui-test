@@ -654,7 +654,9 @@ end
         g4!(m, 'G')
         @test m.gantt_start == Dates.today() - Day(1)
         # computed col for render uses clamp for wide (raw col calc covered by m.gantt_start assert + pure tests)
-        w = 120; left_w = G4.gantt_left_width(G4.gantt_rows(m), w); ncols = w - left_w
+        w = 120
+        left_w = G4.gantt_left_width(G4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         td = Dates.today()
         cl_start = G4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         expect = G4.gantt_point_col(cl_start, 1, td, ncols)
@@ -691,7 +693,9 @@ end
         g4!(m, 'G')
         td = Dates.today()
         @test m.gantt_start == Date(2025, 11, 1)
-        w = 120; left_w = G4.gantt_left_width(G4.gantt_rows(m), w); ncols = w - left_w
+        w = 120
+        left_w = G4.gantt_left_width(G4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         cl_start = G4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         tcol = G4.gantt_point_col(cl_start, 1, td, ncols)
         @test tcol !== nothing
@@ -822,15 +826,17 @@ end
         @test T.find_text(tb, "Wend") !== nothing
         r = row_with(tb, "WkndBar", 30)
         @test r !== nothing
-        # shading '░' present on grid rows (from weekend cols; visible beyond bar extent)
-        @test occursin("░", r)
+        # shading '░' present on grid/band (post-bar titles may overwrite weekend cells
+        # after the bar — assert screen/band presence, not issue-row cells under z10 label)
+        @test T.find_text(tb, "░") !== nothing || occursin("░", r)
         # week seps '┆' present (new grid lines)
         @test T.find_text(tb, "┆") !== nothing
         # full re-render after update!
         g4!(m, 'l')  # scroll window
         tb2 = gantt_render(m)
         @test T.find_text(tb2, "┆") !== nothing
-        @test occursin("░", row_with(tb2, "WkndBar", 30))
+        @test T.find_text(tb2, "░") !== nothing ||
+              (row_with(tb2, "WkndBar", 30) !== nothing && occursin("░", row_with(tb2, "WkndBar", 30)))
     end
 
     @testset "boundary heights + narrow: ruler/footer visibility, empty pos, today semantic (PR2)" begin
@@ -1382,6 +1388,146 @@ end
         @test count(isdigit, tick_rt) >= 6
         # tab row is not the digit wall (ticks live one row below)
         @test count(isdigit, tick_rt) > count(isdigit, tab_rt)
+    end
+
+    # ── G4: post-bar issue titles + compact left rail ─────────────────────────
+    @testset "G4: post-bar title after bar glyph (render)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "PostEp")
+        # Distinctive title; short mid-window bar so room after ▐
+        a = G4.Stores.create_issue!(m.boardstore; title = "ZebraPostTitle", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(2))
+        g4!(m, 'G')
+        g4!(m, 'z')  # week scale — full physical width for labels
+        @test m.gantt_scale == :week
+        tb = gantt_render(m; w = 120, h = 16)
+        r = row_with(tb, a.key, 16)
+        @test r !== nothing
+        @test occursin("ZebraPostTitle", r)
+        # title index in row_text > last bar glyph index
+        last_bar = 0
+        for (i, c) in enumerate(r)
+            if c in ('█', '▓', '▌', '▐')
+                last_bar = i
+            end
+        end
+        @test last_bar > 0
+        ti = findfirst("ZebraPostTitle", r)
+        @test ti !== nothing
+        @test first(ti) > last_bar
+    end
+
+    @testset "G4: day wide short bar → title in physical gutter" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "GutterEp")
+        # Bar ending near day-window right so post-bar uses physical gutter past 14
+        a = G4.Stores.create_issue!(m.boardstore; title = "GutterTitleX", epic_id = e.id,
+                                    start_date = Dates.today() + Day(8),
+                                    due_date = Dates.today() + Day(11))
+        g4!(m, 'G')
+        @test m.gantt_scale == :day
+        # Keep window fixed so bar lands in the 14-day strip (near right)
+        m.gantt_start = Dates.today() - Day(1)
+        w = 120
+        tb = gantt_render(m; w = w, h = 16)
+        r = row_with(tb, a.key, 16)
+        @test r !== nothing
+        @test occursin("GutterTitleX", r) || occursin("Gutter", r)
+        # Pure geom confirms gutter room with physical label_ncols
+        rows = G4.gantt_rows(m)
+        left_w = G4.gantt_left_width(rows, w; compact = true)
+        physical = w - left_w
+        view_n = min(physical, G4.GANTT_DAY_VIEW_WINDOW)
+        win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), 1, view_n, nothing)
+        ext = G4.gantt_bar_extent(win, 1, a.start_date, a.due_date, view_n)
+        @test ext !== nothing
+        c0, c1 = ext
+        geom = G4.gantt_post_bar_label_geom(c0, c1, physical; gap = 1)
+        @test geom !== nothing
+        @test geom.start >= view_n || geom.max_chars >= 4  # gutter and/or room after bar
+    end
+
+    @testset "G4: narrow / flush-right no crash; left shows identity" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "FlushEp")
+        # Long span so bar can flush right of chart on narrow/week
+        a = G4.Stores.create_issue!(m.boardstore; title = "IdentityKeep", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(200))
+        g4!(m, 'G')
+        # Narrow: no crash, identity via key or title on left
+        tbn = T.TestBackend(40, 12); T.reset!(tbn.buf)
+        G4.render_gantt!(m, tbn.buf, T.Rect(1, 1, 40, 12))
+        @test T.find_text(tbn, "GANTT") !== nothing
+        @test T.find_text(tbn, a.key) !== nothing || T.find_text(tbn, "Identity") !== nothing
+        # Week wide flush: post-bar may be nothing; full left label keeps identity
+        g4!(m, 'z')
+        @test m.gantt_scale == :week
+        tbw = gantt_render(m; w = 80, h = 14)
+        @test T.find_text(tbw, a.key) !== nothing || T.find_text(tbw, "IdentityKeep") !== nothing
+        r = row_with(tbw, a.key, 14)
+        @test r !== nothing
+        @test occursin(a.key, r) || occursin("IdentityKeep", r)
+    end
+
+    @testset "G4: compact left_width shrinks with long titles (render sizing)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "ShortEp")
+        a = G4.Stores.create_issue!(m.boardstore;
+            title = "VeryLongIssueTitleThatWouldDominateTheLeftRailWidthIfMeasuredFully",
+            epic_id = e.id,
+            start_date = Dates.today() - Day(1),
+            due_date = Dates.today() + Day(3))
+        g4!(m, 'G')
+        rows = G4.gantt_rows(m)
+        w = 120
+        w_full = G4.gantt_left_width(rows, w; compact = false)
+        w_comp = G4.gantt_left_width(rows, w; compact = true)
+        @test w_comp < w_full
+        @test w_comp <= textwidth(a.key) + 6  # key-based bound (+ prefix budget)
+        # Render uses compact: left rail shows key, title appears after bar
+        tb = gantt_render(m; w = w, h = 14)
+        r = row_with(tb, a.key, 14)
+        @test r !== nothing
+        @test occursin(a.key, r)
+        # Distinctive long-title fragment after bar (or truncated start of title)
+        @test occursin("VeryLong", r) || occursin("IssueTitle", r) ||
+              occursin("Dominate", r) || occursin("LeftRail", r)
+        # Compact left: title should not occupy the far-left prefix region alone
+        # (key is present; full title may still appear post-bar)
+        last_bar = 0
+        for (i, c) in enumerate(r)
+            if c in ('█', '▓', '▌', '▐')
+                last_bar = i
+            end
+        end
+        if last_bar > 0
+            frag = "VeryLong"
+            ti = findfirst(frag, r)
+            if ti !== nothing
+                @test first(ti) > last_bar
+            end
+        end
+        # Physical chart cols grow under compact vs non-compact baseline
+        @test (w - w_comp) > (w - w_full)
+    end
+
+    @testset "G4: diamond post-bar label + selected style path" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DiaEp")
+        pt = G4.Stores.create_issue!(m.boardstore; title = "DiamondTitleZ", epic_id = e.id,
+                                     due_date = Dates.today() + Day(3))
+        g4!(m, 'G')
+        g4!(m, 'z')  # week
+        tb = gantt_render(m; w = 100, h = 14)
+        r = row_with(tb, pt.key, 14)
+        @test r !== nothing
+        @test occursin("◆", r) || occursin("DiamondTitleZ", r)
+        @test occursin("DiamondTitleZ", r) || occursin("Diamond", r)
+        # selected post-bar uses primary_hi path (char presence sufficient)
+        @test m.gantt_sel == 1
+        @test T.find_text(tb, "◆") !== nothing
     end
 end
 

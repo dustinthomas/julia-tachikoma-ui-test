@@ -724,10 +724,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
     dpc = gantt_days_per_col(m.gantt_scale)
     rows = gantt_rows(m)
-    # Use/confirm adaptive left_w (PR2) + responsive narrow adjustment (PR6).
-    # Guarantees chart space; longest label driven when data present.
-    left_w = gantt_left_width(rows, area.width)
+    # G4: compact left on wide terminals (keys only; titles after bars). Sizes left_w from
+    # compact strings so chart/physical gutter grows. Narrow keeps full labels.
     is_narrow = area.width < 60
+    compact = !is_narrow && area.width >= 60
+    left_w = gantt_left_width(rows, area.width; compact = compact)
     if is_narrow
         left_w = min(14, max(10, area.width - 20))
     end
@@ -738,6 +739,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # so the header always shows a ~2 week range and never months. view_ncols drives
     # geometry, canvas, bars, shading, axis, and today marker.
     view_ncols = m.gantt_scale === :day ? min(ncols, GANTT_DAY_VIEW_WINDOW) : ncols
+    # G4: day post-bar labels may use the empty gutter past the 14-col view (physical).
+    # Week/month: label clip == view (no separate gutter).
+    label_ncols = m.gantt_scale === :day ? ncols : view_ncols
     sel_issue_early = _gantt_selected_issue(m)
     sel_span = sel_issue_early === nothing ? nothing : gantt_issue_span(sel_issue_early)
     win_start = gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, view_ncols, sel_span)
@@ -943,11 +947,13 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             selected = sel_issue !== nothing && iss.id == sel_issue.id
             lstyle = selected ? sel_style() : Style(; fg = col_text())
             prefix = selected ? "▸ " : "├ "
-            set_string!(buf, area.x, rowy, _short(prefix * row.label, left_w - 1), lstyle)
+            # G4: post-bar geom decides left-rail compact vs full (identity never lost).
+            post_geom = nothing
             if iss.start_date !== nothing && iss.due_date !== nothing
                 ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
+                    post_geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
                     for dx in (2 * c0):(2 * c1 + 1), dy in (2 * (i - 1)):(2 * (i - 1) + 1)
                         set_point!(canvas, dx, dy)
                     end
@@ -959,8 +965,30 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             else
                 d = iss.start_date === nothing ? iss.due_date : iss.start_date
                 col = gantt_point_col(win_start, dpc, d, view_ncols)
-                col === nothing || push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
+                if col !== nothing
+                    post_geom = gantt_post_bar_label_geom(col, col, label_ncols; gap = 1, tcol = tcol)
+                    push!(diamonds, (chart_x + col, rowy, priority_color(iss.priority)))
+                end
             end
+            # Compact left when post-bar paints the title; full left when no post-bar room
+            # (identity never lost). Under compact-sized left_w, full labels are key-first
+            # so ellipsis cannot swallow key digits (QCI-100 vs QCI-101).
+            use_compact_left = compact && post_geom !== nothing
+            avail = max(1, left_w - 1 - textwidth(prefix))
+            if use_compact_left
+                llab = gantt_left_label(row; compact = true)
+            else
+                full = gantt_left_label(row; compact = false)
+                if textwidth(full) <= avail
+                    llab = full
+                else
+                    # issue rows always carry iss (GanttRow construction); key-first truncate
+                    k = iss.key
+                    rest = avail - textwidth(k) - 1
+                    llab = rest >= 1 ? k * " " * fit_width(iss.title, rest) : fit_width(k, avail)
+                end
+            end
+            set_string!(buf, area.x, rowy, _short(prefix * llab, left_w - 1), lstyle)
         end
     end
 
@@ -1033,8 +1061,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                         ch = (p >= 0.999 ? '█' : '▓')
                         set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
                     end
-                    # inside label when bar wide enough (overwrites density if collides)
-                    if bw >= 5
+                    # G4: suppress in-bar key when post-bar geom will paint; keep when no room after bar.
+                    post_geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
+                    if bw >= 5 && post_geom === nothing
                         avail = max(1, bw - 2)
                         lbl = fit_width(iss.key, avail)
                         lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text_dim(), dim = true)
@@ -1063,6 +1092,51 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         if ax <= area.x + area.width - 1
             set_char!(buf, ax, rowy, '▌', Style(; fg = col_primary_hi(), bold = true))
         end
+    end
+
+    # G4 z10 — post-bar issue titles (after bar right edge / diamond; before today z11).
+    # Truncate before tcol so TestBackend row_text does not interleave ┃ inside titles.
+    for i in 1:nshow
+        ri = row_start + i - 1
+        ri > length(rows) && break
+        row = rows[ri]
+        row.kind === :issue || continue
+        iss = row.issue
+        iss === nothing && continue
+        rowy = grid_y0 + (i - 1)
+        geom = nothing
+        if iss.start_date !== nothing && iss.due_date !== nothing
+            ext = gantt_bar_extent(win_start, dpc, iss.start_date, iss.due_date, view_ncols)
+            if ext !== nothing
+                c0, c1 = ext
+                geom = gantt_post_bar_label_geom(c0, c1, label_ncols; gap = 1, tcol = tcol)
+            end
+        else
+            d = iss.start_date === nothing ? iss.due_date : iss.start_date
+            col = gantt_point_col(win_start, dpc, d, view_ncols)
+            if col !== nothing
+                geom = gantt_post_bar_label_geom(col, col, label_ncols; gap = 1, tcol = tcol)
+            end
+        end
+        geom === nothing && continue
+        xx = chart_x + geom.start
+        xx > area.x + area.width - 1 && continue
+        maxc = min(geom.max_chars, area.x + area.width - xx)
+        maxc < 1 && continue
+        # Content: title default; key+title when room. Domain forbids empty title
+        # (Issue ctor); key-only fallback is design priority 3 but unreachable in-store.
+        title = iss.title
+        key = iss.key
+        content = if maxc >= textwidth(key) + 1 + 8
+            key * " " * title
+        else
+            title
+        end
+        lbl = fit_width(content, maxc)
+        isempty(lbl) && continue  # COV_EXCL_LINE (maxc>=1 and non-empty title ⇒ non-empty fit)
+        selected = sel_issue !== nothing && iss.id == sel_issue.id
+        lsty = selected ? Style(; fg = col_primary_hi(), bold = true) : Style(; fg = col_text())
+        set_string!(buf, xx, rowy, lbl, lsty)
     end
 
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.

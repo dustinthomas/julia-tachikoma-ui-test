@@ -140,7 +140,9 @@ end
         P4.Stores.create_issue!(m.boardstore; title = "Ongoing", epic_id = e.id,
                                 start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(2))
         p4!(m, 'G')
-        w = 120; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
+        w = 120
+        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         td = Dates.today()
         cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         expected_col = P4.gantt_point_col(cl_start, 1, td, ncols)
@@ -150,7 +152,7 @@ end
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        # position of marker verified via draw formula (adaptive left_w from PR2/6); scan grid below ▼
+        # position of marker verified via draw formula (adaptive left_w from PR2/6 + G4 compact); scan grid below ▼
         # (G3 dual-row axis shifts band→grid offset — no fixed loc.y+2)
         drawn_x = 1 + left_w + expected_col
         chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
@@ -168,7 +170,9 @@ end
         P4.Stores.create_issue!(m.boardstore; title = "C", epic_id = e.id,
                                 start_date = Dates.today() - Day(3), due_date = Dates.today() + Day(3))
         p4!(m, 'G')
-        w = 100; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
+        w = 100
+        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         td = Dates.today()
         cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         tcol = P4.gantt_point_col(cl_start, 1, td, ncols)
@@ -211,7 +215,9 @@ end
                                 start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(40))
         p4!(m, 'G')
         # re-render after 'G' update! (discipline, matching z-cycle pattern in same file)
-        w = 120; left_w = P4.gantt_left_width(P4.gantt_rows(m), w); ncols = w - left_w
+        w = 120
+        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
+        ncols = w - left_w
         tb = T.TestBackend(w, 16); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 16))
         p4!(m, 'z')  # day -> week
@@ -391,6 +397,37 @@ end
         @test p4bar_run(r1) >= 1 || occursin("▌", r1) || occursin("█", r1) || occursin("▓", r1)
         title = T.row_text(tb1, 1)
         @test title !== nothing && occursin("GANTT", title)
+    end
+
+    @testset "Given a short Gantt bar When rendered Then distinctive title is visible after the bar" begin
+        m = p4login()
+        e = P4.Stores.create_epic!(m.boardstore; name = "PostBarBDD")
+        a = P4.Stores.create_issue!(m.boardstore; title = "UniqueBDDPostLabel", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(3))
+        p4!(m, 'G')
+        # Week scale: post-bar uses full chart width (label_ncols == view)
+        p4!(m, 'z')
+        @test m.view == :gantt && m.gantt_scale == :week
+        tb = T.TestBackend(120, 16); T.reset!(tb.buf)
+        P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 16))
+        @test T.find_text(tb, "UniqueBDDPostLabel") !== nothing
+        r = nothing
+        for i in 1:16
+            rt = T.row_text(tb, i)
+            rt !== nothing && occursin(a.key, rt) && (r = rt; break)
+        end
+        @test r !== nothing
+        @test occursin("UniqueBDDPostLabel", r)
+        last_bar = 0
+        for (i, c) in enumerate(r)
+            if c == '█' || c == '▓' || c == '▌' || c == '▐'
+                last_bar = i
+            end
+        end
+        @test last_bar > 0
+        ti = findfirst("UniqueBDDPostLabel", r)
+        @test ti !== nothing && first(ti) > last_bar
     end
 
     @testset "No-conflict: printable chars in the calendar create modal edit only the field" begin
