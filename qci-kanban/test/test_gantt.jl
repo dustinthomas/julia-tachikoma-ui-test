@@ -51,17 +51,37 @@ end
 function gantt_screen_blob(tb; h=30)
     join([something(T.row_text(tb, i), "") for i in 1:h], "\n")
 end
+function _gantt_is_axisish_row(rt::AbstractString)
+    # Exclude title / selected-item footer so densest-digit pick is the tick strip
+    occursin("GANTT", rt) && return false
+    # Footer: "QCI-1: 2026-… → 2026-… (5d)  • Backlog • Medium"
+    occursin(r"→", rt) && occursin(r"•", rt) && return false
+    occursin(r"QCI-\d+\s*:", rt) && return false
+    true
+end
 function gantt_digit_dense_row(tb; h=30, min_digits=4)
-    best = nothing; bestn = 0
-    for i in 1:h
-        rt = T.row_text(tb, i)
-        rt === nothing && continue
-        n = count(isdigit, rt)
-        if n >= min_digits && n > bestn
-            best = rt; bestn = n
+    # Prefer axis strip under ▼ (dual: tab@+1 tick@+2; single: axis@+1) so footer/title
+    # ISO dates cannot win the densest-digit race (review Issue 1).
+    function densest(rows)
+        best = nothing; bestn = 0
+        for i in rows
+            (i < 1 || i > h) && continue
+            rt = T.row_text(tb, i)
+            rt === nothing && continue
+            !_gantt_is_axisish_row(rt) && continue
+            n = count(isdigit, rt)
+            if n >= min_digits && n > bestn
+                best = rt; bestn = n
+            end
         end
+        best
     end
-    best
+    loc = T.find_text(tb, "▼")
+    if loc !== nothing
+        got = densest([loc.y + 1, loc.y + 2])
+        got !== nothing && return got
+    end
+    densest(1:h)
 end
 function gantt_today_grid_row(tb; h=30)
     loc = T.find_text(tb, "▼")
@@ -345,6 +365,16 @@ end
         jtabs = G4.gantt_axis_period_tabs(Date(2025, 12, 20), 1, 25, :day; narrow=false)
         @test any(t -> occursin("Jan", t.label) && occursin("2026", t.label), jtabs) ||
               any(t -> occursin("January", t.label), jtabs)
+        # Tight month spans: pack via abbr, never char-chop full name ("Augus")
+        tight = G4.gantt_axis_period_tabs(Date(2026, 8, 1), 7, 8, :month; narrow=false)
+        @test !isempty(tight)
+        for t in tight
+            @test !occursin(r"Augus$|Septem$|Octob$|Novem$|Decem$", t.label)
+            # if not full name, should be real abbr or year-bearing full
+            if textwidth(t.label) <= 4
+                @test occursin(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", t.label)
+            end
+        end
         # short month tail at left edge (gantt_axis_period_labels span<3 path)
         short_p = G4.gantt_axis_period_labels(Date(2026, 3, 30), 1, 5; narrow=true)
         @test any(t -> t[1] == 0 && occursin("Mar", t[2]), short_p)
@@ -518,7 +548,7 @@ end
         tb = gantt_render(m)
         @test T.find_text(tb, "GANTT") !== nothing
         @test T.find_text(tb, "No scheduled issues") !== nothing
-        # empty position: for tall use grid_y0=y+3 (has_ruler); verify via row search (layout fix)
+        # empty position: content_start = 3 (single h=8–11) or 4 (dual h≥12); scan not fixed offset
         erow = row_with(tb, "No scheduled", 30)
         @test erow !== nothing && occursin("No scheduled issues", erow)
         # ruler drawn even for empty tall (h>=8) -- no blank axis row
@@ -1317,6 +1347,41 @@ end
         @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December", blob) ||
               occursin(Dates.format(Dates.today(), "U"), blob) ||
               occursin(Dates.monthname(Dates.today()), blob)
+        # single-row month: TODAY label must not clobber month chips
+        @test !occursin(r"JTODAY|TODAYus|TODAYp|TODAYu", blob)
+        # TODAY string itself may be absent on single-row month (by design)
+        loc = T.find_text(tb, "▼")
+        @test loc !== nothing  # band marker still present
+    end
+
+    @testset "G3: dual boundary h=11 single vs h=12 dual (tab above tick)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "BoundDual")
+        G4.Stores.create_issue!(m.boardstore; title = "BD", epic_id = e.id,
+                                start_date = Dates.today() - Day(1),
+                                due_date = Dates.today() + Day(10))
+        g4!(m, 'G')
+        @test m.gantt_scale == :day
+        td = Dates.today()
+        mname = Dates.monthname(td)
+        # h=11: single axis only — month name may appear in gutter/combine, but no tab+tick pair
+        tb11 = gantt_render(m; w = 100, h = 11)
+        loc11 = T.find_text(tb11, "▼")
+        @test loc11 !== nothing
+        # single: axis at ▼+1; grid starts ▼+2 — digit-dense axis row is that single strip
+        ax11 = T.row_text(tb11, loc11.y + 1)
+        @test ax11 !== nothing && count(isdigit, ax11) >= 4
+        # h=12: dual — tab row (month name) above tick row (digits)
+        tb12 = gantt_render(m; w = 100, h = 12)
+        loc12 = T.find_text(tb12, "▼")
+        @test loc12 !== nothing
+        tab_rt = T.row_text(tb12, loc12.y + 1)
+        tick_rt = T.row_text(tb12, loc12.y + 2)
+        @test tab_rt !== nothing && tick_rt !== nothing
+        @test occursin(mname, tab_rt) || occursin(Dates.format(td, "U"), tab_rt)
+        @test count(isdigit, tick_rt) >= 6
+        # tab row is not the digit wall (ticks live one row below)
+        @test count(isdigit, tick_rt) > count(isdigit, tab_rt)
     end
 end
 

@@ -379,20 +379,30 @@ function gantt_axis_period_tabs(win_start::Date, dpc::Int, ncols::Int, scale::Sy
         else
             y, mo = key::Tuple{Int,Int}
             d_lab = Date(y, mo, 1)
+            # Full name when wide; always keep abbr for packing fallback (avoid "Augus")
             base = Dates.format(d_lab, narrow ? "u" : "U")
+            abbr = Dates.format(d_lab, "u")
             want_year = (idx == 1) || (mo == 1) || multi_year
+            # Packing order (design Criterion 2): year+full → full → abbr → fit_width(abbr)
             if want_year
                 with_y = string(base, " ", y)
-                # Prefer dropping year before abbreviating month when tight
                 if textwidth(with_y) <= span
                     with_y
                 elseif textwidth(base) <= span
                     base
+                elseif textwidth(abbr) <= span
+                    abbr
                 else
-                    fit_width(base, max(1, span))
+                    fit_width(abbr, max(1, span))
                 end
             else
-                textwidth(base) <= span ? base : fit_width(base, max(1, span))
+                if textwidth(base) <= span
+                    base
+                elseif textwidth(abbr) <= span
+                    abbr
+                else
+                    fit_width(abbr, max(1, span))
+                end
             end
         end
         # Full-week long form ("W12 Mar 16") is kept intact for pure oracles.
@@ -837,7 +847,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 start_c = clamp(start_c, t.c0, t.c1)
                 xx = chart_x + start_c
                 xx > area.x + area.width - 1 && continue
-                set_string!(buf, xx, tab_y, _short(lab, max(1, min(span, view_ncols - start_c))),
+                # Clip to remaining period cells (t.c1), not just original span from c0
+                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                set_string!(buf, xx, tab_y, _short(lab, avail),
                             Style(; fg = col_primary(), bold = true))
             end
             # Tick row — numeric day-of-month with breathing room (muted)
@@ -865,7 +877,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 start_c = clamp(start_c, t.c0, t.c1)
                 xx = chart_x + start_c
                 xx > area.x + area.width - 1 && continue
-                set_string!(buf, xx, ruler_y, _short(lab, max(1, min(span, view_ncols - start_c))),
+                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                set_string!(buf, xx, ruler_y, _short(lab, avail),
                             Style(; fg = col_primary(), bold = true))
             end
         else
@@ -1060,7 +1073,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         for i in 1:nshow
             set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
         end
-        if has_ruler && (view_ncols - tcol) > 5
+        # "TODAY" on tick/single axis row. Skip on single-row month where tabs are the
+        # primary axis content (TODAY would clobber month chips). Dual keeps TODAY on ticks.
+        if has_ruler && (view_ncols - tcol) > 5 && !(!has_dual && m.gantt_scale === :month)
             lx = chart_x + tcol + 1
             if lx + 4 < chart_x + view_ncols
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))

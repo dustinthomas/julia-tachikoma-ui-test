@@ -22,17 +22,34 @@ p4bar_run(s) = (best = 0; cur = 0; for c in s; if c == '█' || c == '▓' || c 
 
 # G3: dual-row axis at h≥12 shifts tick/grid rows; scan instead of hard-coded offsets.
 p4_screen_blob(tb; h=16) = join([something(T.row_text(tb, i), "") for i in 1:h], "\n")
+function _p4_is_axisish_row(rt::AbstractString)
+    occursin("GANTT", rt) && return false
+    occursin(r"→", rt) && occursin(r"•", rt) && return false
+    occursin(r"QCI-\d+\s*:", rt) && return false
+    true
+end
 function p4_digit_dense_row(tb; h=16, min_digits=4)
-    best = nothing; bestn = 0
-    for i in 1:h
-        rt = T.row_text(tb, i)
-        rt === nothing && continue
-        n = count(isdigit, rt)
-        if n >= min_digits && n > bestn
-            best = rt; bestn = n
+    # Prefer axis strip under ▼ so footer/title digits cannot beat tick row (review Issue 1).
+    function densest(rows)
+        best = nothing; bestn = 0
+        for i in rows
+            (i < 1 || i > h) && continue
+            rt = T.row_text(tb, i)
+            rt === nothing && continue
+            !_p4_is_axisish_row(rt) && continue
+            n = count(isdigit, rt)
+            if n >= min_digits && n > bestn
+                best = rt; bestn = n
+            end
         end
+        best
     end
-    best
+    loc = T.find_text(tb, "▼")
+    if loc !== nothing
+        got = densest([loc.y + 1, loc.y + 2])
+        got !== nothing && return got
+    end
+    densest(1:h)
 end
 function p4_today_vert_at(tb, x; from_y=1, h=20)
     for y in (from_y + 1):h
