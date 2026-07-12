@@ -1945,6 +1945,42 @@ end
         @test m.gantt_sel == 2
     end
 
+    @testset "mouse handler: wheel over body scrolls window; outside no-op; no zoom" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "WhEp")
+        G4.Stores.create_issue!(m.boardstore; title = "WhA", epic_id = e.id,
+                                start_date = Dates.today(), due_date = Dates.today() + Day(2))
+        g4!(m, 'G')
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        st0 = m.gantt_start
+        scale0 = m.gantt_scale
+        step = Day(G4.gantt_scroll_days(m.gantt_scale))
+        cx = area.x + area.width ÷ 2
+        cy = area.y + area.height ÷ 2
+
+        down = T.MouseEvent(cx, cy, T.mouse_scroll_down, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, down)
+        @test m.gantt_start == st0 + step
+        @test m.gantt_scale === scale0
+
+        up = T.MouseEvent(cx, cy, T.mouse_scroll_up, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, up)
+        @test m.gantt_start == st0
+        @test m.gantt_scale === scale0
+
+        # Outside area: no scroll
+        out = T.MouseEvent(area.x + area.width + 2, cy, T.mouse_scroll_down, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, out)
+        @test m.gantt_start == st0
+
+        # Empty / zero area: no-op
+        m.gantt_last_area = T.Rect(0, 0, 0, 0)
+        G4._handle_gantt_mouse!(m, down)
+        @test m.gantt_start == st0
+        m.gantt_last_area = area
+    end
+
     @testset "hit-test edge coverage: single axis, epic chart, diamond post-bar, title/footer" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "EdgeEp")

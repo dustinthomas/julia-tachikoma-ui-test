@@ -1,10 +1,14 @@
 # ═══════════════════════════════════════════════════════════════════════
-# BDD acceptance for Gantt mouse MVP M1 — click-to-select via pure hit-test.
+# BDD acceptance for Gantt mouse MVP M1–M2
+#   M1 click-to-select via pure hit-test:
 #   • Left-press on left-rail / bar / post-bar selects issue (issue-only gantt_sel)
 #   • Epic header / axis / empty area: no-op
 #   • Click does NOT open detail modal (Enter/v remain open path)
 #   • Keyboard j/k/Enter still work after mouse select
 #   • Login / modal / non-gantt / empty gantt_last_area ignore mouse
+#   M2 wheel scroll:
+#   • mouse_scroll_up/down over gantt body → _gantt_scroll!(±1); advances gantt_start
+#   • No zoom on wheel; keyboard h/l remain first-class
 # Driven via update!(m, MouseEvent(...)) + TestBackend re-render.
 # ═══════════════════════════════════════════════════════════════════════
 using Test
@@ -14,6 +18,7 @@ GM = QciKanban
 gmlogin(; name = "Mouse User") = (m = fresh_app(; seed = false); app_login_new(m; name = name); m)
 gm!(m, x) = T.update!(m, T.KeyEvent(x))
 gm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, false, false)
+gm_wheel(col, row, btn) = T.MouseEvent(col, row, btn, T.mouse_press, false, false, false)
 
 @testset "FEATURE: Gantt mouse click-select (M1 BDD)" begin
 
@@ -183,5 +188,82 @@ gm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, 
         @test m.login_error == "Session expired (idle)"
         # selection not advanced after logout swallow
         @test m.gantt_sel == sel_before || m.current_user === nothing
+    end
+end
+
+@testset "FEATURE: Gantt mouse wheel scroll (M2 BDD)" begin
+
+    @testset "Given Gantt view When user scrolls wheel over chart Then window advances" begin
+        m = gmlogin()
+        e = GM.Stores.create_epic!(m.boardstore; name = "WheelRoadmap")
+        GM.Stores.create_issue!(m.boardstore; title = "WheelAlpha", epic_id = e.id,
+                                start_date = Dates.today(),
+                                due_date = Dates.today() + Day(3))
+        gm!(m, 'G')
+        @test m.view === :gantt
+        @test m.gantt_scale === :day
+        W, H = 120, 28
+        app_tb(m; w = W, h = H)
+        area = m.gantt_last_area
+        @test area.width >= 1 && area.height >= 1
+        # Pointer over gantt body (chart interior)
+        cx = area.x + area.width ÷ 2
+        cy = area.y + area.height ÷ 2
+        st0 = m.gantt_start
+        scale0 = m.gantt_scale
+        step = Day(GM.gantt_scroll_days(m.gantt_scale))
+
+        @testset "When wheel-down over body Then gantt_start advances one scroll step" begin
+            T.update!(m, gm_wheel(cx, cy, T.mouse_scroll_down))
+            @test m.gantt_start == st0 + step
+            @test m.gantt_scale === scale0   # no zoom
+            @test m.modal === :none
+            # message matches keyboard scroll helper
+            @test occursin("Gantt window from", something(m.message, ""))
+        end
+
+        @testset "When wheel-up over body Then gantt_start returns one step" begin
+            T.update!(m, gm_wheel(cx, cy, T.mouse_scroll_up))
+            @test m.gantt_start == st0
+            @test m.gantt_scale === scale0
+        end
+
+        @testset "When keyboard h/l used after wheel Then they remain first-class" begin
+            gm!(m, 'l')
+            @test m.gantt_start == st0 + step
+            gm!(m, 'h')
+            @test m.gantt_start == st0
+        end
+
+        @testset "When wheel outside gantt_last_area Then gantt_start unchanged" begin
+            outside = T.MouseEvent(area.x + area.width + 5, area.y + 1,
+                                   T.mouse_scroll_down, T.mouse_press, false, false, false)
+            T.update!(m, outside)
+            @test m.gantt_start == st0
+            @test m.gantt_scale === scale0
+        end
+
+        @testset "When wheel over empty chart / bar region Then still scrolls" begin
+            # Empty chart (period wash) and bar cells are still "over body"
+            lay = GM.gantt_layout(m, area)
+            # Use chart column past likely bar extent for empty-ish cell, or any body cell
+            T.update!(m, gm_wheel(lay.chart_x + 1, lay.grid_y0, T.mouse_scroll_down))
+            @test m.gantt_start == st0 + step
+            T.update!(m, gm_wheel(lay.chart_x + 1, lay.grid_y0, T.mouse_scroll_up))
+            @test m.gantt_start == st0
+        end
+
+        @testset "When click-select after wheel Then selection still works (M1 intact)" begin
+            rows = GM.gantt_rows(m)
+            lay = GM.gantt_layout(m, area; rows = rows)
+            iss = GM._gantt_selected_issue(m)
+            @test iss !== nothing
+            ri = findfirst(r -> r.kind === :issue && r.issue.id == iss.id, rows)
+            yi = lay.grid_y0 + (ri - lay.row_start)
+            T.update!(m, gm_click(area.x + 1, yi))
+            @test m.gantt_sel == 1
+            @test m.modal === :none
+            @test m.gantt_start == st0
+        end
     end
 end

@@ -496,8 +496,9 @@ end
 """
     update!(m::AppModel, evt::MouseEvent)
 
-M1 mouse path (not KEYMAP): idle parity, then Gantt-only click-select when
-logged in, no modal, view is `:gantt`, and `gantt_last_area` is non-empty.
+Mouse path (not KEYMAP): idle parity, then Gantt-only handling (M1 click-select
++ M2 wheel scroll) when logged in, no modal, view is `:gantt`, and
+`gantt_last_area` is non-empty.
 """
 function update!(m::AppModel, evt::MouseEvent)
     m.tick += 1

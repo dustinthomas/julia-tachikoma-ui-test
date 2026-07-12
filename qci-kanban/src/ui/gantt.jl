@@ -994,14 +994,27 @@ end
 """
     _handle_gantt_mouse!(m, evt)
 
-M1 click-select path. Left press on left-rail issue / bar / diamond / post-bar
-→ issue-only select + keep-in-view. Epic, axis, band, empty: no-op.
-Wheel / drag / open-on-click are intentionally out of scope (M2/M3).
+M1 click-select + M2 wheel scroll. Left press on left-rail issue / bar /
+diamond / post-bar → issue-only select + keep-in-view. Epic, axis, band,
+empty: no-op for click. Wheel (`mouse_scroll_up`/`down`) over `gantt_last_area`
+→ `_gantt_scroll!(±1)` (matches `h`/`l`); no zoom. Drag / open-on-click out
+of scope (M3).
 """
 function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
-    (evt.button === mouse_left && evt.action === mouse_press) || return m
     area = m.gantt_last_area
     (area.width < 1 || area.height < 1) && return m
+
+    # M2 — wheel horizontal scroll when pointer is over the cached gantt body.
+    # Button is scroll_*; do not require mouse_left. Match button primarily
+    # (action is typically mouse_press from SGR). No zoom on wheel.
+    if evt.button === mouse_scroll_up || evt.button === mouse_scroll_down
+        Base.contains(area, evt.x, evt.y) || return m
+        dir = evt.button === mouse_scroll_up ? -1 : +1
+        return _gantt_scroll!(m, dir)
+    end
+
+    # M1 — click-select
+    (evt.button === mouse_left && evt.action === mouse_press) || return m
     rows = gantt_rows(m)
     lay = gantt_layout(m, area; rows = rows)
     hit = gantt_hit_test(lay, rows, evt.x, evt.y)
