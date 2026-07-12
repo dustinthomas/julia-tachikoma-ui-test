@@ -174,6 +174,36 @@ const D = QciKanban.Domain
         @test D.sum_units(D.Issue[]) == 0
     end
 
+    @testset "IssueLink + LINK_TYPES + would_blocks_cycle (G6a)" begin
+        @test D.LINK_TYPES == ("blocks", "relates_to")
+        @test D.valid_link_type("blocks") && D.valid_link_type("relates_to")
+        @test !D.valid_link_type("depends_on") && !D.valid_link_type("blocked_by")
+        ln = D.IssueLink(; id = "l1", from_id = "a", to_id = "b")
+        @test ln.kind == "blocks" && ln.from_id == "a" && ln.to_id == "b"
+        ln2 = D.IssueLink(; id = "l2", from_id = "a", to_id = "c", kind = "relates_to")
+        @test ln2.kind == "relates_to"
+        @test_throws ArgumentError D.IssueLink(; id = "x", from_id = "a", to_id = "b", kind = "blocked_by")
+        @test_throws ArgumentError D.IssueLink(; id = "x", from_id = "  ", to_id = "b")
+        @test_throws ArgumentError D.IssueLink(; id = "x", from_id = "a", to_id = "")
+
+        # Pure cycle helper: self-loop
+        @test D.would_blocks_cycle(Tuple{String,String}[], "a", "a")
+        # No edges: A→B ok
+        @test !D.would_blocks_cycle(Tuple{String,String}[], "a", "b")
+        # A→B→C: closing C→A or C→B cycles; C→D is fine
+        edges = [("a", "b"), ("b", "c")]
+        @test D.would_blocks_cycle(edges, "c", "a")
+        @test D.would_blocks_cycle(edges, "c", "b")   # b→c + c→b
+        @test !D.would_blocks_cycle(edges, "c", "d")
+        # direct reverse of existing edge
+        @test D.would_blocks_cycle([("a", "b")], "b", "a")
+        # longer chain
+        chain = [("1", "2"), ("2", "3"), ("3", "4")]
+        @test D.would_blocks_cycle(chain, "4", "1")
+        @test !D.would_blocks_cycle(chain, "1", "4")  # forward edge along existing path ≠ cycle
+        @test !D.would_blocks_cycle(chain, "4", "5")
+    end
+
     @testset "ActivityEvent" begin
         a = D.ActivityEvent(; id = "a1", issue_id = "i1", kind = :created)
         @test a.actor_id === nothing && a.detail == ""

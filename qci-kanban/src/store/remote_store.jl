@@ -16,7 +16,7 @@ using Dates
 export RemoteUserStore, RemoteBoardStore, FakeExec
 export remote_row_to_user, remote_row_to_issue, remote_row_to_epic,
        remote_row_to_sprint, remote_row_to_comment, remote_row_to_label,
-       remote_row_to_activity, remote_row_to_project
+       remote_row_to_activity, remote_row_to_project, remote_row_to_link
 export pg_placeholders, pg_conninfo
 
 # ── Store types (exec is injectable) ─────────────────────────────────────
@@ -134,6 +134,12 @@ remote_row_to_activity(d::AbstractDict)::ActivityEvent =
                   kind = Symbol(_get(d, "kind")),
                   detail = let x = _get(d, "detail"); x === nothing ? "" : String(x) end,
                   created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
+
+remote_row_to_link(d::AbstractDict)::IssueLink =
+    IssueLink(; id = String(_get(d, "id")), from_id = String(_get(d, "from_id")),
+              to_id = String(_get(d, "to_id")),
+              kind = let x = _get(d, "kind"); x === nothing ? "blocks" : String(x) end,
+              created = parse_dt(something(_get(d, "created"), Dates.now(UTC))))
 
 # ═══════════════════════════ USER STORE ═══════════════════════════════════
 # First-empty-admin parity with SQLiteUserStore (PR-H1).
@@ -428,6 +434,7 @@ function delete_issue!(store::RemoteBoardStore, id::AbstractString)::Bool
     iss = get_issue(store, id)
     iss === nothing && return false
     _remote_assert_project_writable!(store, iss.project_id)
+    store.exec("DELETE FROM issue_links WHERE from_id = \$1 OR to_id = \$1", Any[id])
     store.exec("DELETE FROM issue_labels WHERE issue_id = \$1", Any[id])
     store.exec("DELETE FROM issues WHERE id = \$1", Any[id])
     _remote_reindex_status!(store, iss.status)   # C3: keep positions dense after delete
@@ -626,6 +633,76 @@ end
 list_activity(store::RemoteBoardStore, issue_id::AbstractString)::Vector{ActivityEvent} =
     [remote_row_to_activity(d) for d in
      store.exec("SELECT * FROM activity WHERE issue_id = \$1 ORDER BY created", Any[issue_id])]
+
+# ── Issue links (G6a; same schema/validation as SQLite) ─────────────────────
+function _remote_blocks_edges(store::RemoteBoardStore)::Vector{Tuple{String,String}}
+    rows = store.exec("SELECT from_id, to_id FROM issue_links WHERE kind = \$1", Any["blocks"])
+    [(String(_get(d, "from_id")), String(_get(d, "to_id"))) for d in rows]
+end
+
+function create_link!(store::RemoteBoardStore; from_id::AbstractString, to_id::AbstractString,
+                      kind::AbstractString = "blocks")::IssueLink
+    valid_link_type(kind) || throw(ArgumentError("invalid link kind: $kind"))
+    String(from_id) == String(to_id) &&
+        throw(ArgumentError("self-link not allowed: $from_id"))
+    a = get_issue(store, from_id)
+    a === nothing && throw(ArgumentError("no such issue: $from_id"))
+    b = get_issue(store, to_id)
+    b === nothing && throw(ArgumentError("no such issue: $to_id"))
+    a.project_id == b.project_id ||
+        throw(ArgumentError("issues must share project_id (got $(a.project_id) vs $(b.project_id))"))
+    _remote_assert_project_writable!(store, a.project_id)
+    dup = store.exec(
+        "SELECT id FROM issue_links WHERE from_id = \$1 AND to_id = \$2 AND kind = \$3 LIMIT 1",
+        Any[from_id, to_id, kind])
+    isempty(dup) || throw(ArgumentError("link already exists: $from_id → $to_id ($kind)"))
+    if kind == "blocks"
+        would_blocks_cycle(_remote_blocks_edges(store), from_id, to_id) &&
+            throw(ArgumentError("blocks link would create a cycle: $from_id → $to_id"))
+    end
+    id = new_id(); created = Dates.now(UTC)
+    store.exec("INSERT INTO issue_links (id, from_id, to_id, kind, created) VALUES ($(pg_placeholders(5)))",
+               Any[id, from_id, to_id, kind, _dt_str(created)])
+    IssueLink(; id = id, from_id = from_id, to_id = to_id, kind = kind, created = created)
+end
+
+function list_links(store::RemoteBoardStore;
+                    issue_id::Union{AbstractString,Nothing} = nothing,
+                    project_id::Union{AbstractString,Nothing} = nothing,
+                    kind::Union{AbstractString,Nothing} = nothing)::Vector{IssueLink}
+    project_id = _norm_project_filter(project_id)
+    clauses = String[]; params = Any[]; i = 1
+    if issue_id !== nothing
+        push!(clauses, "(l.from_id = \$$(i) OR l.to_id = \$$(i))")
+        push!(params, issue_id); i += 1
+    end
+    if project_id !== nothing
+        push!(clauses, "f.project_id = \$$(i)")
+        push!(params, project_id); i += 1
+    end
+    if kind !== nothing
+        push!(clauses, "l.kind = \$$(i)")
+        push!(params, kind); i += 1
+    end
+    where = isempty(clauses) ? "" : "WHERE " * join(clauses, " AND ")
+    sql = """
+        SELECT l.id, l.from_id, l.to_id, l.kind, l.created
+        FROM issue_links l
+        JOIN issues f ON f.id = l.from_id
+        $where
+        ORDER BY l.created, l.id
+    """
+    [remote_row_to_link(d) for d in store.exec(sql, params)]
+end
+
+function delete_link!(store::RemoteBoardStore, id::AbstractString)::Bool
+    rows = store.exec("SELECT id, from_id FROM issue_links WHERE id = \$1 LIMIT 1", Any[id])
+    isempty(rows) && return false
+    from = get_issue(store, String(_get(rows[1], "from_id")))
+    from !== nothing && _remote_assert_project_writable!(store, from.project_id)
+    store.exec("DELETE FROM issue_links WHERE id = \$1", Any[id])
+    true
+end
 
 # ── Sprint / backlog queries ────────────────────────────────────────────────
 issues_for_sprint(store::RemoteBoardStore, sprint_id::AbstractString)::Vector{Issue} =

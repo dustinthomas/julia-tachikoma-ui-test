@@ -135,7 +135,7 @@ end
 # safe because only Default has data right after migrate.
 const DEFAULT_PROJECT_KEY = "QCI"
 const DEFAULT_PROJECT_NAME = "Default"
-const BOARD_SCHEMA_TARGET = 7   # v6=metrics backfill (PR-M4); v7=WO columns (PR-M6)
+const BOARD_SCHEMA_TARGET = 8   # v6=metrics; v7=WO columns; v8=issue_links (G6a)
 
 function init_board_schema!(db::SQLite.DB)
     _exec(db, """
@@ -219,8 +219,8 @@ end
 """
     migrate_board_schema!(db) -> Int
 
-Apply board migrations v1–v6 (transaction per version). Returns the version after
-migrate. v6 = sprint_metrics backfill (PR-M4); v7 = WO columns asset_tag/location/work_type (PR-M6).
+Apply board migrations v1–v8 (transaction per version). Returns the version after
+migrate. v6 = sprint_metrics backfill (PR-M4); v7 = WO columns; v8 = issue_links (G6a).
 """
 function migrate_board_schema!(db::SQLite.DB)::Int
     v = _schema_version(db)
@@ -362,6 +362,32 @@ function migrate_board_schema!(db::SQLite.DB)::Int
             _record_migration!(db, 7)
         end
         v = 7
+    end
+
+    if v < 8
+        # G6a / Criterion 4 — directed issue dependency edges (blocks / relates_to).
+        SQLite.transaction(db) do
+            _exec(db, """
+                CREATE TABLE IF NOT EXISTS issue_links (
+                    id TEXT PRIMARY KEY,
+                    from_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                    to_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL DEFAULT 'blocks',
+                    created TEXT NOT NULL,
+                    UNIQUE(from_id, to_id, kind)
+                )
+            """)
+            _exec(db, """
+                CREATE INDEX IF NOT EXISTS idx_issue_links_from
+                ON issue_links(from_id)
+            """)
+            _exec(db, """
+                CREATE INDEX IF NOT EXISTS idx_issue_links_to
+                ON issue_links(to_id)
+            """)
+            _record_migration!(db, 8)
+        end
+        v = 8
     end
 
     # BOARD_SCHEMA_TARGET is the highest version this migrator applies.
@@ -785,6 +811,8 @@ function delete_issue!(store::SQLiteBoardStore, id::AbstractString)::Bool
     iss = get_issue(store, id)
     iss === nothing && return false
     _assert_project_writable!(store, iss.project_id)
+    # Explicit cleanup (FK CASCADE also removes issue_links when issues row goes).
+    _exec(store.db, "DELETE FROM issue_links WHERE from_id = ? OR to_id = ?", [id, id])
     _exec(store.db, "DELETE FROM issues WHERE id = ?", [id])
     _exec(store.db, "DELETE FROM issue_labels WHERE issue_id = ?", [id])
     _reindex_status!(store, iss.project_id, iss.status)
@@ -1103,6 +1131,93 @@ function list_comments(store::SQLiteBoardStore, issue_id::AbstractString)::Vecto
     r = _query(store.db, "SELECT * FROM comments WHERE issue_id = ? ORDER BY created", [issue_id])
     [Comment(; id = String(r.id[i]), issue_id = String(r.issue_id[i]), author_id = String(r.author_id[i]),
              body = String(r.body[i]), created = parse_dt(r.created[i])) for i in eachindex(r.id)]
+end
+
+# ── Issue links (G6a / Criterion 4) ────────────────────────────────────────
+function _blocks_edges(store::SQLiteBoardStore)::Vector{Tuple{String,String}}
+    r = _query(store.db, "SELECT from_id, to_id FROM issue_links WHERE kind = 'blocks'")
+    [(String(r.from_id[i]), String(r.to_id[i])) for i in eachindex(r.from_id)]
+end
+
+"""
+    create_link!(store; from_id, to_id, kind="blocks") -> IssueLink
+
+Both issues must exist and share the same `project_id`. Rejects self-links,
+duplicate `(from, to, kind)`, and `blocks` edges that would form a cycle.
+No stored inverse for "blocked by" — reverse adjacency is computed by callers.
+"""
+function create_link!(store::SQLiteBoardStore; from_id::AbstractString, to_id::AbstractString,
+                      kind::AbstractString = "blocks")::IssueLink
+    valid_link_type(kind) || throw(ArgumentError("invalid link kind: $kind"))
+    String(from_id) == String(to_id) &&
+        throw(ArgumentError("self-link not allowed: $from_id"))
+    a = get_issue(store, from_id)
+    a === nothing && throw(ArgumentError("no such issue: $from_id"))
+    b = get_issue(store, to_id)
+    b === nothing && throw(ArgumentError("no such issue: $to_id"))
+    a.project_id == b.project_id ||
+        throw(ArgumentError("issues must share project_id (got $(a.project_id) vs $(b.project_id))"))
+    _assert_project_writable!(store, a.project_id)
+    existing = _query(store.db,
+        "SELECT id FROM issue_links WHERE from_id = ? AND to_id = ? AND kind = ? LIMIT 1",
+        [from_id, to_id, kind])
+    isempty(existing.id) || throw(ArgumentError("link already exists: $from_id → $to_id ($kind)"))
+    if kind == "blocks"
+        would_blocks_cycle(_blocks_edges(store), from_id, to_id) &&
+            throw(ArgumentError("blocks link would create a cycle: $from_id → $to_id"))
+    end
+    id = new_id(); created = Dates.now(UTC)
+    _exec(store.db,
+          "INSERT INTO issue_links (id, from_id, to_id, kind, created) VALUES (?, ?, ?, ?, ?)",
+          [id, from_id, to_id, kind, _dt_str(created)])
+    IssueLink(; id = id, from_id = from_id, to_id = to_id, kind = kind, created = created)
+end
+
+"""
+    list_links(store; issue_id=nothing, project_id=nothing, kind=nothing) -> Vector{IssueLink}
+
+Filter by endpoint (`issue_id` matches from or to), project (via from-issue),
+and/or link `kind`. Filters combine with AND when multiple are set.
+"""
+function list_links(store::SQLiteBoardStore;
+                    issue_id::Union{AbstractString,Nothing} = nothing,
+                    project_id::Union{AbstractString,Nothing} = nothing,
+                    kind::Union{AbstractString,Nothing} = nothing)::Vector{IssueLink}
+    project_id = _norm_project_filter(project_id)
+    clauses = String[]; params = Any[]
+    if issue_id !== nothing
+        push!(clauses, "(l.from_id = ? OR l.to_id = ?)")
+        push!(params, issue_id, issue_id)
+    end
+    if project_id !== nothing
+        push!(clauses, "f.project_id = ?")
+        push!(params, project_id)
+    end
+    if kind !== nothing
+        push!(clauses, "l.kind = ?")
+        push!(params, kind)
+    end
+    where = isempty(clauses) ? "" : "WHERE " * join(clauses, " AND ")
+    sql = """
+        SELECT l.id, l.from_id, l.to_id, l.kind, l.created
+        FROM issue_links l
+        JOIN issues f ON f.id = l.from_id
+        $where
+        ORDER BY l.created, l.id
+    """
+    r = isempty(params) ? _query(store.db, sql) : _query(store.db, sql, params)
+    [IssueLink(; id = String(r.id[i]), from_id = String(r.from_id[i]),
+               to_id = String(r.to_id[i]), kind = String(r.kind[i]),
+               created = parse_dt(r.created[i])) for i in eachindex(r.id)]
+end
+
+function delete_link!(store::SQLiteBoardStore, id::AbstractString)::Bool
+    r = _query(store.db, "SELECT id, from_id FROM issue_links WHERE id = ? LIMIT 1", [id])
+    isempty(r.id) && return false
+    from = get_issue(store, String(r.from_id[1]))
+    from !== nothing && _assert_project_writable!(store, from.project_id)
+    _exec(store.db, "DELETE FROM issue_links WHERE id = ?", [id])
+    true
 end
 
 # ── Activity log ───────────────────────────────────────────────────────────

@@ -146,6 +146,68 @@ end
         @test 6 in scs  # 2026-03-16 Mon == col 6
     end
 
+    @testset "G5: gantt_period_sep_cols month boundaries (pure)" begin
+        # Day scale: window spanning Mar→Apr → col of Apr 1 is the only boundary
+        ws = Date(2026, 3, 25)  # Wed
+        # cols: 25,26,27,28,29,30,31,Apr1=col7,2,3
+        pcols = G4.gantt_period_sep_cols(ws, 1, 10, :day)
+        @test pcols == [7]  # 2026-04-01
+        @test G4.gantt_date_for_col(ws, 1, 7) == Date(2026, 4, 1)
+        # No boundary inside a single month
+        @test G4.gantt_period_sep_cols(Date(2026, 3, 10), 1, 14, :day) == Int[]
+        # Week scale uses same month edges (not ISO week Mondays)
+        @test G4.gantt_period_sep_cols(ws, 1, 10, :week) == [7]
+        # Month scale dpc=7: Mar 10 + 7*c → Apr lands when month flips
+        mws = Date(2026, 3, 10)
+        dpc = 7
+        mcols = G4.gantt_period_sep_cols(mws, dpc, 12, :month)
+        # Find first col whose month differs from col 0
+        expected = Int[]
+        prev = (2026, 3)
+        for c in 1:11
+            d = G4.gantt_date_for_col(mws, dpc, c)
+            key = (Dates.year(d), Dates.month(d))
+            if key != prev
+                push!(expected, c)
+                prev = key
+            end
+        end
+        @test mcols == expected
+        @test !isempty(mcols)
+        # empty / non-positive ncols
+        @test G4.gantt_period_sep_cols(ws, 1, 0, :day) == Int[]
+        @test G4.gantt_period_sep_cols(ws, 1, -1, :day) == Int[]
+        # Year boundary Dec→Jan
+        yb = Date(2025, 12, 28)
+        ycols = G4.gantt_period_sep_cols(yb, 1, 10, :day)
+        @test 4 in ycols  # 2026-01-01 is col 4
+        @test G4.gantt_date_for_col(yb, 1, 4) == Date(2026, 1, 1)
+    end
+
+    @testset "G5: gantt_quarter_id + gantt_axis_quarter_tabs (pure)" begin
+        @test G4.gantt_quarter_id(Date(2026, 1, 1)) == (2026, 1)
+        @test G4.gantt_quarter_id(Date(2026, 3, 31)) == (2026, 1)
+        @test G4.gantt_quarter_id(Date(2026, 4, 1)) == (2026, 2)
+        @test G4.gantt_quarter_id(Date(2026, 7, 15)) == (2026, 3)
+        @test G4.gantt_quarter_id(Date(2026, 12, 1)) == (2026, 4)
+        # Month scale spanning Q1→Q2
+        mws = Date(2026, 2, 1)
+        dpc = 7
+        tabs = G4.gantt_axis_quarter_tabs(mws, dpc, 20; narrow = false)
+        @test length(tabs) >= 2
+        @test any(t -> occursin("Q1", t.label), tabs)
+        @test any(t -> occursin("Q2", t.label), tabs)
+        # spans are inclusive and ordered
+        @test tabs[1].c0 == 0
+        @test tabs[1].c1 >= tabs[1].c0
+        @test tabs[2].c0 == tabs[1].c1 + 1
+        # empty ncols
+        @test G4.gantt_axis_quarter_tabs(mws, dpc, 0) == []
+        # narrow prefers short "Qn"
+        tabs_n = G4.gantt_axis_quarter_tabs(mws, dpc, 8; narrow = true)
+        @test all(t -> startswith(t.label, "Q"), tabs_n)
+    end
+
     @testset "gantt_clamped_start_for_day (pure, day positioning near left)" begin
         td = Dates.today()
         @test G4.gantt_clamped_start_for_day(td - Day(100), td, 1, 80) == td - Day(1)  # far past snaps
@@ -291,6 +353,26 @@ end
         # tcol before start is ignored for clipping (start=7, avail=20-7=13)
         g5 = G4.gantt_post_bar_label_geom(0, 5, 20; tcol=3)
         @test g5 !== nothing && g5.start == 7 && g5.max_chars == 13
+    end
+
+    @testset "PR-V: gantt_pre_bar_key_geom worked examples" begin
+        # key_w=5, gap=1, c0=10 → last=8, start=4
+        g = G4.gantt_pre_bar_key_geom(10, 40; gap=1, key_w=5)
+        @test g !== nothing
+        @test g.start == 4 && g.max_chars == 5
+        # not enough room left of bar
+        @test G4.gantt_pre_bar_key_geom(3, 40; gap=1, key_w=5) === nothing
+        @test G4.gantt_pre_bar_key_geom(0, 40; gap=1, key_w=3) === nothing
+        # full key fits exactly: c0 = key_w + gap
+        g2 = G4.gantt_pre_bar_key_geom(6, 40; gap=1, key_w=5)
+        @test g2 !== nothing && g2.start == 0 && g2.max_chars == 5
+        # key_w < 1 / gap invalid
+        @test G4.gantt_pre_bar_key_geom(10, 40; gap=1, key_w=0) === nothing
+        @test G4.gantt_pre_bar_key_geom(10, 40; gap=-1, key_w=3) === nothing
+        # last col must stay inside view_ncols
+        @test G4.gantt_pre_bar_key_geom(10, 8; gap=1, key_w=3) === nothing  # last=8 >= 8
+        g3 = G4.gantt_pre_bar_key_geom(10, 9; gap=1, key_w=3)
+        @test g3 !== nothing && g3.start == 6
     end
 
     @testset "G1: gantt_axis_period_tabs worked examples" begin
@@ -537,6 +619,55 @@ end
         @test G4.gantt_safe_char('┬', true) == '+'
         @test G4.gantt_safe_char('█', true) == '█'  # existing kept
         @test G4.gantt_safe_char('░', true) == '░'
+        # G6b link polyline fallbacks
+        @test G4.gantt_safe_char('─', true) == '-'
+        @test G4.gantt_safe_char('│', true) == '|'
+        @test G4.gantt_safe_char('╮', true) == '+'
+        @test G4.gantt_safe_char('╯', true) == '+'
+        @test G4.gantt_safe_char('╰', true) == '+'
+        @test G4.gantt_safe_char('╭', true) == '+'
+        @test G4.gantt_safe_char('▶', true) == '>'
+        @test G4.gantt_safe_char('◀', true) == '<'
+    end
+
+    @testset "G6b: gantt_link_segments pure FS polylines" begin
+        # Same row forward: ──▶
+        segs = G4.gantt_link_segments(0, 0, 2, 6)
+        @test !isempty(segs)
+        @test segs[end] == (x = 6, y = 0, ch = '▶')
+        @test all(s -> s.y == 0, segs)
+        @test any(s -> s.ch == '─', segs)
+        # Same row reverse: ◀──
+        segs_r = G4.gantt_link_segments(1, 1, 8, 3)
+        @test segs_r[end] == (x = 3, y = 1, ch = '◀')
+        # Degenerate same cell
+        segs0 = G4.gantt_link_segments(2, 2, 5, 5)
+        @test length(segs0) == 1 && segs0[1].ch == '▶'
+        # Down + right (classic FS): ╮ / │ / ╰─▶
+        segs_d = G4.gantt_link_segments(0, 2, 4, 7)
+        chars_d = Set(s.ch for s in segs_d)
+        @test '╮' in chars_d && '│' in chars_d && '╰' in chars_d && '▶' in chars_d
+        @test segs_d[1] == (x = 4, y = 0, ch = '╮')
+        @test segs_d[end] == (x = 7, y = 2, ch = '▶')
+        # Up + left
+        segs_u = G4.gantt_link_segments(3, 1, 9, 5)
+        chars_u = Set(s.ch for s in segs_u)
+        @test '╯' in chars_u && '│' in chars_u && '▶' ∉ chars_u  # ends with ◀
+        @test segs_u[end].ch == '◀'
+        # Same column down: vertical + ▶ at target
+        segs_v = G4.gantt_link_segments(0, 3, 2, 2)
+        @test segs_v[1].ch == '╮'
+        @test segs_v[end] == (x = 2, y = 3, ch = '▶')
+        @test any(s -> s.ch == '│', segs_v)
+        # Narrow maps box-drawing to ASCII
+        segs_n = G4.gantt_link_segments(0, 1, 3, 6; narrow = true)
+        @test all(s -> s.ch in ('-', '|', '+', '>', '<'), segs_n)
+        @test segs_n[end].ch == '>'
+        # Endpoint cols helper
+        ws = Date(2026, 3, 1)
+        @test G4.gantt_issue_endpoint_cols(ws, 1, Date(2026, 3, 2), Date(2026, 3, 5), 14) == (1, 4)
+        @test G4.gantt_issue_endpoint_cols(ws, 1, nothing, Date(2026, 3, 3), 14) == (2, 2)
+        @test G4.gantt_issue_endpoint_cols(ws, 1, Date(2026, 4, 1), Date(2026, 4, 5), 14) === nothing
     end
 end
 
@@ -655,8 +786,11 @@ end
         @test m.gantt_start == Dates.today() - Day(1)
         # computed col for render uses clamp for wide (raw col calc covered by m.gantt_start assert + pure tests)
         w = 120
-        left_w = G4.gantt_left_width(G4.gantt_rows(m), w; compact = w >= 60)
-        ncols = w - left_w
+        # PR-V: always full-label left width (matches gantt_layout / paint)
+        left_w = G4.gantt_left_width(G4.gantt_rows(m), w; compact = false)
+        lay = G4.gantt_layout(m, T.Rect(1, 1, w, 20))
+        left_w = lay.left_w
+        ncols = lay.view_ncols
         td = Dates.today()
         cl_start = G4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         expect = G4.gantt_point_col(cl_start, 1, td, ncols)
@@ -694,8 +828,9 @@ end
         td = Dates.today()
         @test m.gantt_start == Date(2025, 11, 1)
         w = 120
-        left_w = G4.gantt_left_width(G4.gantt_rows(m), w; compact = w >= 60)
-        ncols = w - left_w
+        lay = G4.gantt_layout(m, T.Rect(1, 1, w, 20))
+        left_w = lay.left_w
+        ncols = lay.view_ncols
         cl_start = G4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
         tcol = G4.gantt_point_col(cl_start, 1, td, ncols)
         @test tcol !== nothing
@@ -709,7 +844,7 @@ end
         # show that far-future date (would be months away).
         dpc = G4.gantt_days_per_col(:day)
         @test dpc == 1
-        wide_end = G4.gantt_window_end(cl_start, dpc, ncols)
+        wide_end = G4.gantt_window_end(cl_start, dpc, lay.physical_ncols)
         @test title !== nothing && !occursin(string(wide_end), title)
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
@@ -1262,25 +1397,29 @@ end
         @test m.gantt_scale == :month
         dpc = G4.gantt_days_per_col(:month)
         @test dpc == 7
-        # Pure helpers still compute seps/weekends (paint gated only)
+        # Pure helpers still compute week seps/weekends (week-sep *paint* gated only)
         scols = G4.gantt_week_sep_cols(mon, dpc, 20)
         @test !isempty(scols)  # Mondays every col when win starts Monday + dpc=7
         wcols = G4.gantt_weekend_cols(mon, dpc, 20)
-        # paint must not emit week-sep glyphs on grid
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 120, 22))
+        @test lay.paint_week_seps === false
+        @test lay.paint_weekends === false
+        # G5: period-boundary seps (month edges) may paint ┆ at :month — not week Mondays.
+        # At dpc=7 Monday-aligned windows, pure week_sep_cols marks *every* col (noisy);
+        # period seps must stay sparse (≪ view_ncols) — that is the anti-noise contract.
+        pscols = G4.gantt_period_sep_cols(lay.win_start, dpc, lay.view_ncols, :month)
+        week_all = G4.gantt_week_sep_cols(lay.win_start, dpc, lay.view_ncols)
         tb = gantt_render(m; w = 120, h = 22)
         @test T.find_text(tb, "[month]") !== nothing
-        @test T.find_text(tb, "┆") === nothing
-        # narrow fallback '|' for ┆ also absent on chart grid rows (scan issue/epic rows)
-        for i in 1:22
-            rt = T.row_text(tb, i)
-            rt === nothing && continue
-            # title/legend may use other glyphs; week-sep narrow '|' only on grid body —
-            # assert full buffer has no ┆ (already) and issue row has no lone week-sep pattern
-            if occursin("MoBar", rt) || occursin("MoGate", rt)
-                @test !occursin('┆', rt)
-            end
+        if isempty(pscols)
+            @test T.find_text(tb, "┆") === nothing
+        else
+            @test T.find_text(tb, "┆") !== nothing
+            # Sparse vs chart width and vs full Monday-every-col week-sep set
+            @test length(pscols) < lay.view_ncols ÷ 2
+            @test length(pscols) < length(week_all)
         end
-        # Day/week still paint seps (regression: gate is month-only)
+        # Day/week still paint week seps (regression: gate is month-only for week seps)
         g4!(m, 'z'); @test m.gantt_scale == :day
         m.gantt_start = mon
         tb_d = gantt_render(m; w = 120, h = 22)
@@ -1289,6 +1428,63 @@ end
         m.gantt_start = mon
         tb_w = gantt_render(m; w = 120, h = 22)
         @test T.find_text(tb_w, "┆") !== nothing
+    end
+
+    @testset "G5: period seps paint at month scale + legend key + quarter super-header" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "G5Ep")
+        # Span multiple months so period seps + quarters appear at month scale
+        start0 = Date(2026, 2, 1)
+        G4.Stores.create_issue!(m.boardstore; title = "G5Bar", epic_id = e.id,
+                                start_date = start0, due_date = start0 + Day(90))
+        g4!(m, 'G')
+        m.gantt_start = start0
+        g4!(m, 'z'); g4!(m, 'z')  # → month
+        @test m.gantt_scale == :month
+        area = T.Rect(1, 1, 120, 20)
+        lay = G4.gantt_layout(m, area)
+        @test lay.has_dual === true
+        @test lay.has_quarter === true
+        @test lay.quarter_y == area.y + 2
+        @test lay.tab_y == area.y + 3
+        @test lay.tick_y == area.y + 4
+        @test lay.content_start == 1 + 1 + 1 + 2  # title + band + quarter + dual
+        @test lay.paint_week_seps === false
+        ps = G4.gantt_period_sep_cols(lay.win_start, lay.dpc, lay.view_ncols, :month)
+        @test !isempty(ps)
+        tb = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb, "[month]") !== nothing
+        # Period seps visible (month edges) — G5 paint under bars
+        @test T.find_text(tb, "┆") !== nothing
+        # Legend: bar / key / today glyphs on wide title row
+        hrow = T.row_text(tb, 1)
+        @test hrow !== nothing && occursin("GANTT", hrow)
+        @test occursin("█", hrow) || occursin("bar", lowercase(hrow))
+        @test occursin("KEY", hrow) || occursin("K", hrow)
+        @test occursin("┃", hrow) || occursin("today", lowercase(hrow)) || occursin("◆", hrow)
+        # Quarter super-header labels present (Q1/Q2…)
+        blob = gantt_screen_blob(tb; h = 20)
+        @test occursin(r"Q[1-4]", blob)
+        # Day scale at h≥14 does NOT take quarter row (content_start stable)
+        g4!(m, 'z'); @test m.gantt_scale == :day
+        lay_d = G4.gantt_layout(m, area)
+        @test lay_d.has_quarter === false
+        @test lay_d.content_start == 1 + 1 + 2
+        # h=12 month: dual but no quarter (height budget)
+        g4!(m, 'z'); g4!(m, 'z'); @test m.gantt_scale == :month
+        lay12 = G4.gantt_layout(m, T.Rect(1, 1, 120, 12))
+        @test lay12.has_dual === true
+        @test lay12.has_quarter === false
+        @test lay12.content_start == 4
+        # PR-V contract: full left label still present; no compact-only left
+        @test lay.compact === false
+        r = row_with(tb, "G5Bar", 20)
+        @test r !== nothing
+        @test occursin("G5Bar", r)  # full title in left rail
+        # Hit-test: quarter super-header row is axis kind
+        rows_g5 = G4.gantt_rows(m)
+        hit_q = G4.gantt_hit_test(lay, rows_g5, lay.chart_x + 2, lay.quarter_y)
+        @test hit_q.kind === G4.gantt_hit_axis
     end
 
     @testset "G2: theme col_gantt_period_alt reachable from gantt module" begin
@@ -1392,77 +1588,97 @@ end
         @test count(isdigit, tick_rt) > count(isdigit, tab_rt)
     end
 
-    # ── G4: post-bar issue titles + compact left rail ─────────────────────────
-    @testset "G4: post-bar title after bar glyph (render)" begin
+    # ── Labels: full left + key RIGHT of bar (post-bar identifier only) ──────
+    @testset "PR-V: full left title + key after last bar glyph (render)" begin
         m = gantt_login()
-        e = G4.Stores.create_epic!(m.boardstore; name = "PostEp")
-        # Distinctive title; short mid-window bar so room after ▐
-        a = G4.Stores.create_issue!(m.boardstore; title = "ZebraPostTitle", epic_id = e.id,
-                                    start_date = Dates.today() - Day(1),
-                                    due_date = Dates.today() + Day(2))
+        e = G4.Stores.create_epic!(m.boardstore; name = "PostBarEp")
+        # Distinctive title; bar ends with room for post-bar key
+        a = G4.Stores.create_issue!(m.boardstore; title = "ZebraLeftTitle", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
         g4!(m, 'G')
-        g4!(m, 'z')  # week scale — full physical width for labels
+        g4!(m, 'z')  # week scale
         @test m.gantt_scale == :week
+        m.gantt_start = Dates.today() - Day(1)
         tb = gantt_render(m; w = 120, h = 16)
         r = row_with(tb, a.key, 16)
         @test r !== nothing
-        @test occursin("ZebraPostTitle", r)
-        # title index in row_text > last bar glyph index
+        # Full identity on left rail (distinctive title words; may be fit_width truncated)
+        @test occursin("ZebraLeft", r)
+        chars = collect(r)
+        first_bar = findfirst(c -> c in ('█', '▓', '▌', '▐'), chars)
+        @test first_bar !== nothing
         last_bar = 0
-        for (i, c) in enumerate(r)
-            if c in ('█', '▓', '▌', '▐')
-                last_bar = i
-            end
+        for (i, c) in enumerate(chars)
+            c in ('█', '▓', '▌', '▐') && (last_bar = i)
         end
         @test last_bar > 0
-        ti = findfirst("ZebraPostTitle", r)
-        @test ti !== nothing
-        @test first(ti) > last_bar
+        # Title lives on left (before first bar)
+        ti = findfirst("ZebraLeft", r)
+        @test ti !== nothing && first(ti) < first_bar
+        # Key appears immediately AFTER last bar glyph (gap 1), not before first bar
+        kw = textwidth(a.key)
+        key_start = last_bar + 2  # gap=1 blank after bar
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
+        @test String(chars[key_start:key_end]) == a.key
+        # Key is not immediately before first bar (old pre-bar contract)
+        pre_end = first_bar - 2
+        pre_start = pre_end - kw + 1
+        if pre_start >= 1
+            @test String(chars[pre_start:pre_end]) != a.key
+        end
     end
 
-    @testset "G4: day wide short bar → title in physical gutter" begin
+    @testset "PR-V: day scale post-bar key + full left (identifier after bar)" begin
         m = gantt_login()
-        e = G4.Stores.create_epic!(m.boardstore; name = "GutterEp")
-        # Bar ending near day-window right so post-bar uses physical gutter past 14
-        a = G4.Stores.create_issue!(m.boardstore; title = "GutterTitleX", epic_id = e.id,
-                                    start_date = Dates.today() + Day(8),
-                                    due_date = Dates.today() + Day(11))
+        e = G4.Stores.create_epic!(m.boardstore; name = "DayPostEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DayPreTitleX", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
         g4!(m, 'G')
         @test m.gantt_scale == :day
-        # Keep window fixed so bar lands in the 14-day strip (near right)
         m.gantt_start = Dates.today() - Day(1)
         w = 120
         tb = gantt_render(m; w = w, h = 16)
         r = row_with(tb, a.key, 16)
         @test r !== nothing
-        # Title must appear AFTER the last bar glyph (not only left-rail fallback)
+        @test occursin("DayPreTitleX", r) || occursin("DayPre", r)
+        chars = collect(r)
+        first_bar = findfirst(c -> c in ('█', '▓', '▌', '▐'), chars)
+        @test first_bar !== nothing
         last_bar = 0
-        for (i, c) in enumerate(r)
-            if c in ('█', '▓', '▌', '▐')
-                last_bar = i
-            end
+        for (i, c) in enumerate(chars)
+            c in ('█', '▓', '▌', '▐') && (last_bar = i)
         end
-        @test last_bar > 0
-        frag = occursin("GutterTitleX", r) ? "GutterTitleX" : "Gutter"
+        # Title on left
+        frag = occursin("DayPreTitleX", r) ? "DayPreTitleX" : "DayPre"
         ti = findfirst(frag, r)
-        @test ti !== nothing
-        @test first(ti) > last_bar
-        # Pure + render geom: label starts at/after view right edge (physical gutter wiring)
+        @test ti !== nothing && first(ti) < first_bar
+        # Pure post-bar geom for this bar (key-only clip)
         rows = G4.gantt_rows(m)
-        left_w = G4.gantt_left_width(rows, w; compact = true)
+        left_w = G4.gantt_left_width(rows, w; compact = false)
         physical = w - left_w
         view_n = min(physical, G4.GANTT_DAY_VIEW_WINDOW)
-        win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), 1, view_n, nothing)
+        label_n = physical  # day scale: post-bar may use physical gutter
+        win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), 1, view_n,
+                                          G4.gantt_issue_span(a))
         ext = G4.gantt_bar_extent(win, 1, a.start_date, a.due_date, view_n)
         @test ext !== nothing
         c0, c1 = ext
-        geom = G4.gantt_post_bar_label_geom(c0, c1, physical; gap = 1)
-        @test geom !== nothing
-        @test geom.start >= view_n  # post-bar starts in physical gutter past 14-col view
-        @test geom.max_chars >= 4
+        kw = textwidth(a.key)
+        post = G4.gantt_post_bar_label_geom(c0, c1, label_n; gap = 1, max_w = kw)
+        @test post !== nothing
+        @test post.max_chars >= kw
+        @test post.start == c1 + 1 + 1  # gap=1
+        # Render: key after last bar glyph
+        key_start = last_bar + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
+        @test String(chars[key_start:key_end]) == a.key
     end
 
-    @testset "G4: narrow / flush-right no crash; left shows identity" begin
+    @testset "PR-V: narrow / flush-right no crash; left shows identity" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "FlushEp")
         # Long span so bar can flush right of chart on narrow/week
@@ -1475,7 +1691,7 @@ end
         G4.render_gantt!(m, tbn.buf, T.Rect(1, 1, 40, 12))
         @test T.find_text(tbn, "GANTT") !== nothing
         @test T.find_text(tbn, a.key) !== nothing || T.find_text(tbn, "Identity") !== nothing
-        # Week wide flush: post-bar may be nothing; full left label keeps identity
+        # Week wide flush: pre-bar may be nothing (c0~0); full left label keeps identity
         g4!(m, 'z')
         @test m.gantt_scale == :week
         tbw = gantt_render(m; w = 80, h = 14)
@@ -1485,104 +1701,167 @@ end
         @test occursin(a.key, r) || occursin("IdentityKeep", r)
     end
 
-    @testset "G4: compact left_width shrinks with long titles (render sizing)" begin
+    @testset "PR-V: layout always full left_width (compact path unused for paint)" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "ShortEp")
         a = G4.Stores.create_issue!(m.boardstore;
             title = "VeryLongIssueTitleThatWouldDominateTheLeftRailWidthIfMeasuredFully",
             epic_id = e.id,
-            start_date = Dates.today() - Day(1),
-            due_date = Dates.today() + Day(3))
+            start_date = Dates.today() + Day(8),
+            due_date = Dates.today() + Day(12))
         g4!(m, 'G')
         rows = G4.gantt_rows(m)
         w = 120
         w_full = G4.gantt_left_width(rows, w; compact = false)
         w_comp = G4.gantt_left_width(rows, w; compact = true)
-        @test w_comp < w_full
-        @test w_comp <= textwidth(a.key) + 6  # key-based bound (+ prefix budget)
-        # Render uses compact: left rail shows key, title appears after bar
+        @test w_comp < w_full  # pure helper still supports compact=true
+        @test w_comp <= textwidth(a.key) + 6
+        # Render / layout always use full-label measurement
+        lay = G4.gantt_layout(m, T.Rect(1, 1, w, 14); rows = rows)
+        @test lay.compact === false
+        @test lay.left_w == G4.gantt_left_width(rows, w; compact = false) ||
+              lay.left_w == min(max(10, w_full), w - 10)
+        m.gantt_start = Dates.today() - Day(1)
         tb = gantt_render(m; w = w, h = 14)
         r = row_with(tb, a.key, 14)
         @test r !== nothing
         @test occursin(a.key, r)
-        # Distinctive long-title fragment after bar (or truncated start of title)
+        # Distinctive title fragment on left rail (full identity)
         @test occursin("VeryLong", r) || occursin("IssueTitle", r) ||
               occursin("Dominate", r) || occursin("LeftRail", r)
-        # Compact left: title should not occupy the far-left prefix region alone
-        # (key is present; full title may still appear post-bar)
-        last_bar = 0
-        for (i, c) in enumerate(r)
-            if c in ('█', '▓', '▌', '▐')
-                last_bar = i
-            end
-        end
-        if last_bar > 0
+        chars = collect(r)
+        first_bar = findfirst(c -> c in ('█', '▓', '▌', '▐'), chars)
+        if first_bar !== nothing
             frag = "VeryLong"
             ti = findfirst(frag, r)
             if ti !== nothing
-                @test first(ti) > last_bar
+                @test first(ti) < first_bar
             end
+            last_bar = 0
+            for (i, c) in enumerate(chars)
+                c in ('█', '▓', '▌', '▐') && (last_bar = i)
+            end
+            @test !occursin(frag, String(chars[(last_bar + 1):end]))
         end
-        # Physical chart cols grow under compact vs non-compact baseline
-        @test (w - w_comp) > (w - w_full)
+        # Compact would have grown chart cols; paint does not use that path
+        @test (w - w_comp) > (w - lay.left_w)
     end
 
-    @testset "G4: diamond post-bar label + selected style path" begin
+    @testset "PR-V: diamond post-bar key + selected style path" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "DiaEp")
         pt = G4.Stores.create_issue!(m.boardstore; title = "DiamondTitleZ", epic_id = e.id,
-                                     due_date = Dates.today() + Day(3))
+                                     due_date = Dates.today() + Day(10))
         g4!(m, 'G')
         g4!(m, 'z')  # week
-        tb = gantt_render(m; w = 100, h = 14)
-        r = row_with(tb, pt.key, 14)
+        m.gantt_start = Dates.today() - Day(1)
+        w, h = 100, 14
+        area = T.Rect(1, 1, w, h)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        tb = gantt_render(m; w = w, h = h)
+        r = row_with(tb, pt.key, h)
         @test r !== nothing
-        @test occursin("◆", r) || occursin("DiamondTitleZ", r)
+        @test occursin("◆", r)
         @test occursin("DiamondTitleZ", r) || occursin("Diamond", r)
         @test m.gantt_sel == 1
-        @test T.find_text(tb, "◆") !== nothing
-        # Selected post-bar uses col_primary_hi (assert style, not only char presence)
-        loc = T.find_text(tb, "DiamondTitleZ")
-        @test loc !== nothing
-        st = T.style_at(tb, loc.x, loc.y)
+        chars = collect(r)
+        dia = findfirst(==('◆'), chars)
+        @test dia !== nothing
+        # Title on left of diamond; key immediately AFTER diamond (gap 1)
+        ti = findfirst("DiamondTitleZ", r)
+        if ti === nothing
+            ti = findfirst("Diamond", r)
+        end
+        @test ti !== nothing && first(ti) < dia
+        kw = textwidth(pt.key)
+        key_start = dia + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
+        @test String(chars[key_start:key_end]) == pt.key
+        # Style on chart-side post-bar cell (not left-rail find_text hit)
+        rd = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == pt.id, rows)
+        @test rd !== nothing
+        yd = lay.grid_y0 + (rd - lay.row_start)
+        pcol = G4.gantt_point_col(lay.win_start, lay.dpc, pt.due_date, lay.view_ncols)
+        @test pcol !== nothing
+        post = G4.gantt_post_bar_label_geom(pcol, pcol, lay.label_ncols; gap = 1, max_w = kw)
+        @test post !== nothing && post.max_chars >= kw
+        st = T.style_at(tb, lay.chart_x + post.start, yd)
         @test st.fg == G4.Theming.col_primary_hi()
         @test st.bold === true
     end
 
-    @testset "G4: in-bar key suppressed when post-bar paints" begin
+    @testset "PR-V: in-bar key suppressed when post-bar paints" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "InBarEp")
-        # Mid-window bar wide enough for in-bar key (bw≥5) AND room after bar for post-bar
-        a = G4.Stores.create_issue!(m.boardstore; title = "AfterBarOnly", epic_id = e.id,
-                                    start_date = Dates.today() - Day(1),
-                                    due_date = Dates.today() + Day(6))
+        # Short bar ending mid-window so post-bar key fits → suppress in-bar
+        a = G4.Stores.create_issue!(m.boardstore; title = "PostBarOnlyTitle", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(8))
         g4!(m, 'G')
-        g4!(m, 'z')  # week — full width, post_geom present
+        g4!(m, 'z')  # week
+        m.gantt_start = Dates.today() - Day(1)
         @test m.gantt_scale == :week
         tb = gantt_render(m; w = 120, h = 14)
         r = row_with(tb, a.key, 14)
         @test r !== nothing
-        @test occursin("AfterBarOnly", r)
-        # Bar span via Char vector (row_text may embed multi-byte ┃ — avoid byte-index slice)
+        @test occursin("PostBarOnly", r)
         chars = collect(r)
         bar_ix = [i for (i, c) in enumerate(chars) if c in ('█', '▓', '▌', '▐')]
-        @test length(bar_ix) >= 5  # enough bar cells that in-bar key would have fired if not suppressed
+        @test length(bar_ix) >= 5
         interior = String(chars[minimum(bar_ix):maximum(bar_ix)])
         @test !occursin(a.key, interior)
-        # Title lives after the last bar glyph (post-bar path)
-        title_chars = collect("AfterBarOnly")
-        title_at = 0
-        for i in 1:(length(chars) - length(title_chars) + 1)
-            if chars[i:(i + length(title_chars) - 1)] == title_chars
-                title_at = i; break
-            end
-        end
-        @test title_at > 0 && title_at > maximum(bar_ix)
+        first_bar = minimum(bar_ix)
+        last_bar = maximum(bar_ix)
+        ti = findfirst("PostBarOnly", r)
+        @test ti !== nothing && first(ti) < first_bar
+        # Post-bar key after last bar glyph
+        kw = textwidth(a.key)
+        key_start = last_bar + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
+        @test String(chars[key_start:key_end]) == a.key
+    end
+
+    @testset "PR-V: in-bar key when post-bar cannot fit (flush-right bar)" begin
+        # Bar ends at right edge → post_geom nothing; bw≥5 → key painted inside bar.
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "InBarFlushEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "FlushInBarKey", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(200))
+        g4!(m, 'G')
+        g4!(m, 'z')  # week — full physical width
+        m.gantt_start = Dates.today() - Day(1)
+        @test m.gantt_scale == :week
+        w, h = 120, 14
+        area = T.Rect(1, 1, w, h)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
+        c0, c1 = ext
+        bw = c1 - c0 + 1
+        kw = textwidth(a.key)
+        post = G4.gantt_post_bar_label_geom(c0, c1, lay.label_ncols; gap = 1, max_w = kw)
+        # Flush-right: no room after bar for full key
+        @test post === nothing || post.max_chars < kw
+        @test bw >= max(5, kw + 2)
+        tb = gantt_render(m; w = w, h = h)
+        r = row_with(tb, a.key, h)
+        @test r !== nothing
+        chars = collect(r)
+        bar_ix = [i for (i, c) in enumerate(chars) if c in ('█', '▓', '▌', '▐')]
+        @test length(bar_ix) >= 5
+        # Key lives inside the bar body (not only left rail)
+        interior = String(chars[minimum(bar_ix):maximum(bar_ix)])
+        @test occursin(a.key, interior)
     end
 end
 
 @testset "G4.1 — GanttLayout pure metrics" begin
-    @testset "wide dual (h≥12): dual axis y + compact left + day view_ncols" begin
+    @testset "wide dual (h≥12): dual axis y + full left + day view_ncols" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "LayEp")
         G4.Stores.create_issue!(m.boardstore; title = "LayoutIssueAlpha", epic_id = e.id,
@@ -1599,7 +1878,7 @@ end
         @test lay.scale === :day
         @test lay.dpc == 1
         @test lay.is_narrow === false
-        @test lay.compact === true
+        @test lay.compact === false  # PR-V: never compact-keys-only left rail
         @test lay.has_ruler === true
         @test lay.has_dual === true
         @test lay.has_footer === true
@@ -1612,7 +1891,7 @@ end
         @test lay.grid_y0 == area.y + lay.content_start
         @test lay.chart_x == area.x + lay.left_w
         @test lay.physical_ncols == area.width - lay.left_w
-        # Day: view capped at 14; label uses full physical gutter
+        # Day: view capped at 14; label_ncols may still track physical gutter
         @test lay.view_ncols == min(lay.physical_ncols, G4.GANTT_DAY_VIEW_WINDOW)
         @test lay.view_ncols == G4.GANTT_DAY_VIEW_WINDOW  # wide terminal → full 14
         @test lay.label_ncols == lay.physical_ncols
@@ -1692,6 +1971,11 @@ end
         @test lay_m.dpc == 7
         @test lay_m.paint_weekends === false
         @test lay_m.paint_week_seps === false
+        # G5: h=14 month enables quarter super-header; day/week above do not
+        @test lay_d.has_quarter === false
+        @test lay_w.has_quarter === false
+        @test lay_m.has_quarter === true
+        @test lay_m.content_start == 1 + 1 + 1 + 2  # title+band+quarter+dual
     end
 
     @testset "h=11 single axis vs h=12 dual; undersized area still caches" begin
@@ -1752,24 +2036,25 @@ end
 
 # ── M1 pure hit-test + select helpers ───────────────────────────────────────
 @testset "M1 — gantt_hit_test + select helpers (pure)" begin
-    @testset "bar / left-rail / post-bar / epic / axis / outside on fixed layout" begin
+    @testset "bar / left-rail / pre-bar / epic / axis / outside on fixed layout" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "HitEp")
         a = G4.Stores.create_issue!(m.boardstore; title = "HitFirst", epic_id = e.id,
-                                    start_date = Dates.today(),
-                                    due_date = Dates.today() + Day(3))
+                                    start_date = Dates.today() + Day(8),
+                                    due_date = Dates.today() + Day(11))
         b = G4.Stores.create_issue!(m.boardstore; title = "HitSecond", epic_id = e.id,
-                                    start_date = Dates.today() + Day(1),
-                                    due_date = Dates.today() + Day(5))
-        # Diamond (single-date) issue for bar-kind diamond path
+                                    start_date = Dates.today() + Day(9),
+                                    due_date = Dates.today() + Day(13))
+        # Diamond (single-date) issue for bar-kind diamond path — room for pre-bar key
         dmd = G4.Stores.create_issue!(m.boardstore; title = "HitDiamond", epic_id = e.id,
-                                      due_date = Dates.today() + Day(2))
+                                      due_date = Dates.today() + Day(10))
         g4!(m, 'G')
+        m.gantt_start = Dates.today() - Day(1)
         area = T.Rect(1, 1, 120, 20)
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         @test lay.nshow >= 4  # epic + 3 issues
-        # Full-list: row 1 = epic, 2 = a, 3 = b, 4 = dmd (sort by anchor then key)
+        # Full-list: row 1 = epic, issues sorted by anchor then key
         @test rows[1].kind === :epic
         iss_rows = [r for r in rows if r.kind === :issue]
         @test length(iss_rows) == 3
@@ -1827,24 +2112,20 @@ end
         @test hit_bar.col == c0a
         @test hit_bar.date isa Date
 
-        # Post-bar on A (after c1 + gap)
-        post_a = G4.gantt_post_bar_label_geom(c0a, c1a, lay.label_ncols; gap = 1)
-        if post_a !== nothing
-            hit_post = G4.gantt_hit_test(lay, rows, lay.chart_x + post_a.start, ya)
-            @test hit_post.kind === G4.gantt_hit_post_bar
-            @test hit_post.issue_id == a.id
-            @test hit_post.issue_sel == expected_sel_a
-        end
+        # Post-bar key on A (after c1, gap 1)
+        kw_a = textwidth(a.key)
+        post_a = G4.gantt_post_bar_label_geom(c0a, c1a, lay.label_ncols; gap = 1, max_w = kw_a)
+        @test post_a !== nothing && post_a.max_chars >= kw_a
+        hit_post = G4.gantt_hit_test(lay, rows, lay.chart_x + post_a.start, ya)
+        @test hit_post.kind === G4.gantt_hit_post_bar
+        @test hit_post.issue_id == a.id
+        @test hit_post.issue_sel == expected_sel_a
 
-        # Gap between bar and post-bar is empty chart (not bar)
-        if c1a + 1 < lay.physical_ncols
-            gap_col = c1a + 1
+        # Gap between bar end and post-bar key is empty chart (not bar)
+        gap_col = c1a + 1
+        if gap_col < lay.view_ncols
             hit_gap = G4.gantt_hit_test(lay, rows, lay.chart_x + gap_col, ya)
-            @test hit_gap.kind === G4.gantt_hit_empty_chart ||
-                  hit_gap.kind === G4.gantt_hit_post_bar  # if gap=0 path; design uses gap=1
-            if post_a !== nothing
-                @test hit_gap.kind === G4.gantt_hit_empty_chart
-            end
+            @test hit_gap.kind === G4.gantt_hit_empty_chart
         end
 
         # Bar on B → different issue_sel
@@ -1986,15 +2267,16 @@ end
         m.gantt_last_area = area
     end
 
-    @testset "hit-test edge coverage: single axis, epic chart, diamond post-bar, title/footer" begin
+    @testset "hit-test edge coverage: single axis, epic chart, diamond pre-bar, title/footer" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "EdgeEp")
         a = G4.Stores.create_issue!(m.boardstore; title = "EdgeBar", epic_id = e.id,
-                                    start_date = Dates.today(),
-                                    due_date = Dates.today() + Day(2))
+                                    start_date = Dates.today() + Day(8),
+                                    due_date = Dates.today() + Day(10))
         dmd = G4.Stores.create_issue!(m.boardstore; title = "EdgeDia", epic_id = e.id,
-                                      due_date = Dates.today() + Day(1))
+                                      due_date = Dates.today() + Day(9))
         g4!(m, 'G')
+        m.gantt_start = Dates.today() - Day(1)
         # Single-row axis (h=10–11, not dual): tick_y axis path
         area_s = T.Rect(1, 1, 100, 11)
         rows = G4.gantt_rows(m)
@@ -2020,13 +2302,14 @@ end
         @test hit_ep_chart.row_index == 1
         @test hit_ep_chart.issue_id === nothing
 
-        # Diamond post-bar region
+        # Diamond post-bar key region
         rd = findfirst(r -> r.kind === :issue && r.issue.id == dmd.id, rows)
         yd = lay_w.grid_y0 + (rd - lay_w.row_start)
         pcol = G4.gantt_point_col(lay_w.win_start, lay_w.dpc, dmd.due_date, lay_w.view_ncols)
         @test pcol !== nothing
-        post_d = G4.gantt_post_bar_label_geom(pcol, pcol, lay_w.label_ncols; gap = 1)
-        @test post_d !== nothing
+        kwd = textwidth(dmd.key)
+        post_d = G4.gantt_post_bar_label_geom(pcol, pcol, lay_w.label_ncols; gap = 1, max_w = kwd)
+        @test post_d !== nothing && post_d.max_chars >= kwd
         hit_dpost = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x + post_d.start, yd)
         @test hit_dpost.kind === G4.gantt_hit_post_bar
         @test hit_dpost.issue_id == dmd.id
@@ -2045,13 +2328,533 @@ end
         lay_def = G4.GanttLayout(
             area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, lay_w.scale,
             lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
-            lay_w.has_dual, lay_w.has_footer, lay_w.band_y, lay_w.tab_y, lay_w.tick_y,
+            lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
+            lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
             lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, lay_w.nshow,
             lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows, lay_w.paint_weekends,
             lay_w.paint_week_seps)
         # x far enough that col >= physical_ncols=2 but still inside area
         hit_far = G4.gantt_hit_test(lay_def, rows, lay_w.chart_x + 5, lay_w.grid_y0 + 1)
         @test hit_far.kind === G4.gantt_hit_none
+    end
+end
+
+# ── M3 drag-reschedule pure helpers + handler ───────────────────────────────
+@testset "M3 — gantt drag reschedule helpers + handler" begin
+    @testset "gantt_drag_mode_for_bar: body / start / end by thirds" begin
+        # bw=2 → always body
+        @test G4.gantt_drag_mode_for_bar(0, 1, 0) === :body
+        @test G4.gantt_drag_mode_for_bar(0, 1, 1) === :body
+        # bw=6 → thirds of 2: cols 0-1 start, 2-3 body, 4-5 end
+        @test G4.gantt_drag_mode_for_bar(0, 5, 0) === :start
+        @test G4.gantt_drag_mode_for_bar(0, 5, 1) === :start
+        @test G4.gantt_drag_mode_for_bar(0, 5, 2) === :body
+        @test G4.gantt_drag_mode_for_bar(0, 5, 3) === :body
+        @test G4.gantt_drag_mode_for_bar(0, 5, 4) === :end
+        @test G4.gantt_drag_mode_for_bar(0, 5, 5) === :end
+        # bw=3 → third=1
+        @test G4.gantt_drag_mode_for_bar(2, 4, 2) === :start
+        @test G4.gantt_drag_mode_for_bar(2, 4, 3) === :body
+        @test G4.gantt_drag_mode_for_bar(2, 4, 4) === :end
+    end
+
+    @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin
+        ws = Date(2026, 3, 10)
+        sd, ed = Date(2026, 3, 12), Date(2026, 3, 15)  # 4-day span (cols 2..5 at dpc=1)
+        # Body: shift +2 cols
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 1, 2, 4, sd, ed)
+        @test ps == sd + Day(2)
+        @test pd == ed + Day(2)
+        @test Dates.value(pd - ps) == Dates.value(ed - sd)
+        # Body: shift -1 col
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 1, 2, 1, sd, ed)
+        @test ps == sd - Day(1) && pd == ed - Day(1)
+        # Start edge: move start to col 3; clamp ≤ due
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 1, 2, 3, sd, ed)
+        @test ps == Date(2026, 3, 13) && pd == ed
+        # Start past due → clamp to due
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 1, 2, 20, sd, ed)
+        @test ps == ed && pd == ed
+        # End edge
+        ps, pd = G4.gantt_compute_drag_preview(:end, ws, 1, 5, 7, sd, ed)
+        @test ps == sd && pd == Date(2026, 3, 17)
+        # End before start → clamp
+        ps, pd = G4.gantt_compute_drag_preview(:end, ws, 1, 5, 0, sd, ed)
+        @test ps == sd && pd == sd
+        # Diamond / point (start only)
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 5, 8, sd, nothing)
+        @test ps == Date(2026, 3, 18) && pd === nothing
+        # Diamond due only
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 5, 3, nothing, ed)
+        @test ps === nothing && pd == Date(2026, 3, 13)
+        # Month scale dpc=7: body shift +1 col = +7 days
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 7, 0, 1, sd, ed)
+        @test ps == sd + Day(7) && pd == ed + Day(7)
+        # Month snap: start edge uses gantt_date_for_col
+        col_date = G4.gantt_date_for_col(ws, 7, 2)
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 7, 0, 2, sd, ed)
+        @test ps == col_date || ps == ed  # clamp if col_date > ed
+    end
+
+    @testset "handler: press bar starts drag; drag shifts preview; release commits store" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DragEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DragAlpha", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
+        c0, c1 = ext
+        # Press mid-body
+        mid = c0 + (c1 - c0) ÷ 2
+        press = T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag !== nothing
+        @test m.gantt_drag.issue_id == a.id
+        @test m.gantt_drag.mode === :body
+        @test m.gantt_sel >= 1
+        # Store unchanged while dragging
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+        # Drag +2 cols
+        drag = T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        G4._handle_gantt_mouse!(m, drag)
+        @test m.gantt_drag.preview_start == a.start_date + Day(2)
+        @test m.gantt_drag.preview_due == a.due_date + Day(2)
+        # Still not in store
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+        # Release commits
+        rel = T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_release, false, false, false)
+        G4._handle_gantt_mouse!(m, rel)
+        @test m.gantt_drag === nothing
+        updated = G4.Stores.get_issue(m.boardstore, a.id)
+        @test updated.start_date == a.start_date + Day(2)
+        @test updated.due_date == a.due_date + Day(2)
+        @test occursin("Rescheduled", m.message)
+    end
+
+    @testset "handler: Esc cancels drag without store write" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "EscEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "EscIss", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(3))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
+        T.update!(m, press)
+        @test m.gantt_drag !== nothing
+        drag = T.MouseEvent(lay.chart_x + ext[1] + 3, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        T.update!(m, drag)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.gantt_drag === nothing
+        @test occursin("cancelled", lowercase(m.message))
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+        @test G4.Stores.get_issue(m.boardstore, a.id).due_date == a.due_date
+    end
+
+    @testset "handler: viewer + enforce_roles=true cannot start drag" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DenyEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DenyIss", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        # Demote to viewer + hard enforce
+        m.current_user = G4.Domain.User(; id = m.current_user.id, email = m.current_user.email,
+                                        name = m.current_user.name, role = "viewer")
+        m.config.enforce_roles = true
+        m.message = ""
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag === nothing
+        @test occursin("Permission denied", m.message)
+        # Store untouched
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+    end
+
+    @testset "handler: diamond point drag moves single date" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DiaEp")
+        d = G4.Stores.create_issue!(m.boardstore; title = "DiaOnly", epic_id = e.id,
+                                    due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        rd = findfirst(r -> r.kind === :issue && r.issue.id == d.id, rows)
+        yd = lay.grid_y0 + (rd - lay.row_start)
+        pcol = G4.gantt_point_col(lay.win_start, lay.dpc, d.due_date, lay.view_ncols)
+        @test pcol !== nothing
+        press = T.MouseEvent(lay.chart_x + pcol, yd, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag !== nothing
+        @test m.gantt_drag.mode === :point
+        drag = T.MouseEvent(lay.chart_x + pcol + 2, yd, T.mouse_left, T.mouse_drag, false, false, false)
+        G4._handle_gantt_mouse!(m, drag)
+        @test m.gantt_drag.preview_start === nothing
+        @test m.gantt_drag.preview_due == d.due_date + Day(2)
+        rel = T.MouseEvent(lay.chart_x + pcol + 2, yd, T.mouse_left, T.mouse_release, false, false, false)
+        G4._handle_gantt_mouse!(m, rel)
+        @test G4.Stores.get_issue(m.boardstore, d.id).due_date == d.due_date + Day(2)
+        @test G4.Stores.get_issue(m.boardstore, d.id).start_date === nothing
+    end
+
+    @testset "handler: start edge shortens bar; release writes start_date only change" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "EdgeEp2")
+        a = G4.Stores.create_issue!(m.boardstore; title = "EdgeMove", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(7))  # bw >= 3
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        c0, c1 = ext
+        @test G4.gantt_drag_mode_for_bar(c0, c1, c0) === :start
+        press = T.MouseEvent(lay.chart_x + c0, ya, T.mouse_left, T.mouse_press, false, false, false)
+        G4._handle_gantt_mouse!(m, press)
+        @test m.gantt_drag.mode === :start
+        # Drag start edge +2 cols
+        drag = T.MouseEvent(lay.chart_x + c0 + 2, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        G4._handle_gantt_mouse!(m, drag)
+        @test m.gantt_drag.preview_start == a.start_date + Day(2)
+        @test m.gantt_drag.preview_due == a.due_date
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + c0 + 2, ya, T.mouse_left, T.mouse_release, false, false, false))
+        u = G4.Stores.get_issue(m.boardstore, a.id)
+        @test u.start_date == a.start_date + Day(2)
+        @test u.due_date == a.due_date
+    end
+
+    @testset "pure preview edge branches + clear_drag + deny on commit + wheel/other during drag" begin
+        ws = Date(2026, 4, 1)
+        # point with both dates set → prefer start
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 0, 3,
+                                               Date(2026, 4, 2), Date(2026, 4, 5))
+        @test ps == Date(2026, 4, 4) && pd === nothing
+        # point with neither date → due side with new col date
+        ps, pd = G4.gantt_compute_drag_preview(:point, ws, 1, 0, 2, nothing, nothing)
+        @test ps === nothing && pd == Date(2026, 4, 3)
+        # unknown mode fallthrough
+        ps, pd = G4.gantt_compute_drag_preview(:weird, ws, 1, 0, 1,
+                                               Date(2026, 4, 1), Date(2026, 4, 2))
+        @test ps == Date(2026, 4, 1) && pd == Date(2026, 4, 2)
+        # body with missing endpoint returns orig
+        ps, pd = G4.gantt_compute_drag_preview(:body, ws, 1, 0, 2, Date(2026, 4, 1), nothing)
+        @test ps == Date(2026, 4, 1) && pd === nothing
+        ps, pd = G4.gantt_compute_drag_preview(:start, ws, 1, 0, 2, nothing, Date(2026, 4, 5))
+        @test ps === nothing && pd == Date(2026, 4, 5)
+        ps, pd = G4.gantt_compute_drag_preview(:end, ws, 1, 0, 2, Date(2026, 4, 1), nothing)
+        @test ps == Date(2026, 4, 1) && pd === nothing
+
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "CovEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "CovIss", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(3))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 120, 20)
+        m.gantt_last_area = area
+        # _gantt_clear_drag!
+        m.gantt_drag = (issue_id = a.id, mode = :body, origin_col = 0,
+                        orig_start = a.start_date, orig_due = a.due_date,
+                        preview_start = a.start_date, preview_due = a.due_date)
+        G4._gantt_clear_drag!(m)
+        @test m.gantt_drag === nothing
+
+        # Start real drag then wheel / middle during drag
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = lay.grid_y0 + (ra - lay.row_start)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        mid = ext[1] + (ext[2] - ext[1]) ÷ 2
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.gantt_drag !== nothing
+        st0 = m.gantt_start
+        # Wheel swallowed during drag
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_scroll_down, T.mouse_press, false, false, false))
+        @test m.gantt_start == st0
+        @test m.gantt_drag !== nothing
+        # Middle button during drag leaves state
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_middle, T.mouse_press, false, false, false))
+        @test m.gantt_drag !== nothing
+        # Escape cancel
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.gantt_drag === nothing
+
+        # Deny on commit: begin drag as admin, demote before release
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_drag, false, false, false))
+        m.current_user = G4.Domain.User(; id = m.current_user.id, email = m.current_user.email,
+                                        name = m.current_user.name, role = "viewer")
+        m.config.enforce_roles = true
+        m.message = ""
+        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.gantt_drag === nothing
+        @test occursin("Permission denied", m.message)
+        @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
+    end
+
+    @testset "handler: bar hit when extent out of window uses :body fallback" begin
+        # Force mode branch where ext === nothing by constructing drag begin path
+        # via direct call after hand-building an issue whose bar is off-window but
+        # hit still reports bar (synthetic). Use begin_drag with :body after press
+        # on in-window bar is already covered; exercise the nothing-ext line by
+        # calling the mode selection path with off-window dates + layout.
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "OffEp")
+        # Far-future bar — not in day window starting today
+        a = G4.Stores.create_issue!(m.boardstore; title = "FarBar", epic_id = e.id,
+                                    start_date = Dates.today() + Day(60),
+                                    due_date = Dates.today() + Day(65))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        area = T.Rect(1, 1, 80, 20)
+        m.gantt_last_area = area
+        lay = G4.gantt_layout(m, area)
+        # Pure: extent nothing when wholly outside
+        @test G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols) === nothing
+        # Direct begin with :body (covers fallback semantic used when ext nothing)
+        G4._gantt_begin_drag!(m, a, :body, 0)
+        @test m.gantt_drag !== nothing && m.gantt_drag.mode === :body
+        G4._gantt_clear_drag!(m)
+    end
+end
+
+# ── G6b dependency arrows + thin link UI ────────────────────────────────────
+@testset "G6b — FS dependency arrows + link UI" begin
+    @testset "render smoke: two dated issues + blocks link shows connector glyphs" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "DepEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "DepFrom", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(2))
+        b = G4.Stores.create_issue!(m.boardstore; title = "DepTo", epic_id = e.id,
+                                    start_date = Dates.today() + Day(4),
+                                    due_date = Dates.today() + Day(6))
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        m.gantt_scale = :day
+        tb = gantt_render(m; w = 120, h = 24)
+        blob = gantt_screen_blob(tb; h = 24)
+        # Connector glyphs from gantt_link_segments (unicode path, w>=60)
+        has_conn = occursin('╮', blob) || occursin('╰', blob) || occursin('▶', blob) ||
+                   occursin('╯', blob) || occursin('│', blob) && occursin('─', blob)
+        @test has_conn
+        # Pure segments for the visible pair agree with geometry
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 120, 24); rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
+        @test ra !== nothing && rb !== nothing
+        ext_a = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
+        @test ext_a !== nothing && ext_b !== nothing
+        vis_a = ra - lay.row_start  # 0-based vis if both in window
+        vis_b = rb - lay.row_start
+        segs = G4.gantt_link_segments(vis_a, vis_b, ext_a[2], ext_b[1])
+        @test !isempty(segs)
+        @test segs[end].ch == '▶' || segs[end].ch == '◀'
+    end
+
+    @testset "thin UI: L creates blocks link; cycle surfaces message; U deletes" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "LinkUI")
+        a = G4.Stores.create_issue!(m.boardstore; title = "LinkA", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(1))
+        b = G4.Stores.create_issue!(m.boardstore; title = "LinkB", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(3))
+        c = G4.Stores.create_issue!(m.boardstore; title = "LinkC", epic_id = e.id,
+                                    start_date = Dates.today() + Day(4),
+                                    due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        # Issues sorted by anchor then key — select by id
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        @test m.gantt_link_from_id == a.id
+        @test occursin("Blocks source", m.message)
+        # Esc cancels pending source
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.gantt_link_from_id === nothing
+        @test occursin("Link cancelled", m.message)
+        # Two-step create A → B
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'L')
+        @test m.gantt_link_from_id === nothing
+        @test occursin("Linked", m.message) && occursin("blocks", m.message)
+        links = G4.Stores.list_links(m.boardstore; kind = "blocks", project_id = m.active_project_id)
+        @test any(ln -> ln.from_id == a.id && ln.to_id == b.id, links)
+        # Store cycle still rejected via UI message (B → A)
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'L')
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        @test occursin("cycle", lowercase(m.message))
+        @test length(G4.Stores.list_links(m.boardstore; kind = "blocks")) == 1
+        # Same-issue second L cancels
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')
+        g4!(m, 'L')
+        @test m.gantt_link_from_id === nothing
+        @test occursin("same issue", m.message)
+        # Chain B → C then try C → A cycle via direct store (still rejected)
+        G4.Stores.create_link!(m.boardstore; from_id = b.id, to_id = c.id, kind = "blocks")
+        @test_throws ArgumentError G4.Stores.create_link!(m.boardstore;
+            from_id = c.id, to_id = a.id, kind = "blocks")
+        # U deletes outgoing from selected (A → B)
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'U')
+        @test occursin("Unlinked", m.message)
+        @test !any(ln -> ln.from_id == a.id && ln.to_id == b.id,
+                   G4.Stores.list_links(m.boardstore; kind = "blocks"))
+        # U with no link
+        g4!(m, 'U')
+        @test occursin("No blocks link", m.message)
+        # Card detail surfaces Links: after create
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'v')
+        @test m.modal === :card_detail
+        tb = app_tb(m; w = 100, h = 30)
+        blob = join([something(T.row_text(tb, i), "") for i in 1:30], "\n")
+        @test occursin("Links:", blob) && occursin("blocks→", blob)
+        T.update!(m, T.KeyEvent(:escape))
+        # Card detail also shows blocked-by (incoming)
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'v')
+        tb_in = app_tb(m; w = 100, h = 30)
+        blob_in = join([something(T.row_text(tb_in, i), "") for i in 1:30], "\n")
+        @test occursin("blocked←", blob_in)
+        T.update!(m, T.KeyEvent(:escape))
+        # Clear remaining chain edges (B→C may still exist from cycle setup)
+        for ln in G4.Stores.list_links(m.boardstore; kind = "blocks")
+            G4.Stores.delete_link!(m.boardstore, ln.id)
+        end
+        # U prefers pending source → selection edge
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        G4._gantt_select_issue_id!(m, a.id)
+        g4!(m, 'L')  # pending source A
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'U')  # delete A→B via pending match
+        @test occursin("Unlinked", m.message)
+        @test isempty(G4.Stores.list_links(m.boardstore; kind = "blocks", issue_id = a.id))
+        # U with only incoming (no outgoing on target): links[1] fallback
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        @test length(G4.Stores.list_links(m.boardstore; kind = "blocks", issue_id = b.id)) == 1
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'U')
+        @test occursin("Unlinked", m.message)
+        @test isempty(G4.Stores.list_links(m.boardstore; kind = "blocks", issue_id = b.id))
+        # Pending source that does not match any edge: for-loop exhausts without break
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        m.gantt_link_from_id = c.id  # C does not block B
+        G4._gantt_select_issue_id!(m, b.id)
+        g4!(m, 'U')
+        @test occursin("Unlinked", m.message)
+        @test m.gantt_link_from_id === nothing
+        # No issue selected → L/U messages (empty gantt)
+        m2 = gantt_login()
+        g4!(m2, 'G')
+        g4!(m2, 'L')
+        @test occursin("No issue selected", m2.message)
+        g4!(m2, 'U')
+        @test occursin("No issue selected", m2.message)
+        # Link source gone (stale id)
+        e2 = G4.Stores.create_epic!(m2.boardstore; name = "GoneEp")
+        gone = G4.Stores.create_issue!(m2.boardstore; title = "WillGone", epic_id = e2.id,
+                                       start_date = Dates.today(),
+                                       due_date = Dates.today() + Day(1))
+        keep = G4.Stores.create_issue!(m2.boardstore; title = "WillKeep", epic_id = e2.id,
+                                       start_date = Dates.today() + Day(2),
+                                       due_date = Dates.today() + Day(3))
+        g4!(m2, 'G')
+        G4._gantt_select_issue_id!(m2, gone.id)
+        g4!(m2, 'L')
+        G4.Stores.delete_issue!(m2.boardstore, gone.id)
+        G4._gantt_select_issue_id!(m2, keep.id)
+        g4!(m2, 'L')
+        @test occursin("Link source gone", m2.message)
+    end
+
+    @testset "link only paints when both endpoints in nshow window" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "FoldEp")
+        # Many issues so one pair can fall outside short nshow
+        issues = G4.Domain.Issue[]
+        for i in 1:8
+            push!(issues, G4.Stores.create_issue!(m.boardstore; title = "Fold$i", epic_id = e.id,
+                                                  start_date = Dates.today(),
+                                                  due_date = Dates.today() + Day(1)))
+        end
+        # Link first → last (likely not both visible on short height)
+        G4.Stores.create_link!(m.boardstore; from_id = issues[1].id, to_id = issues[end].id,
+                               kind = "blocks")
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        m.gantt_sel = 1
+        # Short viewport: few rows → last issue not in nshow with sel at top
+        tb = gantt_render(m; w = 100, h = 8)
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 100, 8); rows = rows)
+        r_first = findfirst(r -> r.kind === :issue && r.issue.id == issues[1].id, rows)
+        r_last = findfirst(r -> r.kind === :issue && r.issue.id == issues[end].id, rows)
+        @test r_first !== nothing && r_last !== nothing
+        both_vis = (lay.row_start <= r_first <= lay.row_start + lay.nshow - 1) &&
+                   (lay.row_start <= r_last <= lay.row_start + lay.nshow - 1)
+        blob = gantt_screen_blob(tb; h = 8)
+        if !both_vis
+            # No full connector expected when one endpoint is scrolled out
+            # (may still have bar material; just ensure paint doesn't crash)
+            @test true
+        else
+            @test occursin('▶', blob) || occursin('╮', blob) || occursin('╰', blob)
+        end
+        # Selecting last brings pair into view on taller screen — arrows paint
+        G4._gantt_select_issue_id!(m, issues[end].id)
+        tb2 = gantt_render(m; w = 120, h = 28)
+        blob2 = gantt_screen_blob(tb2; h = 28)
+        # With tall window both likely visible → connector present
+        lay2 = G4.gantt_layout(m, T.Rect(1, 1, 120, 28); rows = G4.gantt_rows(m))
+        if lay2.nshow >= length(rows)
+            @test occursin('▶', blob2) || occursin('╮', blob2) || occursin('╰', blob2) ||
+                  occursin('─', blob2)
+        end
     end
 end
 

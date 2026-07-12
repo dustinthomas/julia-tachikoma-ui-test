@@ -141,20 +141,19 @@ end
                                 start_date = Dates.today() - Day(2), due_date = Dates.today() + Day(2))
         p4!(m, 'G')
         w = 120
-        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
-        ncols = w - left_w
+        # PR-V: use gantt_layout metrics (full left labels; never compact-keys)
+        lay = P4.gantt_layout(m, T.Rect(1, 1, w, 20))
         td = Dates.today()
-        cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
-        expected_col = P4.gantt_point_col(cl_start, 1, td, ncols)
+        expected_col = P4.gantt_point_col(lay.win_start, lay.dpc, td, lay.view_ncols)
         @test expected_col !== nothing
         @test expected_col <= 5  # near left
         tb = T.TestBackend(w, 20); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        # position of marker verified via draw formula (adaptive left_w from PR2/6 + G4 compact); scan grid below ▼
+        # position of marker verified via layout chart_x + col; scan grid below ▼
         # (G3 dual-row axis shifts band→grid offset — no fixed loc.y+2)
-        drawn_x = 1 + left_w + expected_col
+        drawn_x = lay.chart_x + expected_col
         chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
         @test chv in ('┃', '│', '|')
         # ruler / period chrome present (h=20≥12 dual tabs or ticks)
@@ -171,11 +170,9 @@ end
                                 start_date = Dates.today() - Day(3), due_date = Dates.today() + Day(3))
         p4!(m, 'G')
         w = 100
-        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
-        ncols = w - left_w
+        lay = P4.gantt_layout(m, T.Rect(1, 1, w, 20))
         td = Dates.today()
-        cl_start = P4.gantt_clamped_start_for_day(m.gantt_start, td, 1, ncols)
-        tcol = P4.gantt_point_col(cl_start, 1, td, ncols)
+        tcol = P4.gantt_point_col(lay.win_start, lay.dpc, td, lay.view_ncols)
         tb = T.TestBackend(w, 20); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         title = T.row_text(tb, 1)
@@ -183,7 +180,7 @@ end
         @test tcol !== nothing && tcol <= 5
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        drawn_x = 1 + left_w + tcol
+        drawn_x = lay.chart_x + tcol
         chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
         @test chv in ('┃', '│', '|')
     end
@@ -216,8 +213,8 @@ end
         p4!(m, 'G')
         # re-render after 'G' update! (discipline, matching z-cycle pattern in same file)
         w = 120
-        left_w = P4.gantt_left_width(P4.gantt_rows(m), w; compact = w >= 60)
-        ncols = w - left_w
+        lay = P4.gantt_layout(m, T.Rect(1, 1, w, 16))
+        ncols = lay.view_ncols
         tb = T.TestBackend(w, 16); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 16))
         p4!(m, 'z')  # day -> week
@@ -226,8 +223,9 @@ end
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 16))
         title = T.row_text(tb, 1)
         @test title !== nothing && occursin("[week]", title)
-        # week uses raw window (no clamp even with dpc=1)
-        raw_end = P4.gantt_window_end(m.gantt_start, P4.gantt_days_per_col(:week), ncols)
+        # week uses raw window (no clamp even with dpc=1); re-layout after scale change
+        lay_w = P4.gantt_layout(m, T.Rect(1, 1, w, 16))
+        raw_end = P4.gantt_window_end(m.gantt_start, P4.gantt_days_per_col(:week), lay_w.view_ncols)
         @test raw_end > Dates.today() + Day(14)
     end
 
@@ -399,35 +397,44 @@ end
         @test title !== nothing && occursin("GANTT", title)
     end
 
-    @testset "Given a short Gantt bar When rendered Then distinctive title is visible after the bar" begin
+    @testset "Given a Gantt bar When rendered Then full left title and key right of bar" begin
         m = p4login()
         e = P4.Stores.create_epic!(m.boardstore; name = "PostBarBDD")
-        a = P4.Stores.create_issue!(m.boardstore; title = "UniqueBDDPostLabel", epic_id = e.id,
-                                    start_date = Dates.today() - Day(1),
-                                    due_date = Dates.today() + Day(3))
+        a = P4.Stores.create_issue!(m.boardstore; title = "UniqueBDDLeftLabel", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
         p4!(m, 'G')
-        # Week scale: post-bar uses full chart width (label_ncols == view)
         p4!(m, 'z')
         @test m.view == :gantt && m.gantt_scale == :week
+        m.gantt_start = Dates.today() - Day(1)
         tb = T.TestBackend(120, 16); T.reset!(tb.buf)
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 16))
-        @test T.find_text(tb, "UniqueBDDPostLabel") !== nothing
+        # Distinctive title words on left (fit_width may truncate full string)
+        @test T.find_text(tb, "UniqueBDDLeft") !== nothing
         r = nothing
         for i in 1:16
             rt = T.row_text(tb, i)
             rt !== nothing && occursin(a.key, rt) && (r = rt; break)
         end
         @test r !== nothing
-        @test occursin("UniqueBDDPostLabel", r)
+        @test occursin("UniqueBDDLeft", r)
+        chars = collect(r)
+        first_bar = findfirst(c -> c in ('█', '▓', '▌', '▐'), chars)
+        @test first_bar !== nothing
         last_bar = 0
-        for (i, c) in enumerate(r)
-            if c == '█' || c == '▓' || c == '▌' || c == '▐'
-                last_bar = i
-            end
+        for (i, c) in enumerate(chars)
+            c in ('█', '▓', '▌', '▐') && (last_bar = i)
         end
         @test last_bar > 0
-        ti = findfirst("UniqueBDDPostLabel", r)
-        @test ti !== nothing && first(ti) > last_bar
+        # Full identity on left rail (before bar)
+        ti = findfirst("UniqueBDDLeft", r)
+        @test ti !== nothing && first(ti) < first_bar
+        # Key immediately AFTER last bar glyph (gap 1) — identifier right of bar
+        kw = textwidth(a.key)
+        key_start = last_bar + 2
+        key_end = key_start + kw - 1
+        @test key_end <= length(chars)
+        @test String(chars[key_start:key_end]) == a.key
     end
 
     @testset "No-conflict: printable chars in the calendar create modal edit only the field" begin

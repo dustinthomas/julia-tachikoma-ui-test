@@ -20,6 +20,7 @@ export create_sprint!, get_sprint, list_sprints, update_sprint!,
        start_sprint!, close_sprint!, active_sprint
 export create_label!, list_labels, set_labels!, labels_for_issue
 export add_comment!, list_comments, log_activity!, list_activity
+export list_links, create_link!, delete_link!
 export rank_issue!, move_issue!, issues_for_sprint, backlog_issues
 export enqueue_outbox!, pending_outbox, mark_sent!
 export seed_demo!, seed_ops_template!
@@ -65,6 +66,9 @@ function add_comment! end
 function list_comments end
 function log_activity! end
 function list_activity end
+function list_links end
+function create_link! end
+function delete_link! end
 function rank_issue! end
 function move_issue! end
 function issues_for_sprint end

@@ -151,6 +151,9 @@ const KEYMAP = Binding[
     Binding(:gantt, 'e',    :gantt_edit_card,    "e",     "Edit",       true),
     Binding(:gantt, 'v',    :gantt_view_card,    "v",     "Details",    true),
     Binding(:gantt, :enter, :gantt_view_card,    "Enter", "Details",    false),
+    # G6b: two-step blocks link (L source → L target); U deletes; Esc cancels pending source
+    Binding(:gantt, 'L',    :gantt_link_blocks,  "L",     "Link blocks", true),
+    Binding(:gantt, 'U',    :gantt_unlink_blocks,"U",     "Unlink",      true),
 
     # ── Card detail modal (comment box focused; Enter submits, Esc closes) ──
     Binding(:card_detail, :enter,  :submit_comment, "Enter", "Add comment", true),

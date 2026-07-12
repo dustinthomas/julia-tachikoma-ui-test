@@ -15,20 +15,23 @@ const SPRINT_STATES = (:future, :active, :closed)
 const NOTIFICATION_KINDS = (:assigned, :status_changed, :comment_added, :due_soon, :mentioned)
 # Work-order types (manufacturing ops; nullable on Issue).
 const WORK_TYPES = ("PM", "CM", "Improvement", "Safety", "Other")
+# Issue dependency link kinds (G6 / Criterion 4). UI "blocked by" = reverse of "blocks".
+const LINK_TYPES = ("blocks", "relates_to")
 # Project keys: 2–8 chars, start with letter, A–Z / 0–9 only (no hyphen).
 const PROJECT_KEY_RE = r"^[A-Z][A-Z0-9]{1,7}$"
 # RBAC roles (PR-H1). Stored as TEXT on users.role; default "supervisor".
 const USER_ROLES = ("admin", "supervisor", "technician", "viewer")
 
 export User, Issue, Epic, Sprint, Label, Comment, ActivityEvent, NotificationEvent, Project
-export SprintMetrics
+export SprintMetrics, IssueLink
 export PRIORITIES, STATUSES, SPRINT_STATES, NOTIFICATION_KINDS, WORK_TYPES, PROJECT_KEY_RE
-export USER_ROLES, valid_role, can
+export LINK_TYPES, USER_ROLES, valid_role, can
 export valid_email, valid_priority, valid_status, valid_sprint_state, valid_notification_kind
-export valid_project_key, valid_work_type
+export valid_project_key, valid_work_type, valid_link_type
 export can_transition, transition
 export sum_units
 export issues_to_csv
+export would_blocks_cycle
 
 # ── Validators ──────────────────────────────────────────────────────────
 valid_email(s::AbstractString)::Bool = occursin(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s)
@@ -40,6 +43,7 @@ valid_project_key(k::AbstractString)::Bool = occursin(PROJECT_KEY_RE, k)
 valid_work_type(::Nothing)::Bool = true
 valid_work_type(w::AbstractString)::Bool = w in WORK_TYPES
 valid_role(r::AbstractString)::Bool = r in USER_ROLES
+valid_link_type(k::AbstractString)::Bool = k in LINK_TYPES
 
 # ── User ────────────────────────────────────────────────────────────────
 struct User
@@ -292,6 +296,60 @@ struct Comment
 end
 Comment(; id, issue_id, author_id, body, created::DateTime = Dates.now(UTC)) =
     Comment(id, issue_id, author_id, body, created)
+
+# ── IssueLink (directed dependency edge; G6 / Criterion 4) ───────────────
+# "blocks" means from_id blocks to_id (finish-to-start for Gantt).
+# "relates_to" is undirected at the product level; stored as a directed edge
+# with no inverse row. UI "blocked by" is reverse adjacency of blocks — not
+# a stored kind.
+struct IssueLink
+    id::String
+    from_id::String
+    to_id::String
+    kind::String
+    created::DateTime
+    function IssueLink(id, from_id, to_id, kind, created)
+        valid_link_type(kind) || throw(ArgumentError("invalid link kind: $kind"))
+        isempty(strip(String(from_id))) && throw(ArgumentError("from_id must not be empty"))
+        isempty(strip(String(to_id))) && throw(ArgumentError("to_id must not be empty"))
+        new(String(id), String(from_id), String(to_id), String(kind), created)
+    end
+end
+IssueLink(; id, from_id, to_id, kind::AbstractString = "blocks",
+          created::DateTime = Dates.now(UTC)) =
+    IssueLink(id, from_id, to_id, kind, created)
+
+"""
+    would_blocks_cycle(edges, from_id, to_id) -> Bool
+
+Pure cycle check for a directed `blocks` graph. `edges` is an iterable of
+`(from, to)` pairs for existing blocks links. Returns true if adding
+`from_id → to_id` would introduce a cycle (including self-loop).
+Does not mutate `edges`.
+"""
+function would_blocks_cycle(edges, from_id::AbstractString, to_id::AbstractString)::Bool
+    from_s = String(from_id)
+    to_s = String(to_id)
+    from_s == to_s && return true
+    adj = Dict{String,Vector{String}}()
+    for e in edges
+        a = String(e[1]); b = String(e[2])
+        push!(get!(adj, a, String[]), b)
+    end
+    # Walk successors of `to`; if we reach `from`, the new edge closes a cycle.
+    visited = Set{String}()
+    stack = String[to_s]
+    while !isempty(stack)
+        n = pop!(stack)
+        n == from_s && return true
+        n in visited && continue
+        push!(visited, n)
+        for m in get(adj, n, String[])
+            push!(stack, m)
+        end
+    end
+    false
+end
 
 # ── Label ───────────────────────────────────────────────────────────────
 struct Label

@@ -211,7 +211,7 @@ end
 
 @testset "Stores: SQLite board store CRUD" begin
     bs = S.SQLiteBoardStore(":memory:")
-    @test S.board_schema_version(bs) == 7
+    @test S.board_schema_version(bs) == 8
     @testset "issues" begin
         i = S.create_issue!(bs; title = "First", status = "Backlog", priority = "High")
         @test startswith(i.key, "QCI-") && i.position == 0
@@ -358,6 +358,56 @@ end
         S.log_activity!(b4; issue_id = i.id, actor_id = "u1", kind = :moved, detail = "→ Done")
         acts = S.list_activity(b4, i.id)
         @test length(acts) == 2 && acts[end].detail == "→ Done"
+    end
+
+    @testset "issue_links list/create/delete + same-project + cycle reject (G6a)" begin
+        bl = S.SQLiteBoardStore(":memory:")
+        a = S.create_issue!(bl; title = "A")
+        b = S.create_issue!(bl; title = "B")
+        c = S.create_issue!(bl; title = "C")
+        # create blocks A→B
+        ln = S.create_link!(bl; from_id = a.id, to_id = b.id, kind = "blocks")
+        @test ln.kind == "blocks" && ln.from_id == a.id && ln.to_id == b.id
+        @test length(S.list_links(bl)) == 1
+        @test length(S.list_links(bl; issue_id = a.id)) == 1
+        @test length(S.list_links(bl; issue_id = b.id)) == 1
+        @test length(S.list_links(bl; kind = "blocks")) == 1
+        @test isempty(S.list_links(bl; kind = "relates_to"))
+        def = only(S.list_projects(bl))
+        @test length(S.list_links(bl; project_id = def.id)) == 1
+        # relates_to ok alongside blocks
+        rel = S.create_link!(bl; from_id = a.id, to_id = c.id, kind = "relates_to")
+        @test rel.kind == "relates_to"
+        @test length(S.list_links(bl; kind = "relates_to")) == 1
+        # B→C blocks ok (chain)
+        S.create_link!(bl; from_id = b.id, to_id = c.id, kind = "blocks")
+        # C→A would cycle A→B→C→A
+        @test_throws ArgumentError S.create_link!(bl; from_id = c.id, to_id = a.id, kind = "blocks")
+        # reverse of existing edge
+        @test_throws ArgumentError S.create_link!(bl; from_id = b.id, to_id = a.id, kind = "blocks")
+        # self-link
+        @test_throws ArgumentError S.create_link!(bl; from_id = a.id, to_id = a.id)
+        # duplicate
+        @test_throws ArgumentError S.create_link!(bl; from_id = a.id, to_id = b.id, kind = "blocks")
+        # missing issue
+        @test_throws ArgumentError S.create_link!(bl; from_id = a.id, to_id = "nope")
+        @test_throws ArgumentError S.create_link!(bl; from_id = "nope", to_id = a.id)
+        # bad kind
+        @test_throws ArgumentError S.create_link!(bl; from_id = a.id, to_id = b.id, kind = "blocked_by")
+        # cross-project rejected
+        p2 = S.create_project!(bl; key = "OTH", name = "Other")
+        other = S.create_issue!(bl; title = "Other side", project_id = p2.id)
+        @test_throws ArgumentError S.create_link!(bl; from_id = a.id, to_id = other.id)
+        @test isempty(S.list_links(bl; project_id = p2.id))
+        # delete
+        @test S.delete_link!(bl, ln.id)
+        @test !S.delete_link!(bl, ln.id)  # already gone
+        @test !S.delete_link!(bl, "missing-link")
+        @test length(S.list_links(bl; kind = "blocks")) == 1  # B→C remains
+        # cascade / explicit cleanup on issue delete
+        S.delete_issue!(bl, b.id)
+        @test isempty(S.list_links(bl; kind = "blocks"))
+        @test length(S.list_links(bl; kind = "relates_to")) == 1  # A relates_to C untouched
     end
 
     @testset "sprint/backlog membership + outbox" begin
@@ -697,7 +747,7 @@ end
         SQLite.close(raw)
 
         bs = S.SQLiteBoardStore(path)
-        @test S.board_schema_version(bs) == 7
+        @test S.board_schema_version(bs) == 8
         projs = S.list_projects(bs)
         @test length(projs) == 1 && projs[1].key == "QCI" && projs[1].name == "Default"
         pid = projs[1].id
@@ -707,6 +757,8 @@ end
         @test S.get_epic(bs, "ep1").project_id == pid
         @test S.get_sprint(bs, "sp1").project_id == pid
         @test only(S.list_labels(bs)).project_id == pid
+        # v8: issue_links table exists (empty after migrate)
+        @test isempty(S.list_links(bs))
         # v6 backfill: one approximate metrics row for the closed sprint
         mets = S.list_sprint_metrics(bs; project_id = pid, limit = 8)
         @test length(mets) == 1
@@ -719,7 +771,7 @@ end
         # re-open store: v6 is idempotent (still one metrics row)
         S.close!(bs)
         bs2 = S.SQLiteBoardStore(path)
-        @test S.board_schema_version(bs2) == 7
+        @test S.board_schema_version(bs2) == 8
         @test length(S.list_sprint_metrics(bs2; project_id = pid)) == 1
         # create under a new project after migrate
         p2 = S.create_project!(bs2; key = "CAPEX", name = "Capex")
@@ -1018,6 +1070,79 @@ end
         @test S.log_activity!(bs_a; issue_id = "i", actor_id = "u", kind = :moved, detail = "x").kind == :moved
         @test S.log_activity!(bs_a; issue_id = "i", kind = :created).actor_id === nothing
         @test length(S.list_activity(bs_a, "i")) == 1
+
+        # issue_links (remote SQL path + row mapper)
+        link_row = Dict{String,Any}("id" => "lk1", "from_id" => "ia", "to_id" => "ib",
+                                    "kind" => "blocks", "created" => string(now(UTC)))
+        @test S.remote_row_to_link(link_row).from_id == "ia"
+        @test S.remote_row_to_link(Dict{String,Any}("id" => "x", "from_id" => "a", "to_id" => "b",
+                                                    "kind" => missing)).kind == "blocks"
+        iss_a = issue_row(; id = "ia", project_id = "proj-default")
+        iss_b = issue_row(; id = "ib", project_id = "proj-default")
+        iss_other = issue_row(; id = "io", project_id = "proj-other")
+        fx_lk = S.FakeExec(_with_projects((sql, p) -> begin
+            s = String(sql)
+            if occursin("FROM issues", s) && occursin("LIMIT 1", s)
+                id = String(p[1])
+                id == "ia" && return [iss_a]
+                id == "ib" && return [iss_b]
+                id == "io" && return [iss_other]
+                return Dict{String,Any}[]
+            elseif occursin("FROM issue_links", s) && occursin("kind =", s) &&
+                   occursin("from_id", s) && occursin("SELECT id FROM", s)
+                return Dict{String,Any}[]  # no duplicate
+            elseif occursin("SELECT from_id, to_id FROM issue_links", s)
+                return Dict{String,Any}[]  # no existing blocks edges
+            elseif occursin("INSERT INTO issue_links", s)
+                return Dict{String,Any}[]
+            elseif occursin("FROM issue_links l", s)
+                return [link_row]
+            elseif occursin("FROM issue_links", s) && occursin("SELECT id, from_id", s)
+                return [Dict{String,Any}("id" => "lk1", "from_id" => "ia")]
+            elseif occursin("DELETE FROM issue_links", s)
+                return Dict{String,Any}[]
+            end
+            Dict{String,Any}[]
+        end))
+        bs_lk = S.RemoteBoardStore(fx_lk)
+        created_lk = S.create_link!(bs_lk; from_id = "ia", to_id = "ib", kind = "blocks")
+        @test created_lk.from_id == "ia" && created_lk.to_id == "ib" && created_lk.kind == "blocks"
+        @test length(S.list_links(bs_lk)) == 1
+        @test length(S.list_links(bs_lk; issue_id = "ia", kind = "blocks", project_id = "proj-default")) == 1
+        @test S.delete_link!(bs_lk, "lk1")
+        # cycle reject on remote
+        fx_cyc = S.FakeExec(_with_projects((sql, p) -> begin
+            s = String(sql)
+            if occursin("FROM issues", s) && occursin("LIMIT 1", s)
+                id = String(p[1])
+                id == "ia" && return [iss_a]
+                id == "ib" && return [iss_b]
+                return Dict{String,Any}[]
+            elseif occursin("SELECT id FROM issue_links", s)
+                return Dict{String,Any}[]
+            elseif occursin("SELECT from_id, to_id FROM issue_links", s)
+                return [Dict{String,Any}("from_id" => "ia", "to_id" => "ib")]
+            end
+            Dict{String,Any}[]
+        end))
+        @test_throws ArgumentError S.create_link!(S.RemoteBoardStore(fx_cyc); from_id = "ib", to_id = "ia", kind = "blocks")
+        # cross-project on remote
+        fx_xp = S.FakeExec(_with_projects((sql, p) -> begin
+            s = String(sql)
+            if occursin("FROM issues", s)
+                id = String(p[1])
+                id == "ia" && return [iss_a]
+                id == "io" && return [iss_other]
+                return Dict{String,Any}[]
+            end
+            Dict{String,Any}[]
+        end))
+        @test_throws ArgumentError S.create_link!(S.RemoteBoardStore(fx_xp); from_id = "ia", to_id = "io")
+        @test_throws ArgumentError S.create_link!(S.RemoteBoardStore(fx_xp); from_id = "ia", to_id = "ia")
+        @test_throws ArgumentError S.create_link!(S.RemoteBoardStore(fx_xp); from_id = "ia", to_id = "ib", kind = "nope")
+        # delete missing
+        fx_miss = S.FakeExec((s, p) -> Dict{String,Any}[])
+        @test !S.delete_link!(S.RemoteBoardStore(fx_miss), "nope")
 
         # membership queries
         fx_mem = S.FakeExec((s, p) -> [issue_row()])
