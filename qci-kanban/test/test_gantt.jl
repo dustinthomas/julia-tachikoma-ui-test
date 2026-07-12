@@ -1581,3 +1581,140 @@ end
     end
 end
 
+@testset "G4.1 — GanttLayout pure metrics" begin
+    @testset "wide dual (h≥12): dual axis y + compact left + day view_ncols" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "LayEp")
+        G4.Stores.create_issue!(m.boardstore; title = "LayoutIssueAlpha", epic_id = e.id,
+                                start_date = Dates.today() - Day(1),
+                                due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        @test m.gantt_scale === :day
+        # Default zero cache until first render
+        @test m.gantt_last_area.width == 0 && m.gantt_last_area.height == 0
+        area = T.Rect(1, 1, 120, 20)
+        lay = G4.gantt_layout(m, area)
+        @test lay isa G4.GanttLayout
+        @test lay.area == area
+        @test lay.scale === :day
+        @test lay.dpc == 1
+        @test lay.is_narrow === false
+        @test lay.compact === true
+        @test lay.has_ruler === true
+        @test lay.has_dual === true
+        @test lay.has_footer === true
+        @test lay.ruler_rows == 2
+        @test lay.band_y == area.y + 1
+        @test lay.tab_y == area.y + 2
+        @test lay.tick_y == area.y + 3
+        @test lay.ruler_y == lay.tick_y
+        @test lay.content_start == 1 + 1 + 2  # title + band + dual axis
+        @test lay.grid_y0 == area.y + lay.content_start
+        @test lay.chart_x == area.x + lay.left_w
+        @test lay.physical_ncols == area.width - lay.left_w
+        # Day: view capped at 14; label uses full physical gutter
+        @test lay.view_ncols == min(lay.physical_ncols, G4.GANTT_DAY_VIEW_WINDOW)
+        @test lay.view_ncols == G4.GANTT_DAY_VIEW_WINDOW  # wide terminal → full 14
+        @test lay.label_ncols == lay.physical_ncols
+        @test lay.label_ncols > lay.view_ncols
+        @test lay.left_w >= 10
+        @test lay.nshow >= 1
+        @test lay.row_start == 1
+        @test lay.footer_y == lay.grid_y0 + lay.nshow
+        @test lay.paint_weekends === true
+        @test lay.paint_week_seps === true
+        # Cache filled by render
+        tb = T.TestBackend(120, 20); T.reset!(tb.buf)
+        G4.render_gantt!(m, tb.buf, area)
+        @test m.gantt_last_area == area
+    end
+
+    @testset "narrow single (w<60, h=10–11): no dual, no footer, full left" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "NarEp")
+        G4.Stores.create_issue!(m.boardstore; title = "NarrowTitle", epic_id = e.id,
+                                start_date = Dates.today(),
+                                due_date = Dates.today() + Day(2))
+        g4!(m, 'G')
+        area = T.Rect(1, 1, 50, 10)
+        lay = G4.gantt_layout(m, area)
+        @test lay.is_narrow === true
+        @test lay.compact === false
+        @test lay.has_ruler === true
+        @test lay.has_dual === false
+        @test lay.has_footer === false   # narrow hides footer
+        @test lay.ruler_rows == 1
+        @test lay.tab_y == 0
+        @test lay.tick_y == area.y + 2
+        @test lay.content_start == 1 + 1 + 1
+        @test lay.grid_y0 == area.y + lay.content_start
+        @test lay.footer_y === nothing
+        @test lay.left_w <= 14
+        @test lay.left_w >= 10
+        # Day view still caps at min(physical, 14)
+        @test lay.view_ncols == min(lay.physical_ncols, G4.GANTT_DAY_VIEW_WINDOW)
+        @test lay.label_ncols == lay.physical_ncols
+    end
+
+    @testset "day vs week/month view_ncols + label_ncols" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "ColsEp")
+        G4.Stores.create_issue!(m.boardstore; title = "ColsIssue", epic_id = e.id,
+                                start_date = Dates.today() - Day(1),
+                                due_date = Dates.today() + Day(5))
+        g4!(m, 'G')
+        area = T.Rect(1, 1, 100, 14)
+        lay_d = G4.gantt_layout(m, area)
+        @test lay_d.scale === :day
+        @test lay_d.view_ncols == G4.GANTT_DAY_VIEW_WINDOW
+        @test lay_d.label_ncols == lay_d.physical_ncols
+        @test lay_d.label_ncols > lay_d.view_ncols
+        @test lay_d.dpc == 1
+        @test lay_d.has_dual === true
+        @test lay_d.paint_weekends === true
+
+        g4!(m, 'z')  # week
+        @test m.gantt_scale === :week
+        lay_w = G4.gantt_layout(m, area)
+        @test lay_w.scale === :week
+        @test lay_w.view_ncols == lay_w.physical_ncols
+        @test lay_w.label_ncols == lay_w.view_ncols
+        @test lay_w.dpc == 1
+        @test lay_w.paint_weekends === true
+        @test lay_w.paint_week_seps === true
+
+        g4!(m, 'z')  # month
+        @test m.gantt_scale === :month
+        lay_m = G4.gantt_layout(m, area)
+        @test lay_m.scale === :month
+        @test lay_m.view_ncols == lay_m.physical_ncols
+        @test lay_m.label_ncols == lay_m.view_ncols
+        @test lay_m.dpc == 7
+        @test lay_m.paint_weekends === false
+        @test lay_m.paint_week_seps === false
+    end
+
+    @testset "h=11 single axis vs h=12 dual; undersized area still caches" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "HEp")
+        G4.Stores.create_issue!(m.boardstore; title = "HBound", epic_id = e.id,
+                                start_date = Dates.today(), due_date = Dates.today() + Day(1))
+        g4!(m, 'G')
+        lay11 = G4.gantt_layout(m, T.Rect(1, 1, 80, 11))
+        @test lay11.has_dual === false
+        @test lay11.has_footer === true  # wide + rows + h>=10
+        @test lay11.ruler_rows == 1
+        @test lay11.content_start == 3
+        lay12 = G4.gantt_layout(m, T.Rect(1, 1, 80, 12))
+        @test lay12.has_dual === true
+        @test lay12.ruler_rows == 2
+        @test lay12.content_start == 4
+        @test lay12.tab_y == 3 && lay12.tick_y == 4
+        # Tiny area: render early-out still caches last area
+        tiny = T.Rect(2, 3, 10, 4)
+        tb = T.TestBackend(20, 10); T.reset!(tb.buf)
+        G4.render_gantt!(m, tb.buf, tiny)
+        @test m.gantt_last_area == tiny
+    end
+end
+

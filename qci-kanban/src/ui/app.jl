@@ -70,6 +70,7 @@ mutable struct AppModel <: Model
     gantt_start::Date                  # left edge (earliest visible date) of the Gantt window
     gantt_scale::Symbol                # :day (1 day/col) | :week (1 day/col) | :month (7 days/col)
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
+    gantt_last_area::Rect              # last content Rect passed to render_gantt! (G4.1; zero default)
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
@@ -143,7 +144,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  _make_input(), _make_input(),
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
-                 td, :day, 1,
+                 td, :day, 1, Rect(0, 0, 0, 0),
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
