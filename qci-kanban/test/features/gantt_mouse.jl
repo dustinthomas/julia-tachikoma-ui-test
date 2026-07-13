@@ -21,6 +21,7 @@ using Dates
 
 GM = QciKanban
 gmlogin(; name = "Mouse User") = (m = fresh_app(; seed = false); app_login_new(m; name = name); m)
+gantt_y(lay, row_index) = lay.grid_y0 + (row_index - lay.row_start) * lay.row_stride
 gm!(m, x) = T.update!(m, T.KeyEvent(x))
 gm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, false, false)
 gm_wheel(col, row, btn) = T.MouseEvent(col, row, btn, T.mouse_press, false, false, false)
@@ -53,7 +54,7 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
         lay = GM.gantt_layout(m, area; rows = rows)
         rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
         @test rb !== nothing
-        yb = lay.grid_y0 + (rb - lay.row_start)
+        yb = gantt_y(lay, rb)
         ext_b = GM.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
         @test ext_b !== nothing
 
@@ -74,7 +75,7 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
 
         @testset "When the user left-clicks issue A's left rail Then selection returns to A" begin
             ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-            ya = lay.grid_y0 + (ra - lay.row_start)
+            ya = gantt_y(lay, ra)
             T.update!(m, gm_click(area.x + 1, ya))
             @test m.gantt_sel == 1
             @test GM._gantt_selected_issue(m).id == a.id
@@ -120,7 +121,7 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
             rows2 = GM.gantt_rows(m)
             lay2 = GM.gantt_layout(m, m.gantt_last_area; rows = rows2)
             rb2 = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows2)
-            yb2 = lay2.grid_y0 + (rb2 - lay2.row_start)
+            yb2 = gantt_y(lay2, rb2)
             ext2 = GM.gantt_bar_extent(lay2.win_start, lay2.dpc, b.start_date, b.due_date, lay2.view_ncols)
             @test ext2 !== nothing
             kwb = textwidth(b.key)
@@ -275,7 +276,7 @@ end
             iss = GM._gantt_selected_issue(m)
             @test iss !== nothing
             ri = findfirst(r -> r.kind === :issue && r.issue.id == iss.id, rows)
-            yi = lay.grid_y0 + (ri - lay.row_start)
+            yi = gantt_y(lay, ri)
             T.update!(m, gm_click(area.x + 1, yi))
             @test m.gantt_sel == 1
             @test m.modal === :none
@@ -301,7 +302,7 @@ end
         lay = GM.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         @test ra !== nothing
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         @test ext !== nothing
         c0, c1 = ext
@@ -349,7 +350,7 @@ end
         rows = GM.gantt_rows(m)
         lay = GM.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         T.update!(m, gm_click(lay.chart_x + ext[1], ya))
         @test m.gantt_drag === nothing
@@ -375,7 +376,7 @@ end
         rows = GM.gantt_rows(m)
         lay = GM.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         mid = ext[1] + (ext[2] - ext[1]) ÷ 2
         T.update!(m, gm_click(lay.chart_x + mid, ya))
@@ -402,7 +403,7 @@ end
         rows = GM.gantt_rows(m)
         lay = GM.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         # Press + release without move (no-op commit) then keyboard edit
         mid = ext[1]

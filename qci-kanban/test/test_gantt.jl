@@ -46,6 +46,8 @@ row_with(tb, key, h) = begin
     end
     r
 end
+# Absolute terminal y for a full-list row index under a GanttLayout (row_stride-aware).
+gantt_y(lay, row_index) = lay.grid_y0 + (row_index - lay.row_start) * lay.row_stride
 # G3: axis/today row is height-dependent (single at h=8–11, dual at h≥12). Prefer
 # scanning row_text for glyphs/period strings over hard-coded band→grid offsets.
 function gantt_screen_blob(tb; h=30)
@@ -123,6 +125,61 @@ end
         @test G4.gantt_bar_extent(ws, 1, Date(2026, 6, 1), Date(2026, 6, 5), 40) === nothing  # off-right
         @test G4.gantt_bar_extent(ws, 1, Date(2026, 3, 8), Date(2026, 3, 14), 40) == (0, 4)   # left-clamped
         @test G4.gantt_bar_extent(ws, 1, Date(2026, 3, 12), Date(2026, 4, 30), 20) == (2, 19) # right-clamped
+    end
+
+    @testset "row_stride pure helpers (1 blank row between bars)" begin
+        # Product: one terminal gap row between content rows (stride 2).
+        @test G4.GANTT_ROW_STRIDE == 2
+        @test G4.gantt_grid_height(0) == 0
+        @test G4.gantt_grid_height(1) == 1
+        @test G4.gantt_grid_height(2) == 3   # bar, gap, bar
+        @test G4.gantt_grid_height(3) == 5
+        @test G4.gantt_nshow_fit(0, 10) == 0
+        @test G4.gantt_nshow_fit(1, 10) == 1
+        @test G4.gantt_nshow_fit(2, 10) == 1
+        @test G4.gantt_nshow_fit(3, 10) == 2
+        @test G4.gantt_nshow_fit(5, 10) == 3
+        @test G4.gantt_nshow_fit(5, 2) == 2
+        @test G4.gantt_row_y(10, 1) == 10
+        @test G4.gantt_row_y(10, 2) == 12
+        @test G4.gantt_row_y(10, 3) == 14
+        @test G4.gantt_vis_i_at(10, 10, 3) == 1
+        @test G4.gantt_vis_i_at(10, 11, 3) === nothing  # gap
+        @test G4.gantt_vis_i_at(10, 12, 3) == 2
+        @test G4.gantt_vis_i_at(10, 13, 3) === nothing
+        @test G4.gantt_vis_i_at(10, 14, 3) == 3
+        # Explicit stride=1 (dense) still supported by helpers
+        @test G4.gantt_grid_height(4; stride = 1) == 4
+        @test G4.gantt_nshow_fit(4, 10; stride = 1) == 4
+        @test G4.gantt_row_y(10, 2; stride = 1) == 11
+        @test G4.gantt_vis_i_at(10, 11, 4; stride = 1) == 2
+    end
+
+    @testset "gantt_tree_prefix: ├ mid, └ last in epic group, ▸ selected" begin
+        # Synthetic rows: epic + 3 issues + epic + 1 issue (kind + color_key only).
+        rows = G4.GanttRow[
+            G4.GanttRow(:epic, "E1", nothing, "e1"),
+            G4.GanttRow(:issue, "A A", nothing, "e1"),
+            G4.GanttRow(:issue, "B B", nothing, "e1"),
+            G4.GanttRow(:issue, "C C", nothing, "e1"),
+            G4.GanttRow(:epic, "E2", nothing, "e2"),
+            G4.GanttRow(:issue, "D D", nothing, "e2"),
+        ]
+        @test G4.gantt_tree_prefix(rows, 2) == "├ "   # first of three
+        @test G4.gantt_tree_prefix(rows, 3) == "├ "   # middle
+        @test G4.gantt_tree_prefix(rows, 4) == "└ "   # last under e1
+        @test G4.gantt_tree_prefix(rows, 6) == "└ "   # sole under e2
+        @test G4.gantt_tree_prefix(rows, 2; selected = true) == "▸ "
+        @test G4.gantt_tree_prefix(rows, 4; selected = true) == "▸ "
+        # epic index is not an issue branch (defensive)
+        @test G4.gantt_tree_prefix(rows, 1) == "├ "
+        # stem continues after epic→child and mid issue; not after last child
+        @test G4.gantt_tree_stem_after(rows, 1) === true   # epic with children
+        @test G4.gantt_tree_stem_after(rows, 2) === true   # mid issue
+        @test G4.gantt_tree_stem_after(rows, 3) === true
+        @test G4.gantt_tree_stem_after(rows, 4) === false  # last under e1
+        @test G4.gantt_tree_stem_after(rows, 5) === true   # e2 has child
+        @test G4.gantt_tree_stem_after(rows, 6) === false
     end
 
     @testset "gantt_point_col in / out / nothing" begin
@@ -708,6 +765,92 @@ end
         @test rb !== nothing && bar_run(rb) >= 1
     end
 
+    @testset "one blank row between bars (stride 2)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "GapEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "GapAlpha", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(3))
+        b = G4.Stores.create_issue!(m.boardstore; title = "GapBeta", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        area = T.Rect(1, 1, 120, 24)
+        lay = G4.gantt_layout(m, area)
+        @test lay.row_stride == 2
+        rows = G4.gantt_rows(m)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
+        @test ra !== nothing && rb !== nothing
+        @test rb == ra + 1
+        ya = gantt_y(lay, ra)
+        yb = gantt_y(lay, rb)
+        @test yb == ya + 2              # one blank terminal row between content
+        @test yb == ya + lay.row_stride
+        tb = T.TestBackend(120, 24); T.reset!(tb.buf)
+        G4.render_gantt!(m, tb.buf, area)
+        @test occursin(a.key, something(T.row_text(tb, ya), ""))
+        @test occursin(b.key, something(T.row_text(tb, yb), ""))
+        gap_rt = something(T.row_text(tb, ya + 1), "")
+        @test !occursin(a.key, gap_rt)
+        @test !occursin(b.key, gap_rt)
+        @test bar_run(gap_rt) == 0
+        # Tree stem continues through the gap (│ or ASCII |)
+        gap_ch = T.char_at(tb, area.x, ya + 1)
+        @test gap_ch in ('│', '|')
+    end
+
+    @testset "left-rail tree fully connects: ├ mid, └ last, │ through gaps" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "TreeEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "TreeFirst", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(2))
+        b = G4.Stores.create_issue!(m.boardstore; title = "TreeMid", epic_id = e.id,
+                                    start_date = Dates.today() + Day(1),
+                                    due_date = Dates.today() + Day(3))
+        c = G4.Stores.create_issue!(m.boardstore; title = "TreeLast", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(4))
+        g4!(m, 'G')
+        # Select middle so first/last show branch glyphs (not ▸)
+        m.gantt_sel = 2
+        area = T.Rect(1, 1, 120, 28)
+        lay = G4.gantt_layout(m, area)
+        rows = G4.gantt_rows(m)
+        re = findfirst(r -> r.kind === :epic && r.label == "TreeEp", rows)
+        ia = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ib = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
+        ic = findfirst(r -> r.kind === :issue && r.issue.id == c.id, rows)
+        @test re !== nothing && ia !== nothing && ib !== nothing && ic !== nothing
+        ye = gantt_y(lay, re)
+        ya = gantt_y(lay, ia)
+        yb = gantt_y(lay, ib)
+        yc = gantt_y(lay, ic)
+        tb = T.TestBackend(120, 28); T.reset!(tb.buf)
+        G4.render_gantt!(m, tb.buf, area)
+        ra = something(T.row_text(tb, ya), "")
+        rb = something(T.row_text(tb, yb), "")
+        rc = something(T.row_text(tb, yc), "")
+        @test occursin("├ ", ra)          # first of group
+        @test occursin("▸ ", rb)          # selected
+        @test occursin("└ ", rc)          # last of group — closes the tree
+        @test occursin("▬ ", something(T.row_text(tb, ye), ""))
+        # Stem │ on every gap between connected tree nodes (epic→first, first→mid, mid→last)
+        for (y0, y1) in ((ye, ya), (ya, yb), (yb, yc))
+            @test y1 == y0 + lay.row_stride
+            stem = T.char_at(tb, area.x, y0 + 1)
+            @test stem in ('│', '|')
+        end
+        # No stem after last child (tree closes)
+        if ic < length(rows)
+            # only if more rows exist after last — stem_after is false
+            @test G4.gantt_tree_stem_after(rows, ic) === false
+        end
+        @test G4.gantt_tree_prefix(rows, ia) == "├ "
+        @test G4.gantt_tree_prefix(rows, ic) == "└ "
+    end
+
     @testset "gantt init defaults to :day + z implements 3-way cycle day→week→month→day (red-first for behavioral)" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "CycleDay")
@@ -1069,9 +1212,9 @@ end
         ra = row_with(tb, a.key, 30)
         rb = row_with(tb, b.key, 30)
         @test ra !== nothing && rb !== nothing
-        # current sel label uses ▸ ; non-selected issue rows use improved ├  tree indent
+        # current sel uses ▸ ; non-selected last under epic closes with └
         @test occursin("▸ ", ra)
-        @test occursin("├ ", rb)
+        @test occursin("└ ", rb)
         # bar accent present on sel row (left ▌) ; uses theming col_primary_hi
         @test occursin("▌", ra)
         # full re-render discipline after update!
@@ -1082,7 +1225,7 @@ end
         ra2 = row_with(tb2, a.key, 30)
         rb2 = row_with(tb2, b.key, 30)
         @test occursin("▸ ", rb2)
-        @test occursin("├ ", ra2)
+        @test occursin("├ ", ra2)   # first under epic when not selected
         @test occursin("▌", rb2)
         # note: non-sel now also have left ▌ cap from PR3; accent is the hi-colored one on sel (test uses char presence)
         @test T.find_text(tb2, "├ ") !== nothing
@@ -1782,7 +1925,7 @@ end
         # Style on chart-side post-bar cell (not left-rail find_text hit)
         rd = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == pt.id, rows)
         @test rd !== nothing
-        yd = lay.grid_y0 + (rd - lay.row_start)
+        yd = gantt_y(lay, rd)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, pt.due_date, lay.view_ncols)
         @test pcol !== nothing
         post = G4.gantt_post_bar_label_geom(pcol, pcol, lay.label_ncols; gap = 1, max_w = kw)
@@ -1899,7 +2042,9 @@ end
         @test lay.left_w >= 10
         @test lay.nshow >= 1
         @test lay.row_start == 1
-        @test lay.footer_y == lay.grid_y0 + lay.nshow
+        @test lay.row_stride == G4.GANTT_ROW_STRIDE
+        @test lay.row_stride == 2
+        @test lay.footer_y == lay.grid_y0 + G4.gantt_grid_height(lay.nshow; stride = lay.row_stride)
         @test lay.paint_weekends === true
         @test lay.paint_week_seps === true
         # Cache filled by render
@@ -2086,8 +2231,8 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
         @test ra !== nothing && rb !== nothing
-        ya = lay.grid_y0 + (ra - lay.row_start)
-        yb = lay.grid_y0 + (rb - lay.row_start)
+        ya = gantt_y(lay, ra)
+        yb = gantt_y(lay, rb)
         ext_a = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         @test ext_a !== nothing
         c0a, c1a = ext_a
@@ -2140,7 +2285,7 @@ end
 
         # Diamond → gantt_hit_bar
         rd = findfirst(r -> r.kind === :issue && r.issue.id == dmd.id, rows)
-        yd = lay.grid_y0 + (rd - lay.row_start)
+        yd = gantt_y(lay, rd)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, dmd.due_date, lay.view_ncols)
         @test pcol !== nothing
         hit_d = G4.gantt_hit_test(lay, rows, lay.chart_x + pcol, yd)
@@ -2189,7 +2334,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         rb = findfirst(r -> r.kind === :issue && r.issue.id == b.id, rows)
-        yb = lay.grid_y0 + (rb - lay.row_start)
+        yb = gantt_y(lay, rb)
         ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
         @test m.gantt_sel == 1
 
@@ -2201,7 +2346,7 @@ end
 
         # Click left rail of A
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         click_a = T.MouseEvent(area.x + 1, ya, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, click_a)
         @test m.gantt_sel == 1
@@ -2304,7 +2449,7 @@ end
 
         # Diamond post-bar key region
         rd = findfirst(r -> r.kind === :issue && r.issue.id == dmd.id, rows)
-        yd = lay_w.grid_y0 + (rd - lay_w.row_start)
+        yd = gantt_y(lay_w, rd)
         pcol = G4.gantt_point_col(lay_w.win_start, lay_w.dpc, dmd.due_date, lay_w.view_ncols)
         @test pcol !== nothing
         kwd = textwidth(dmd.key)
@@ -2314,9 +2459,42 @@ end
         @test hit_dpost.kind === G4.gantt_hit_post_bar
         @test hit_dpost.issue_id == dmd.id
 
-        # Stale layout vs shorter rows: row_index out of range → none
+        # Inter-bar gap line hit paths (hand-built stride=2 layout; matches product default)
+        if lay_w.nshow >= 2
+            nshow_g = min(lay_w.nshow, 3)
+            lay_gap = G4.GanttLayout(
+                area_w, lay_w.left_w, lay_w.chart_x, lay_w.physical_ncols, lay_w.view_ncols,
+                lay_w.label_ncols, lay_w.dpc, lay_w.scale,
+                lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
+                lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
+                lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
+                lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, nshow_g,
+                2, lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows,
+                lay_w.paint_weekends, lay_w.paint_week_seps)
+            gap_y = lay_gap.grid_y0 + 1
+            hit_gap = G4.gantt_hit_test(lay_gap, rows, lay_gap.chart_x + 2, gap_y)
+            @test hit_gap.kind === G4.gantt_hit_empty_chart
+            @test hit_gap.row_index === nothing
+            @test hit_gap.issue_id === nothing
+            hit_gap_rail = G4.gantt_hit_test(lay_gap, rows, lay_gap.area.x, gap_y)
+            @test hit_gap_rail.kind === G4.gantt_hit_none
+            # Gap with col past physical_ncols → none
+            lay_gap_narrow = G4.GanttLayout(
+                area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, lay_w.scale,
+                lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
+                lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
+                lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
+                lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, nshow_g,
+                2, lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows,
+                lay_w.paint_weekends, lay_w.paint_week_seps)
+            @test G4.gantt_hit_test(lay_gap_narrow, rows, lay_w.chart_x + 5, gap_y).kind ===
+                  G4.gantt_hit_none
+        end
+
+        # Stale layout vs shorter rows: second content slot OOB → none
         short = rows[1:1]  # epic only
-        hit_oob = G4.gantt_hit_test(lay_w, short, lay_w.chart_x, lay_w.grid_y0 + 1)
+        hit_oob = G4.gantt_hit_test(lay_w, short, lay_w.chart_x,
+                                    gantt_y(lay_w, lay_w.row_start + 1))
         @test hit_oob.kind === G4.gantt_hit_none
 
         # Empty area width/height → none
@@ -2331,10 +2509,10 @@ end
             lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
             lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
             lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, lay_w.nshow,
-            lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows, lay_w.paint_weekends,
-            lay_w.paint_week_seps)
-        # x far enough that col >= physical_ncols=2 but still inside area
-        hit_far = G4.gantt_hit_test(lay_def, rows, lay_w.chart_x + 5, lay_w.grid_y0 + 1)
+            lay_w.row_stride, lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows,
+            lay_w.paint_weekends, lay_w.paint_week_seps)
+        # x far enough that col >= physical_ncols=2 but still inside area (content y)
+        hit_far = G4.gantt_hit_test(lay_def, rows, lay_w.chart_x + 5, lay_w.grid_y0)
         @test hit_far.kind === G4.gantt_hit_none
     end
 end
@@ -2409,7 +2587,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         @test ext !== nothing
         c0, c1 = ext
@@ -2453,7 +2631,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
         T.update!(m, press)
@@ -2485,7 +2663,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, press)
@@ -2507,7 +2685,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         rd = findfirst(r -> r.kind === :issue && r.issue.id == d.id, rows)
-        yd = lay.grid_y0 + (rd - lay.row_start)
+        yd = gantt_y(lay, rd)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, d.due_date, lay.view_ncols)
         @test pcol !== nothing
         press = T.MouseEvent(lay.chart_x + pcol, yd, T.mouse_left, T.mouse_press, false, false, false)
@@ -2537,7 +2715,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         c0, c1 = ext
         @test G4.gantt_drag_mode_for_bar(c0, c1, c0) === :start
@@ -2596,7 +2774,7 @@ end
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
-        ya = lay.grid_y0 + (ra - lay.row_start)
+        ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         mid = ext[1] + (ext[2] - ext[1]) ÷ 2
         G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))

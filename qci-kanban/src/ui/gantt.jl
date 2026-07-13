@@ -30,6 +30,59 @@ gantt_scroll_days(scale::Symbol)::Int =
 timeline strip even on wide terminals so day zoom does not devolve into months."
 const GANTT_DAY_VIEW_WINDOW = 14
 
+"""
+Terminal rows per logical Gantt row: 1 content line + (`stride - 1`) blank
+inter-bar gap lines. Product default is stride `2` (one blank row between bars);
+left-rail tree stems paint through those gaps so the hierarchy stays connected.
+"""
+const GANTT_ROW_STRIDE = 2
+
+"""
+    gantt_grid_height(nshow; stride=GANTT_ROW_STRIDE) -> Int
+
+Terminal rows occupied by `nshow` content rows with inter-row gaps of
+`stride - 1` cells and **no** trailing gap after the last row.
+"""
+gantt_grid_height(nshow::Int; stride::Int = GANTT_ROW_STRIDE)::Int =
+    nshow <= 0 ? 0 : (nshow - 1) * stride + 1
+
+"""
+    gantt_nshow_fit(avail, nrows; stride=GANTT_ROW_STRIDE) -> Int
+
+How many logical rows fit in `avail` terminal lines (including inter-row gaps).
+"""
+function gantt_nshow_fit(avail::Int, nrows::Int; stride::Int = GANTT_ROW_STRIDE)::Int
+    (avail < 1 || nrows < 1) && return 0
+    max_fit = 1 + fld(avail - 1, stride)
+    min(nrows, max_fit)
+end
+
+"""
+    gantt_row_y(grid_y0, vis_i; stride=GANTT_ROW_STRIDE) -> Int
+
+Absolute terminal y of the content line for 1-based visible index `vis_i`.
+"""
+gantt_row_y(grid_y0::Int, vis_i::Int; stride::Int = GANTT_ROW_STRIDE)::Int =
+    grid_y0 + (vis_i - 1) * stride
+
+"""
+    gantt_vis_i_at(grid_y0, y, nshow; stride=GANTT_ROW_STRIDE) -> Int | nothing
+
+1-based visible content index when `y` lands on a content line; `nothing` on
+inter-bar gap lines or outside the grid.
+"""
+function gantt_vis_i_at(grid_y0::Int, y::Int, nshow::Int;
+                        stride::Int = GANTT_ROW_STRIDE)::Union{Nothing,Int}
+    nshow < 1 && return nothing
+    off = y - grid_y0
+    off < 0 && return nothing
+    gh = gantt_grid_height(nshow; stride = stride)
+    off >= gh && return nothing
+    mod(off, stride) != 0 && return nothing  # gap line
+    vis_i = fld(off, stride) + 1
+    (1 <= vis_i <= nshow) ? vis_i : nothing
+end
+
 "0-based column offset of date `d` from the window's left edge (floored)."
 gantt_col_for_date(win_start::Date, dpc::Int, d::Date)::Int =
     fld(Dates.value(d) - Dates.value(win_start), dpc)
@@ -664,6 +717,51 @@ function gantt_left_label(row::GanttRow; compact::Bool=false)::String
 end
 
 """
+    gantt_tree_prefix(rows, row_index; selected=false) -> String
+
+Left-rail branch for a full-list row index. Selected issues use `▸ `; the last
+issue in an epic group closes with `└ `; other issue siblings use `├ `. Epic
+rows (and OOB) fall back to `├ ` — callers paint epics with `▬` instead.
+"""
+function gantt_tree_prefix(rows::Vector{GanttRow}, row_index::Int;
+                           selected::Bool = false)::String
+    selected && return "▸ "
+    (1 <= row_index <= length(rows)) || return "├ "
+    rows[row_index].kind === :issue || return "├ "
+    next_i = row_index + 1
+    if next_i > length(rows)
+        return "└ "
+    end
+    nxt = rows[next_i]
+    # Next epic (or different group key) ends this branch.
+    if nxt.kind === :epic || nxt.color_key != rows[row_index].color_key
+        return "└ "
+    end
+    "├ "
+end
+
+"""
+    gantt_tree_stem_after(rows, row_index) -> Bool
+
+True when a vertical tree stem (`│`) should continue on the line(s) after this
+content row — epic with a following child, or a non-last issue in its group.
+Used to fill inter-row gap lines when `row_stride > 1` so the left rail stays
+visually continuous.
+"""
+function gantt_tree_stem_after(rows::Vector{GanttRow}, row_index::Int)::Bool
+    (1 <= row_index <= length(rows)) || return false
+    next_i = row_index + 1
+    next_i > length(rows) && return false
+    cur = rows[row_index]
+    nxt = rows[next_i]
+    if cur.kind === :epic
+        return nxt.kind === :issue  # children follow immediately under the epic
+    end
+    cur.kind === :issue || return false
+    nxt.kind === :issue && nxt.color_key == cur.color_key
+end
+
+"""
     gantt_left_width(rows, area_w; compact=false) -> Int
 
 Adaptive left label width (PR2). When compact=true, measure epic labels + issue
@@ -1061,6 +1159,7 @@ struct GanttLayout
     grid_y0::Int
     content_start::Int
     nshow::Int
+    row_stride::Int           # terminal rows per logical row (content + inter-bar gap)
     row_start::Int            # first visible row index into gantt_rows (1-based)
     footer_y::Union{Nothing,Int}
     ruler_rows::Int           # axis strip rows only (tab+tick; quarter counted separately)
@@ -1127,14 +1226,16 @@ function gantt_layout(m::AppModel, area::Rect;
     tick_y = has_ruler ? (has_dual ? axis0 + 1 : area.y + 2) : 0
     ruler_y = tick_y  # TODAY label + single-row axis paint target
     grid_y0 = area.y + content_start
-    nshow = max(0, min(length(rws), area.height - content_start - footer_rows - 1))
+    row_stride = GANTT_ROW_STRIDE
+    avail = area.height - content_start - footer_rows - 1
+    nshow = gantt_nshow_fit(avail, length(rws); stride = row_stride)
     # Selection keep-in-view (U5): scroll row window so selected issue is drawn.
     row_start = 1
     if sel_issue !== nothing && nshow > 0
         sri = findfirst(r -> r.kind === :issue && r.issue !== nothing && r.issue.id == sel_issue.id, rws)
         (sri !== nothing && sri > nshow) && (row_start = sri - nshow + 1)
     end
-    footer_y = has_footer ? grid_y0 + nshow : nothing
+    footer_y = has_footer ? grid_y0 + gantt_grid_height(nshow; stride = row_stride) : nothing
     # G2 paint gates: weekend ░ + week seps ┆ off at :month (period wash stays on).
     # G5 period-boundary seps still paint at :month (month edges only — not noisy Mondays).
     paint_weekends = m.gantt_scale !== :month
@@ -1144,7 +1245,7 @@ function gantt_layout(m::AppModel, area::Rect;
                 dpc, m.gantt_scale, win_start, is_narrow, compact,
                 has_ruler, has_dual, has_quarter, has_footer,
                 band_y, quarter_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
-                nshow, row_start, footer_y, ruler_rows,
+                nshow, row_stride, row_start, footer_y, ruler_rows,
                 paint_weekends, paint_week_seps)
 end
 
@@ -1225,9 +1326,24 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
         end
     end
 
-    # Grid body
-    if layout.nshow > 0 && y >= layout.grid_y0 && y < layout.grid_y0 + layout.nshow
-        vis_i = y - layout.grid_y0 + 1
+    # Grid body (content lines + inter-bar gap lines from row_stride)
+    gh = gantt_grid_height(layout.nshow; stride = layout.row_stride)
+    if layout.nshow > 0 && y >= layout.grid_y0 && y < layout.grid_y0 + gh
+        vis_i = gantt_vis_i_at(layout.grid_y0, y, layout.nshow; stride = layout.row_stride)
+        # Gap line between bars: chart background only (not a selectable row).
+        if vis_i === nothing
+            if x < layout.chart_x
+                return _GANTT_HIT_NONE
+            end
+            col_g = x - layout.chart_x
+            if col_g < 0 || col_g >= layout.physical_ncols
+                return _GANTT_HIT_NONE
+            end
+            date_g = col_g < layout.view_ncols ?
+                     gantt_date_for_col(layout.win_start, layout.dpc, col_g) : nothing
+            return GanttHit(gantt_hit_empty_chart, nothing, nothing, nothing,
+                            col_g < layout.view_ncols ? col_g : nothing, date_g)
+        end
         row_index = layout.row_start + vis_i - 1
         (1 <= row_index <= length(rows)) || return _GANTT_HIT_NONE
         row = rows[row_index]
@@ -1559,9 +1675,11 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     grid_y0 = lay.grid_y0
     content_start = lay.content_start
     nshow = lay.nshow
+    row_stride = lay.row_stride
     row_start = lay.row_start
     paint_weekends = lay.paint_weekends
     paint_week_seps = lay.paint_week_seps
+    grid_h = gantt_grid_height(nshow; stride = row_stride)
 
     win_end = gantt_window_end(win_start, dpc, view_ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
@@ -1731,7 +1849,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         return
     end
 
-    canvas = BlockCanvas(view_ncols, max(1, nshow); style = Style(; fg = col_primary()))
+    canvas = BlockCanvas(view_ncols, max(1, grid_h); style = Style(; fg = col_primary()))
     diamonds = Tuple{Int,Int,Any}[]
     sel_issue = sel_issue_early
 
@@ -1748,7 +1866,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         ri = row_start + i - 1
         ri > length(rows) && break
         row = rows[ri]
-        rowy = grid_y0 + (i - 1)
+        rowy = gantt_row_y(grid_y0, i; stride = row_stride)
+        term_off = (i - 1) * row_stride
         if row.kind === :epic
             ecol = isempty(row.color_key) ? col_primary() : epic_color(row.color_key)
             set_string!(buf, area.x, rowy, _short("▬ " * row.label, left_w - 1), Style(; fg = ecol, bold = true))
@@ -1756,7 +1875,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             iss = row.issue
             selected = sel_issue !== nothing && iss.id == sel_issue.id
             lstyle = selected ? sel_style() : Style(; fg = col_text())
-            prefix = selected ? "▸ " : "├ "
+            prefix = gantt_tree_prefix(rows, ri; selected = selected)
             # Post-bar key geom (identifier right of bar/diamond); left rail always full id.
             # M3: while dragging this issue, geometry follows shadow preview dates.
             psd, pdd = _gantt_paint_dates(m, iss)
@@ -1770,7 +1889,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                                                   gap = 1, max_w = kw, tcol = tcol_paint)
                     # Full key only (same as prior pre-bar full-key rule)
                     post_geom = (g !== nothing && g.max_chars >= kw) ? g : nothing
-                    for dx in (2 * c0):(2 * c1 + 1), dy in (2 * (i - 1)):(2 * (i - 1) + 1)
+                    for dx in (2 * c0):(2 * c1 + 1), dy in (2 * term_off):(2 * term_off + 1)
                         set_point!(canvas, dx, dy)
                     end
                     if selected
@@ -1804,12 +1923,22 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             end
             set_string!(buf, area.x, rowy, _short(prefix * llab, left_w - 1), lstyle)
         end
+        # Fill inter-bar gap lines with a vertical tree stem so the left rail
+        # stays continuous (│) between connected epic/issue nodes.
+        if row_stride > 1 && i < nshow && gantt_tree_stem_after(rows, ri)
+            stem = gantt_safe_char('│', is_narrow)
+            if textwidth(stem) != 1; stem = '|'; end
+            for g in 1:(row_stride - 1)
+                set_char!(buf, area.x, rowy + g, stem, Style(; fg = col_text_muted()))
+            end
+        end
     end
 
-    # z1 — period wash on all visible grid rows (incl. epic headers), under weekend/seps/bars/today.
+    # z1 — period wash on full grid height (content + inter-bar gaps), under weekend/seps/bars/today.
     for c in gantt_period_shade_cols(win_start, dpc, view_ncols, lay.scale)
-        for ii in 1:nshow
-            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ' ',
+        for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
+            nshow < 1 && break
+            set_char!(buf, chart_x + c, yy, ' ',
                       Style(; bg = col_gantt_period_alt()))
         end
     end
@@ -1823,20 +1952,22 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
     if paint_weekends
         for c in wcols
-            for ii in 1:nshow
+            for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
+                nshow < 1 && break
                 ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
                 if textwidth(ch) != 1; ch = '#'; end
-                set_string!(buf, chart_x + c, grid_y0 + ii - 1, string(ch), Style(; fg = col_text_muted(), dim = true))
+                set_string!(buf, chart_x + c, yy, string(ch), Style(; fg = col_text_muted(), dim = true))
             end
         end
     end
     if paint_week_seps
         for c in scols
             c == tcol && continue
-            for ii in 1:nshow
+            for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
+                nshow < 1 && break
                 ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
                 if textwidth(ch) != 1; ch = '|'; end
-                set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
+                set_char!(buf, chart_x + c, yy, ch, Style(; fg = col_text_muted(), dim = true))
             end
         end
     end
@@ -1845,14 +1976,15 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         c == tcol && continue
         # Skip if week sep already painted this col (day/week) — same glyph, avoid double work.
         paint_week_seps && (c in scols) && continue
-        for ii in 1:nshow
+        for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
+            nshow < 1 && break
             ch = gantt_safe_char('┆', is_narrow)
             if textwidth(ch) != 1; ch = '|'; end  # COV_EXCL_LINE (safe_char always yields width-1 for ┆)
-            set_char!(buf, chart_x + c, grid_y0 + ii - 1, ch, Style(; fg = col_text_muted(), dim = true))
+            set_char!(buf, chart_x + c, yy, ch, Style(; fg = col_text_muted(), dim = true))
         end
     end
 
-    render(canvas, Rect(chart_x, grid_y0, view_ncols, max(1, nshow)), buf)
+    render(canvas, Rect(chart_x, grid_y0, view_ncols, max(1, grid_h)), buf)
 
     # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
     # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
@@ -1861,7 +1993,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         ri = row_start + i - 1
         ri > length(rows) && break
         row = rows[ri]
-        rowy = grid_y0 + (i - 1)
+        rowy = gantt_row_y(grid_y0, i; stride = row_stride)
         if row.kind === :issue
             iss = row.issue
             if iss !== nothing
@@ -1910,7 +2042,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # After canvas so it overwrites base █ (compatible with PR3-style post-overlays). Theming only; no y/layout shift.
     if selected_vis_i !== nothing && selected_bar_ext !== nothing
         c0, _ = selected_bar_ext
-        rowy = grid_y0 + (selected_vis_i - 1)
+        rowy = gantt_row_y(grid_y0, selected_vis_i; stride = row_stride)
         ax = chart_x + c0
         if ax <= area.x + area.width - 1
             set_char!(buf, ax, rowy, '▌', Style(; fg = col_primary_hi(), bold = true))
@@ -1920,8 +2052,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # G6b — finish-to-start dependency arrows for project `blocks` links.
     # Z-order: after bars/diamonds/selection, before today + pre-bar keys (keys win on collision).
     # Only when both endpoints are in the nshow window and have visible bar/diamond geometry.
+    # y coords are terminal-relative (row_stride-scaled) so verticals fill inter-bar gaps.
     if m.active_project_id !== nothing && nshow > 0
-        # Map issue id → (0-based vis row, c0, c1) for visible issue rows only.
+        # Map issue id → (0-based terminal y, c0, c1) for visible issue rows only.
         ep_map = Dict{String, Tuple{Int,Int,Int}}()
         for i in 1:nshow
             ri = row_start + i - 1
@@ -1934,7 +2067,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             cols = gantt_issue_endpoint_cols(win_start, dpc, psd, pdd, view_ncols)
             cols === nothing && continue
             c0e, c1e = cols
-            ep_map[iss.id] = (i - 1, c0e, c1e)
+            ep_map[iss.id] = ((i - 1) * row_stride, c0e, c1e)
         end
         if !isempty(ep_map)
             for ln in Stores.list_links(m.boardstore; project_id = m.active_project_id,
@@ -1946,7 +2079,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 to_y, c_to, _ = to
                 for seg in gantt_link_segments(from_y, to_y, c_from, c_to; narrow = is_narrow)
                     (seg.x < 0 || seg.x >= view_ncols) && continue
-                    (seg.y < 0 || seg.y >= nshow) && continue
+                    (seg.y < 0 || seg.y >= grid_h) && continue
                     xx = chart_x + seg.x
                     xx > area.x + area.width - 1 && continue
                     yy = grid_y0 + seg.y
@@ -1959,11 +2092,14 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # Today marker (PR2): ▼ at band, ┃ (thick) vertical on grid; "TODAY" label on ruler if fits.
     # Use gantt_safe_char + textwidth guard (PR6). Painted before pre/in-bar keys so issue
     # identifiers win over today on collision (PR-V primary chart identity).
+    # Continuous through inter-bar gaps so the marker reads as one column.
     if tcol !== nothing
         set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
         today_ch = is_narrow ? '│' : '┃'
-        for i in 1:nshow
-            set_char!(buf, chart_x + tcol, grid_y0 + (i - 1), today_ch, Style(; fg = col_primary_hi(), bold = true))
+        if nshow >= 1
+            for yy in grid_y0:(grid_y0 + grid_h - 1)
+                set_char!(buf, chart_x + tcol, yy, today_ch, Style(; fg = col_primary_hi(), bold = true))
+            end
         end
         # "TODAY" on tick/single axis row. Skip on single-row month where tabs are the
         # primary axis content (TODAY would clobber month chips). Dual keeps TODAY on ticks.
@@ -1984,7 +2120,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         row.kind === :issue || continue
         iss = row.issue
         iss === nothing && continue
-        rowy = grid_y0 + (i - 1)
+        rowy = gantt_row_y(grid_y0, i; stride = row_stride)
         selected = sel_issue !== nothing && iss.id == sel_issue.id
         geom = post_geoms[i]
         if geom !== nothing
