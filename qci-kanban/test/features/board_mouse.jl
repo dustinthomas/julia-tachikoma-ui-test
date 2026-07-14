@@ -1,11 +1,12 @@
 # ═══════════════════════════════════════════════════════════════════════
-# BDD acceptance for Board mouse B1
+# BDD acceptance for Board mouse B1 + B2
 #   • Left-press card body selects (sel_lane/col/idx; keyboard ▸ in sync)
 #   • Second left-press on already-selected card body opens detail (same as v)
 #   • Press different body reselects; does NOT open
 #   • Bulk selected_ids stable on mouse select (K13 — Space remains bulk toggle)
 #   • Login / modal / empty board_last_area / non-board ignore
 #   • Gantt smoke: bar click still selects (regression after view-switch)
+#   • B2: ASCII [<]/[>] press-arm release-fire; gap no-op; WIP soft; no free-hover
 # Driven via update!(m, MouseEvent(...)) + TestBackend re-render.
 # ═══════════════════════════════════════════════════════════════════════
 using Test
@@ -15,6 +16,8 @@ BM = QciKanban
 bmlogin(; name = "Board Mouse User") = (m = fresh_app(; seed = false); app_login_new(m; name = name); m)
 bm!(m, x) = T.update!(m, T.KeyEvent(x))
 bm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, false, false)
+bm_drag(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_drag, false, false, false)
+bm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, false, false, false)
 gantt_y(lay, row_index) = lay.grid_y0 + (row_index - lay.row_start) * lay.row_stride
 
 @testset "FEATURE: Board mouse body click-select (B1 BDD)" begin
@@ -199,5 +202,95 @@ gantt_y(lay, row_index) = lay.grid_y0 + (row_index - lay.row_start) * lay.row_st
         T.update!(m, bm_click(m.board_last_area.x + 1, m.board_last_area.y + 4))
         @test m.last_input_at >= old
         @test m.tick >= 1
+    end
+end
+
+@testset "FEATURE: Board mouse ASCII move buttons arm/release (B2 BDD)" begin
+
+    @testset "Given a card with move chrome When press-release on [>] Then status advances" begin
+        m = bmlogin()
+        iss = BM.Stores.create_issue!(m.boardstore; title = "BddMoveNext", status = "To Do")
+        BM._select_issue!(m, iss.id)
+        W, H = 100, 30
+        tb = app_tb(m; w = W, h = H)
+        lay = BM.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == iss.id && s.next_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        # Paint shows ASCII buttons (no Unicode arrows)
+        blob = join([something(T.row_text(tb, i), "") for i in 1:H], "\n")
+        @test occursin("[<]", blob) && occursin("[>]", blob)
+        for bad in ("◀", "▶", "←", "→")
+            @test !occursin(bad, blob)
+        end
+
+        T.update!(m, bm_click(s.next_btn.x, s.next_btn.y))
+        @test m.board_hover !== nothing && m.board_hover.armed === true
+        @test m.board_hover.kind === :move_next
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "To Do"
+        # Drag updates hot (still on next)
+        T.update!(m, bm_drag(s.next_btn.x, s.next_btn.y))
+        @test m.board_hover.kind === :move_next
+        T.update!(m, bm_release(s.next_btn.x, s.next_btn.y))
+        @test m.board_hover === nothing
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "In Progress"
+        @test m.modal === :none
+    end
+
+    @testset "Given armed move When release off button Then cancel; gap never opens detail" begin
+        m = bmlogin()
+        iss = BM.Stores.create_issue!(m.boardstore; title = "BddGapCancel", status = "In Progress")
+        BM._select_issue!(m, iss.id)
+        app_tb(m; w = 100, h = 30)
+        lay = BM.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == iss.id && s.prev_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        # Gap on selected card: no-op (K11)
+        T.update!(m, bm_click(s.gap_btn.x, s.gap_btn.y))
+        @test m.modal === :none
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "In Progress"
+        # Arm then release off → cancel
+        T.update!(m, bm_click(s.next_btn.x, s.next_btn.y))
+        @test m.board_hover !== nothing
+        T.update!(m, bm_release(s.rect.x + 1, s.rect.y + 1))
+        @test m.board_hover === nothing
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "In Progress"
+        # Successful prev move
+        T.update!(m, bm_click(s.prev_btn.x, s.prev_btn.y))
+        T.update!(m, bm_release(s.prev_btn.x, s.prev_btn.y))
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "To Do"
+    end
+
+    @testset "Given bulk selection + WIP When mouse advances into over-limit Then soft warn and bulk stable" begin
+        m = bmlogin()
+        m.wip_limits["Review"] = 1
+        occ = BM.Stores.create_issue!(m.boardstore; title = "BddWipOcc", status = "Review")
+        mover = BM.Stores.create_issue!(m.boardstore; title = "BddWipMover", status = "In Progress")
+        push!(m.selected_ids, occ.id)
+        bulk_before = copy(m.selected_ids)
+        BM._select_issue!(m, mover.id)
+        app_tb(m; w = 100, h = 30)
+        lay = BM.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == mover.id && s.next_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        T.update!(m, bm_click(s.next_btn.x, s.next_btn.y))
+        T.update!(m, bm_release(s.next_btn.x, s.next_btn.y))
+        @test BM.Stores.get_issue(m.boardstore, mover.id).status == "Review"
+        @test occursin("WIP limit exceeded", m.message)
+        @test m.selected_ids == bulk_before
+    end
+
+    @testset "Given keyboard first-class When < / > still move without mouse" begin
+        m = bmlogin()
+        iss = BM.Stores.create_issue!(m.boardstore; title = "BddKeyMove", status = "To Do")
+        BM._select_issue!(m, iss.id)
+        app_tb(m; w = 100, h = 24)
+        bm!(m, '>')
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "In Progress"
+        bm!(m, '<')
+        @test BM.Stores.get_issue(m.boardstore, iss.id).status == "To Do"
+        @test m.board_hover === nothing
     end
 end

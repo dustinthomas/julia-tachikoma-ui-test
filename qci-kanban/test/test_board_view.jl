@@ -229,9 +229,18 @@ end
         tb = app_tb(m; w = 120, h = 34)
         blob = join([T.row_text(tb, i) for i in 1:34], "\n")
         @test occursin("◆", blob)                 # epic tag glyph (seed cards have epics)
-        @test occursin("▣", blob)                 # due chip (QCI-100 has a due date)
         @test occursin("AL", blob)                # assignee initials for "Ada Lovelace"
         @test occursin("…", blob)                 # wrapped/ellipsized long title
+        # B2: modern cards paint ASCII move buttons; meta chips yield to reserve
+        @test occursin("[<]", blob) && occursin("[>]", blob)
+        # Due chip still paints when the card is wide enough for chips + chrome
+        # (grid columns at 120×34 may clip due under BOARD_BTN_PAIR_W reserve).
+        tb2 = T.TestBackend(40, 10); T.reset!(tb2.buf)
+        wide = T.Rect(1, 1, 36, Q3.MODERN_CARD_H)
+        Q3._render_card_modern!(m, tb2.buf, wide, Q3.Stores.get_issue(m.boardstore, iss.id), true)
+        wide_blob = join([T.row_text(tb2, i) for i in 1:10], "\n")
+        @test occursin("▣", wide_blob)
+        @test occursin("[<]", wide_blob) && occursin("[>]", wide_blob)
     end
 
     @testset "overdue due chip uses err color" begin
@@ -392,15 +401,26 @@ end
         @test lay.col_w > 0
         @test lay.nlanes >= 1
         @test !isempty(lay.slots)
-        # B0: no move chrome on slots
-        @test all(s -> s.prev_btn === nothing && s.next_btn === nothing &&
-                       s.gap_btn === nothing && s.chrome === nothing, lay.slots)
         # Every slot rect is non-empty and inside the grid area
         for s in lay.slots
             @test s.rect.width >= 1 && s.rect.height >= 1
             @test s.rect.x >= lay.grid_area.x
             @test s.rect.y >= lay.grid_area.y
             @test s.bordered === true          # tall enough for modern cards
+            # B2: wide modern cards carry move chrome; formulas match design §4
+            if s.rect.width >= Q3.BOARD_BTN_MIN_W && s.rect.height >= Q3.MODERN_CARD_H
+                @test s.prev_btn !== nothing && s.next_btn !== nothing
+                @test s.gap_btn !== nothing && s.chrome !== nothing
+                by = s.rect.y + s.rect.height - 2
+                bx_next = s.rect.x + s.rect.width - 2 - (Q3.BOARD_BTN_W - 1)
+                bx_prev = bx_next - Q3.BOARD_BTN_GAP - Q3.BOARD_BTN_W
+                @test s.prev_btn == T.Rect(bx_prev, by, Q3.BOARD_BTN_W, 1)
+                @test s.next_btn == T.Rect(bx_next, by, Q3.BOARD_BTN_W, 1)
+                @test s.gap_btn == T.Rect(bx_prev + Q3.BOARD_BTN_W, by, Q3.BOARD_BTN_GAP, 1)
+                @test s.chrome == T.Rect(bx_prev, by, Q3.BOARD_BTN_PAIR_W, 1)
+            else
+                @test s.prev_btn === nothing && s.next_btn === nothing
+            end
         end
         # Paint path re-caches the same area
         tb = T.TestBackend(100, 30); T.reset!(tb.buf)
@@ -498,6 +518,9 @@ end
         lay = Q3.board_layout(m, area)
         @test !isempty(lay.slots)
         @test all(s -> s.bordered === false, lay.slots)
+        # B2: flat cards never carry move chrome (K6)
+        @test all(s -> s.prev_btn === nothing && s.next_btn === nothing &&
+                       s.gap_btn === nothing && s.chrome === nothing, lay.slots)
         # Selected issue still has a slot (U5)
         sel = Q3.selected_issue(m)
         @test sel !== nothing
@@ -689,5 +712,222 @@ end
         mkey(m, '?')   # help
         @test m.modal === :help
         @test m.board_hover === nothing
+    end
+end
+
+@testset "B2 — ASCII move buttons press-arm release-fire" begin
+    content_area(w, h) = T.Rect(1, 3, w, h)
+    bm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, false, false)
+    bm_drag(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_drag, false, false, false)
+    bm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, false, false, false)
+
+    @testset "layout fills chrome; pure hit gap/buttons priority" begin
+        m = lb()
+        area = content_area(100, 26)
+        lay = Q3.board_layout(m, area)
+        chrome_slots = filter(s -> s.next_btn !== nothing, lay.slots)
+        @test !isempty(chrome_slots)
+        s = first(chrome_slots)
+        @test Q3.board_hit_test(lay, s.prev_btn.x, s.prev_btn.y).kind === Q3.board_hit_move_prev
+        @test Q3.board_hit_test(lay, s.next_btn.x, s.next_btn.y).kind === Q3.board_hit_move_next
+        @test Q3.board_hit_test(lay, s.gap_btn.x, s.gap_btn.y).kind === Q3.board_hit_move_chrome
+        hit_gap = Q3.board_hit_test(lay, s.gap_btn.x, s.gap_btn.y)
+        @test hit_gap.issue_id == s.issue_id
+        # Body cell not covered by chrome
+        @test Q3.board_hit_test(lay, s.rect.x + 1, s.rect.y + 1).kind === Q3.board_hit_card_body
+    end
+
+    @testset "paint finds ASCII [<] [>] only — no Unicode arrows" begin
+        m = lb()
+        area = content_area(100, 26)
+        tb = T.TestBackend(100, 30); T.reset!(tb.buf)
+        Q3.render_board!(m, tb.buf, area)
+        blob = join([T.row_text(tb, i) for i in 1:30], "\n")
+        @test occursin("[<]", blob)
+        @test occursin("[>]", blob)
+        # No Unicode chevrons / arrows on buttons
+        for bad in ("◀", "▶", "←", "→", "«", "»")
+            @test !occursin(bad, blob)
+        end
+        # Flat degrade: no buttons painted
+        area_flat = content_area(100, 8)
+        tb2 = T.TestBackend(100, 16); T.reset!(tb2.buf)
+        Q3.render_board!(m, tb2.buf, area_flat)
+        blob2 = join([T.row_text(tb2, i) for i in 1:16], "\n")
+        lay_flat = Q3.board_layout(m, area_flat)
+        @test all(s -> !s.bordered, lay_flat.slots)
+        @test !occursin("[<]", blob2)
+        @test !occursin("[>]", blob2)
+    end
+
+    @testset "press arms; release on same button fires _move_status!; cancel off-button" begin
+        # Unseeded board so the target card is always in the visible window
+        m = fresh_app(; seed = false); app_login_new(m; name = "B2 Arm")
+        iss = Q3.Stores.create_issue!(m.boardstore; title = "B2MoveMe", status = "To Do")
+        Q3._select_issue!(m, iss.id)
+        app_tb(m; w = 100, h = 30)
+        lay = Q3.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == iss.id && s.next_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        nx, ny = s.next_btn.x, s.next_btn.y
+
+        # Press on [>] → armed hot, no status change yet
+        T.update!(m, bm_click(nx, ny))
+        @test m.board_hover !== nothing
+        @test m.board_hover.armed === true
+        @test m.board_hover.kind === :move_next
+        @test m.board_hover.issue_id == iss.id
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "To Do"
+        @test Q3.selected_issue(m).id == iss.id
+
+        # Drag still on [>] → stays hot
+        T.update!(m, bm_drag(nx, ny))
+        @test m.board_hover.kind === :move_next
+        @test m.board_hover.armed === true
+
+        # Release on [>] → status advances
+        T.update!(m, bm_release(nx, ny))
+        @test m.board_hover === nothing
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "In Progress"
+        @test occursin("In Progress", m.message)
+
+        # Arm cancel: press [>] then release off button
+        lay2 = Q3.board_layout(m, m.board_last_area)
+        si2 = findfirst(s -> s.issue_id == iss.id && s.next_btn !== nothing, lay2.slots)
+        @test si2 !== nothing
+        s2 = lay2.slots[si2]
+        st_before = Q3.Stores.get_issue(m.boardstore, iss.id).status
+        T.update!(m, bm_click(s2.next_btn.x, s2.next_btn.y))
+        @test m.board_hover !== nothing && m.board_hover.armed
+        # Release on body (not button)
+        T.update!(m, bm_release(s2.rect.x + 1, s2.rect.y + 1))
+        @test m.board_hover === nothing
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == st_before
+
+        # Drag off button drops hot kind to :none; release cancels
+        T.update!(m, bm_click(s2.prev_btn.x, s2.prev_btn.y))
+        @test m.board_hover.kind === :move_prev
+        T.update!(m, bm_drag(s2.rect.x + 1, s2.rect.y + 1))
+        @test m.board_hover.armed === true
+        @test m.board_hover.kind === :none
+        T.update!(m, bm_release(s2.rect.x + 1, s2.rect.y + 1))
+        @test m.board_hover === nothing
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == st_before
+    end
+
+    @testset "release on [prev] retreats status; gap never opens detail" begin
+        m = fresh_app(; seed = false); app_login_new(m; name = "B2 Prev")
+        iss = Q3.Stores.create_issue!(m.boardstore; title = "B2PrevMe", status = "In Progress")
+        Q3._select_issue!(m, iss.id)
+        app_tb(m; w = 100, h = 30)
+        lay = Q3.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == iss.id && s.prev_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        # Gap on selected card: no-op (would open detail if misclassified as body)
+        T.update!(m, bm_click(s.gap_btn.x, s.gap_btn.y))
+        @test m.modal === :none
+        @test m.board_hover === nothing
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "In Progress"
+
+        # Full arm+release on [<]
+        T.update!(m, bm_click(s.prev_btn.x, s.prev_btn.y))
+        T.update!(m, bm_release(s.prev_btn.x, s.prev_btn.y))
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "To Do"
+        @test m.modal === :none
+    end
+
+    @testset "WIP soft-warn via mouse move; bulk selected_ids stable" begin
+        m2 = fresh_app(; seed = false); app_login_new(m2; name = "WIP Mouse")
+        m2.wip_limits["Review"] = 1
+        a = Q3.Stores.create_issue!(m2.boardstore; title = "WipOcc", status = "Review")
+        b = Q3.Stores.create_issue!(m2.boardstore; title = "WipMove", status = "In Progress")
+        push!(m2.selected_ids, a.id)   # bulk set must survive
+        bulk_before = copy(m2.selected_ids)
+        Q3._select_issue!(m2, b.id)
+        app_tb(m2; w = 100, h = 30)
+        lay = Q3.board_layout(m2, m2.board_last_area)
+        si = findfirst(s -> s.issue_id == b.id && s.next_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        T.update!(m2, bm_click(s.next_btn.x, s.next_btn.y))
+        T.update!(m2, bm_release(s.next_btn.x, s.next_btn.y))
+        @test Q3.Stores.get_issue(m2.boardstore, b.id).status == "Review"
+        @test occursin("WIP limit exceeded", m2.message)
+        @test m2.selected_ids == bulk_before
+        @test m2.modal === :none
+    end
+
+    @testset "edge status dim paint still hit-testable; release no-ops at edge" begin
+        m = fresh_app(; seed = false); app_login_new(m; name = "B2 Edge")
+        iss = Q3.Stores.create_issue!(m.boardstore; title = "B2EdgeBacklog", status = "Backlog")
+        Q3._select_issue!(m, iss.id)
+        app_tb(m; w = 100, h = 30)
+        lay = Q3.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == iss.id && s.prev_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+        # Prev on Backlog is edge: release fires but _move_status! clamps no-op
+        T.update!(m, bm_click(s.prev_btn.x, s.prev_btn.y))
+        T.update!(m, bm_release(s.prev_btn.x, s.prev_btn.y))
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "Backlog"
+        @test m.board_hover === nothing
+    end
+
+    @testset "coverage: hot paint, drag to prev, press-while-armed, defensive hover" begin
+        m = fresh_app(; seed = false); app_login_new(m; name = "B2 Cov")
+        iss = Q3.Stores.create_issue!(m.boardstore; title = "B2CovMove", status = "To Do")
+        Q3._select_issue!(m, iss.id)
+        app_tb(m; w = 100, h = 30)
+        lay = Q3.board_layout(m, m.board_last_area)
+        si = findfirst(s -> s.issue_id == iss.id && s.next_btn !== nothing, lay.slots)
+        @test si !== nothing
+        s = lay.slots[si]
+
+        # Arm next, drag onto prev (covers :move_prev arm update)
+        T.update!(m, bm_click(s.next_btn.x, s.next_btn.y))
+        @test m.board_hover.kind === :move_next
+        T.update!(m, bm_drag(s.prev_btn.x, s.prev_btn.y))
+        @test m.board_hover.kind === :move_prev
+        @test m.board_hover.armed === true
+
+        # Hot paint path while armed
+        tb = T.TestBackend(100, 30); T.reset!(tb.buf)
+        Q3.render_board!(m, tb.buf, m.board_last_area)
+        @test Q3._board_is_hot(m, iss.id, :move_prev)
+        @test !Q3._board_is_hot(m, iss.id, :move_next)
+        @test !Q3._board_is_hot(m, "nope", :move_prev)
+
+        # Non-left event while armed → early return (no fire)
+        other = T.MouseEvent(s.prev_btn.x, s.prev_btn.y, T.mouse_right, T.mouse_press,
+                             false, false, false)
+        T.update!(m, other)
+        @test m.board_hover !== nothing && m.board_hover.armed === true
+        @test Q3.Stores.get_issue(m.boardstore, iss.id).status == "To Do"
+
+        # Press while still armed: commit previous arm (prev → To Do retreat no-op-ish
+        # from To Do with prev is edge no-op) then re-arm if press lands on button
+        T.update!(m, bm_click(s.next_btn.x, s.next_btn.y))
+        # After synthetic re-press: either re-armed on next or cleared then armed
+        @test m.board_hover !== nothing
+        @test m.board_hover.kind === :move_next || m.board_hover.kind === :move_prev
+        T.update!(m, bm_release(s.next_btn.x, s.next_btn.y))
+        # May have fired next if re-armed on next; accept either stable end state
+        st = Q3.Stores.get_issue(m.boardstore, iss.id).status
+        @test st in ("To Do", "In Progress", "Backlog")
+        @test m.board_hover === nothing
+
+        # Defensive helpers: malformed board_hover values
+        m.board_hover = :stale
+        @test Q3._board_arm_active(m) === false
+        @test Q3._board_is_hot(m, iss.id, :move_next) === false
+        m.board_hover = nothing
+        @test Q3._board_arm_active(m) === false
+        @test Q3._board_is_hot(m, iss.id, :move_next) === false
+        # NamedTuple shape also accepted
+        m.board_hover = (kind = :move_next, issue_id = iss.id, armed = true)
+        @test Q3._board_arm_active(m) === true
+        @test Q3._board_is_hot(m, iss.id, :move_next) === true
     end
 end
