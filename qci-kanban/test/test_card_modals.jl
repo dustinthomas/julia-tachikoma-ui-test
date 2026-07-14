@@ -168,6 +168,47 @@ end
         # content still present
         @test T.find_text(tb, "COMMENTS") !== nothing
     end
+
+    # Pretty detail chrome: dim field labels + colored values (not jammed
+    # "Status:In Progress  Prio:High" meta strings).
+    @testset "detail shows pretty field labels (Status / Priority / Assignee / Due)" begin
+        m = lbm()
+        iss = Qm.selected_issue(m)
+        k!(m, 'v')
+        @test m.modal == :card_detail
+        tb = app_tb(m; w = 100, h = 30)
+        @test T.find_text(tb, iss.key) !== nothing
+        @test T.find_text(tb, "Status") !== nothing
+        @test T.find_text(tb, "Priority") !== nothing
+        @test T.find_text(tb, "Assignee") !== nothing
+        @test T.find_text(tb, "Due") !== nothing
+        # Old dense jammed labels must not return
+        rows = app_rows(m; w = 100, h = 30)
+        joined = join(rows, "\n")
+        @test !occursin("Status:", joined)
+        @test !occursin("Prio:", joined)
+        @test !occursin("Assignee:", joined)
+        k!(m, :escape)
+    end
+
+    # Coverage: Est. hrs alone (points set, no epic / start / WO tags).
+    @testset "detail shows Est. hrs when only story points are set" begin
+        m = lbm()
+        iss = Qm.Stores.create_issue!(m.boardstore; title = "PtsOnlyPretty",
+                                      story_points = 7, status = "Backlog",
+                                      project_id = m.active_project_id)
+        # isolate via search so selection lands on this card
+        k!(m, '/'); typ!(m, "PtsOnlyPretty"); k!(m, :enter)
+        k!(m, 'v')
+        @test m.modal == :card_detail
+        tb = app_tb(m; w = 100, h = 30)
+        @test T.find_text(tb, "Est. hrs") !== nothing
+        @test T.find_text(tb, "7") !== nothing
+        # no empty WORK ORDER section without asset/location/type
+        rows = app_rows(m; w = 100, h = 30)
+        @test !occursin("WORK ORDER", join(rows, "\n"))
+        k!(m, :escape)
+    end
 end
 
 @testset "Phase 3 — Delete confirm (single + bulk)" begin

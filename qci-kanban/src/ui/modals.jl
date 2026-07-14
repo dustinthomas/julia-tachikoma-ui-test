@@ -445,32 +445,127 @@ function _modal_box(content_area::Rect, w::Int, h::Int, title::String, buf::Buff
                  title_style = Style(; fg = col_primary(), bold = true)), r, buf)
 end
 
+"""
+Paint one detail field: dim fixed-width label + styled value on row `y`.
+Returns the next free column after the field (or `x` on overflow).
+"""
+function _detail_field!(buf::Buffer, x::Int, y::Int, lim::Int,
+                        label::AbstractString, value::AbstractString;
+                        val_style::Style = Style(; fg = col_text()),
+                        label_w::Int = 10)
+    x + 4 > lim && return x
+    lw = min(label_w, max(1, lim - x - 2))
+    lab = rpad(_short(label, lw), lw)
+    set_string!(buf, x, y, lab, Style(; fg = col_text_dim()))
+    vx = x + textwidth(lab) + 1
+    vx >= lim && return lim
+    set_string!(buf, vx, y, _short(value, lim - vx), val_style)
+    return vx + textwidth(_short(value, lim - vx)) + 2
+end
+
+"""
+Paint up to two key/value fields on one row (left + right half when wide).
+Advances `y` by 1. Returns new `y`.
+"""
+function _detail_row!(buf::Buffer, x::Int, y::Int, iw::Int,
+                      left::Tuple, right::Union{Nothing,Tuple} = nothing)
+    lim = x + iw
+    # left: (label, value, val_style?)
+    l_lab, l_val = left[1], left[2]
+    l_st = length(left) >= 3 ? left[3] : Style(; fg = col_text())
+    if right === nothing || iw < 40
+        _detail_field!(buf, x, y, lim, l_lab, l_val; val_style = l_st)
+    else
+        mid = x + iw ÷ 2
+        _detail_field!(buf, x, y, mid - 1, l_lab, l_val; val_style = l_st)
+        r_lab, r_val = right[1], right[2]
+        r_st = length(right) >= 3 ? right[3] : Style(; fg = col_text())
+        _detail_field!(buf, mid, y, lim, r_lab, r_val; val_style = r_st)
+    end
+    return y + 1
+end
+
+function _detail_section!(buf::Buffer, x::Int, y::Int, maxy::Int, iw::Int, title::AbstractString)
+    y > maxy && return y
+    set_string!(buf, x, y, _short(title, iw), Style(; fg = col_primary(), bold = true))
+    return y + 1
+end
+
+function _pretty_due(d::Union{Nothing,Date})
+    d === nothing && return "—"
+    Dates.format(d, dateformat"u d, yyyy")
+end
+
 function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
     id = m.card_issue_id
     iss = id === nothing ? nothing : Stores.get_issue(m.boardstore, id)
     iss === nothing && return
-    # Compact, centered panel (not a near-fullscreen sheet). Color-rect bleed is
-    # killed by the full content_area clear + set_style!(RESET) in view; these
-    # caps only control the panel size/margins.
-    w = clamp(min(64, content_area.width - 10), 30, content_area.width)
-    h = clamp(min(16, content_area.height - 6), 10, content_area.height)
-    inner = _modal_box(content_area, w, h, "$(iss.key) — Enter comment, Esc close", buf)
+    # Compact, centered panel (not a near-fullscreen sheet). Slightly taller than
+    # the old dense dump so labeled rows + section headers breathe.
+    # Color-rect bleed is killed by the full content_area clear + set_style!(RESET)
+    # in view; these caps only control the panel size/margins.
+    w = clamp(min(68, content_area.width - 8), 34, content_area.width)
+    h = clamp(min(18, content_area.height - 4), 12, content_area.height)
+    inner = _modal_box(content_area, w, h, "$(iss.key)  ·  Enter comment  ·  Esc close", buf)
     x = inner.x + 1; y = inner.y + 1; maxy = inner.y + inner.height - 1
-    set_string!(buf, x, y, _short(iss.title, inner.width - 2), Style(; fg = col_text(), bold = true)); y += 1
-    meta = "Status:$(iss.status)  Prio:$(iss.priority)  " *
-           (iss.story_points === nothing ? "" : "$(iss.story_points)sp  ") *
-           "Epic:$(_epic_name(m, iss.epic_id))"
-    set_string!(buf, x, y, _short(meta, inner.width - 2), Style(; fg = col_text_dim())); y += 1
-    # Work-order block (design §4.4): ASSET / LOCATION / TYPE / EST HRS when any set.
-    if iss.asset_tag !== nothing || iss.location !== nothing || iss.work_type !== nothing ||
-       iss.story_points !== nothing
-        wo = "ASSET:$(something(iss.asset_tag, "—"))  LOCATION:$(something(iss.location, "—"))  " *
-             "TYPE:$(something(iss.work_type, "—"))  EST HRS:$(something(iss.story_points, "—"))"
-        set_string!(buf, x, y, _short(wo, inner.width - 2), Style(; fg = col_text_muted())); y += 1
-    end
+    iw = inner.width - 2
+
+    # Title
+    set_string!(buf, x, y, _short(iss.title, iw), Style(; fg = col_text(), bold = true)); y += 1
+
+    # Status / Priority  (or Priority + Est. hrs when no WO-only hours)
+    y <= maxy && (y = _detail_row!(buf, x, y, iw,
+        ("Status", iss.status, Style(; fg = col_primary_hi(), bold = true)),
+        ("Priority", iss.priority, Style(; fg = priority_color(iss.priority), bold = true))))
+
+    # Assignee / Due
     asg = iss.assignee_id === nothing ? "Unassigned" : _user_name(m, iss.assignee_id)
-    due = iss.due_date === nothing ? "—" : string(iss.due_date)
-    set_string!(buf, x, y, _short("Assignee:$(asg)  Due:$(due)", inner.width - 2), Style(; fg = col_text_dim())); y += 1
+    y <= maxy && (y = _detail_row!(buf, x, y, iw,
+        ("Assignee", asg, Style(; fg = col_primary_hi())),
+        ("Due", _pretty_due(iss.due_date),
+         Style(; fg = (iss.due_date !== nothing && iss.due_date < Dates.today() &&
+                       iss.status != "Done") ? col_err() : col_text()))))
+
+    # Epic / Start / Est. hrs — only paint fields that exist (saves rows on
+    # small terminals so COMMENTS still fits).
+    has_epic = iss.epic_id !== nothing
+    has_start = iss.start_date !== nothing
+    has_pts = iss.story_points !== nothing
+    has_wo = iss.asset_tag !== nothing || iss.location !== nothing || iss.work_type !== nothing
+    if y <= maxy && (has_epic || has_start)
+        epic_nm = has_epic ? _epic_name(m, iss.epic_id) : "—"
+        start_s = has_start ? _pretty_due(iss.start_date) : "—"
+        right = if has_start
+            ("Start", start_s)
+        elseif has_pts && !has_wo
+            ("Est. hrs", string(iss.story_points))
+        else
+            nothing
+        end
+        y = _detail_row!(buf, x, y, iw,
+            ("Epic", epic_nm, Style(; fg = has_epic ? epic_color(iss.epic_id) : col_text_muted())),
+            right)
+    elseif y <= maxy && has_pts && !has_wo
+        y = _detail_row!(buf, x, y, iw,
+            ("Est. hrs", string(iss.story_points)), nothing)
+    end
+
+    # Work-order block (design §4.4) — only when asset / location / type set.
+    # Pretty labels, not jammed ASSET:/TYPE: strings. Est. hrs rides here too.
+    if has_wo && y + 1 <= maxy
+        y = _detail_section!(buf, x, y, maxy, iw, "WORK ORDER")
+        y <= maxy && (y = _detail_row!(buf, x, y, iw,
+            ("Asset", something(iss.asset_tag, "—"),
+             Style(; fg = iss.asset_tag === nothing ? col_text_muted() : col_primary_hi())),
+            ("Location", something(iss.location, "—"),
+             Style(; fg = iss.location === nothing ? col_text_muted() : col_text()))))
+        y <= maxy && (y = _detail_row!(buf, x, y, iw,
+            ("Type", something(iss.work_type, "—"),
+             Style(; fg = iss.work_type === nothing ? col_text_muted() : col_warn())),
+            ("Est. hrs", iss.story_points === nothing ? "—" : string(iss.story_points),
+             Style(; fg = col_text()))))
+    end
+
     # G6b: read-only blocks / blocked-by summary (create/delete via Gantt L/U)
     if y <= maxy
         lnks = Stores.list_links(m.boardstore; issue_id = iss.id, kind = "blocks")
@@ -487,36 +582,47 @@ function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
                 end
             end
             parts = String[]
-            isempty(out_keys) || push!(parts, "blocks→" * join(out_keys, ","))
-            isempty(in_keys) || push!(parts, "blocked←" * join(in_keys, ","))
+            isempty(out_keys) || push!(parts, "blocks " * join(out_keys, ", "))
+            isempty(in_keys) || push!(parts, "blocked by " * join(in_keys, ", "))
             if !isempty(parts)
-                set_string!(buf, x, y, _short("Links: " * join(parts, "  "), inner.width - 2),
-                            Style(; fg = col_text_muted())); y += 1
+                y = _detail_row!(buf, x, y, iw,
+                    ("Links", join(parts, "  ·  "), Style(; fg = col_text_muted())))
             end
         end
     end
-    if !isempty(iss.description)
-        set_string!(buf, x, y, _short(iss.description, inner.width - 2), Style(; fg = col_text())); y += 1
+
+    if !isempty(iss.description) && y <= maxy
+        y = _detail_section!(buf, x, y, maxy, iw, "DESCRIPTION")
+        y <= maxy && (set_string!(buf, x, y, _short(iss.description, iw),
+                                  Style(; fg = col_text())); y += 1)
     end
-    # comments
-    y += 1; y <= maxy && (set_string!(buf, x, y, "COMMENTS", Style(; fg = col_primary(), bold = true)); y += 1)
+
+    # comments (skip blank spacer when room is tight so the header still fits)
+    if y <= maxy - 2
+        y += 1
+    end
+    y <= maxy && (y = _detail_section!(buf, x, y, maxy, iw, "COMMENTS"))
     for c in Stores.list_comments(m.boardstore, iss.id)
         y > maxy - 3 && break
         who = _user_name(m, c.author_id)
-        set_string!(buf, x, y, _short("• $(who): $(c.body)", inner.width - 2), Style(; fg = col_text())); y += 1
+        set_string!(buf, x, y, _short("  $(who)  ·  $(c.body)", iw),
+                    Style(; fg = col_text())); y += 1
     end
+
     # activity tail
     acts = Stores.list_activity(m.boardstore, iss.id)
     if !isempty(acts) && y <= maxy - 2
-        set_string!(buf, x, y, "ACTIVITY", Style(; fg = col_primary(), bold = true)); y += 1
+        y = _detail_section!(buf, x, y, maxy, iw, "ACTIVITY")
         for a in acts[max(1, end - 2):end]
             y > maxy - 1 && break
-            set_string!(buf, x, y, _short("· $(a.kind): $(a.detail)", inner.width - 2), Style(; fg = col_text_muted())); y += 1
+            set_string!(buf, x, y, _short("  $(a.kind)  ·  $(a.detail)", iw),
+                        Style(; fg = col_text_muted())); y += 1
         end
     end
+
     # comment input on the last line
     set_string!(buf, x, maxy, "> ", Style(; fg = col_primary()))
-    render(m.comment_input, Rect(x + 2, maxy, inner.width - 4, 1), buf)
+    render(m.comment_input, Rect(x + 2, maxy, max(1, inner.width - 4), 1), buf)
 end
 
 function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)
