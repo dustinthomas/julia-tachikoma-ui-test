@@ -2931,8 +2931,8 @@ end
         @test m.modal === :card_detail
         tb = app_tb(m; w = 100, h = 30)
         blob = join([something(T.row_text(tb, i), "") for i in 1:30], "\n")
-        # Pretty detail: dim "Links" label + human wording (not jammed blocks→)
-        @test occursin("Links", blob) && occursin("blocks", blob)
+        # Ticket-strip detail: flowing link summary (not jammed blocks→)
+        @test occursin("blocks", blob)
         T.update!(m, T.KeyEvent(:escape))
         # Card detail also shows blocked-by (incoming)
         G4._gantt_select_issue_id!(m, b.id)
