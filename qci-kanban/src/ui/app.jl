@@ -76,6 +76,10 @@ mutable struct AppModel <: Model
     gantt_drag::Any
     # G6b two-step blocks-link source (nothing | issue id). First L stashes; second creates.
     gantt_link_from_id::Union{String,Nothing}
+    # Board mouse (B0 layout cache + B2 hover/arm payload). `Any` because board.jl
+    # is included after app.jl — same pattern as gantt_drag (K12).
+    board_last_area::Rect              # last content Rect passed to render_board!; zero default
+    board_hover::Any                   # nothing | BoardHoverTarget / NamedTuple (board.jl only)
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
@@ -150,6 +154,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
                  td, :day, 1, Rect(0, 0, 0, 0), nothing, nothing,
+                 Rect(0, 0, 0, 0), nothing,   # board_last_area, board_hover (B0)
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
@@ -241,6 +246,7 @@ function _clear_project_selection!(m::AppModel)
     m.card_issue_id = nothing
     m.backlog_sel = 1
     m.gantt_sel = 1
+    m.board_hover = nothing         # B0: design clear table — project switch drops board mouse UI
     m.label_filter = nothing
     empty!(m.active_filters)
     set_text!(m.search_input, "")
@@ -269,6 +275,7 @@ function _open_project_switch!(m::AppModel)
         # Zero projects → forced create-project modal (blocks board).
         return _open_project_create!(m; forced = true)
     end
+    _clear_board_mouse_ui!(m)
     idx = findfirst(p -> p.id == m.active_project_id, m.projects_cache)
     m.project_sel = something(idx, 1)
     m.modal = :project_switch
@@ -310,6 +317,7 @@ end
 
 """Open the create-project modal (focus-routed name + key, like new_sprint)."""
 function _open_project_create!(m::AppModel; forced::Bool = false)
+    _clear_board_mouse_ui!(m)
     set_text!(m.project_name_input, "")
     set_text!(m.project_key_input, "")
     m.modal = :project_create
@@ -514,9 +522,10 @@ end
 """
     update!(m::AppModel, evt::MouseEvent)
 
-Mouse path (not KEYMAP): idle parity, then Gantt-only handling (M1 click-select
-+ M2 wheel scroll + M3 drag-reschedule) when logged in, no modal, view is
-`:gantt`, and `gantt_last_area` is non-empty.
+Mouse path (not KEYMAP): idle parity, then view-local handlers when logged in
+and no modal. `:gantt` → M1–M3 (click-select / wheel scroll / drag-reschedule);
+`:board` → B1 body click-select / select-then-activate open detail (B2 move
+chrome later). Requires a non-empty `*_last_area` cache from the last paint.
 """
 function update!(m::AppModel, evt::MouseEvent)
     m.tick += 1
@@ -527,10 +536,14 @@ function update!(m::AppModel, evt::MouseEvent)
 
     m.current_user === nothing && return m
     m.modal !== :none && return m
-    m.view !== :gantt && return m
-    (m.gantt_last_area.width < 1 || m.gantt_last_area.height < 1) && return m
 
-    _handle_gantt_mouse!(m, evt)
+    if m.view === :gantt
+        (m.gantt_last_area.width < 1 || m.gantt_last_area.height < 1) && return m
+        _handle_gantt_mouse!(m, evt)
+    elseif m.view === :board
+        (m.board_last_area.width < 1 || m.board_last_area.height < 1) && return m
+        _handle_board_mouse!(m, evt)
+    end
     m
 end
 
@@ -538,6 +551,7 @@ function _do_action!(m::AppModel, act::Symbol)
     if act === :quit
         m.quit = true
     elseif act === :toggle_help
+        m.modal !== :help && _clear_board_mouse_ui!(m)
         m.modal = m.modal === :help ? :none : :help
     elseif act === :close_help
         m.modal = :none
@@ -738,6 +752,7 @@ function _switch_view!(m::AppModel, v::Symbol)
     m.modal = :none
     m.gantt_drag = nothing          # M3: never carry shadow drag across views
     m.gantt_link_from_id = nothing  # G6b: drop pending link source
+    m.board_hover = nothing         # B0/B2: never carry board mouse chrome across views
     m.message = "$(VIEW_TITLES[v]) view"
     v === :calendar && _cal_init!(m)
     v === :gantt && _gantt_init!(m)
@@ -850,6 +865,7 @@ function _logout!(m::AppModel)
     m.modal = :none
     m.gantt_drag = nothing
     m.gantt_link_from_id = nothing
+    m.board_hover = nothing
     m.confirm_kind = :none
     m.confirm_target = nothing
     m.card_issue_id = nothing

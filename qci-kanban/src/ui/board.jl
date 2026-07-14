@@ -365,6 +365,326 @@ function _cycle_label_filter!(m::AppModel)
     m
 end
 
+# ── The bordered card grid ───────────────────────────────────────────────
+const MODERN_CARD_H = 6                      # ╭ + key + 2 title lines + meta + ╰
+
+# B2 move-chrome geometry (ASCII `[<]` / `[>]` inside modern card border)
+const BOARD_BTN_MIN_W = 14
+const BOARD_BTN_W = 3
+const BOARD_BTN_GAP = 1
+const BOARD_BTN_PAIR_W = 2 * BOARD_BTN_W + BOARD_BTN_GAP  # 7
+
+# ═══════════════════════════ LAYOUT (B0/B2) ═════════════════════════════════
+"""
+One painted card cell on the board grid. Geometry matches `_render_board_grid!`
+so paint and hit-test share a single snapshot. When `bordered` and outer width
+≥ `BOARD_BTN_MIN_W`, move-chrome rects are filled (B2); flat / narrow cards
+leave them `nothing`.
+"""
+struct BoardCardSlot
+    rect::Rect
+    lane::Int
+    col::Int
+    idx::Int                 # 1-based index within the status cell
+    issue_id::String
+    bordered::Bool
+    prev_btn::Union{Nothing,Rect}
+    next_btn::Union{Nothing,Rect}
+    gap_btn::Union{Nothing,Rect}
+    chrome::Union{Nothing,Rect}
+end
+
+"""
+Snapshot of board card geometry for a given AppModel + content Rect.
+Same geometry formulas as paint. **Not fully pure**: clamps `m.sel_*` via
+`_clamp_selection!` (identical to render) so scroll-follow uses in-range
+selection. Paint and hit-test both consume this builder.
+"""
+struct BoardLayout
+    area::Rect                 # original body rect (pre-stats split input)
+    grid_area::Rect            # after optional stats strip
+    show_stats::Bool
+    col_w::Int
+    nlanes::Int
+    slots::Vector{BoardCardSlot}
+end
+
+"""
+Move-button rects for a modern card outer rect, or `nothing` when chrome is
+hidden (flat / narrow / short). Formulas (design §4):
+
+    by = r.y + r.height - 2
+    bx_next = r.x + r.width - 2 - (BOARD_BTN_W - 1)
+    bx_prev = bx_next - BOARD_BTN_GAP - BOARD_BTN_W
+"""
+function _board_btn_rects(r::Rect; bordered::Bool = true)
+    (!bordered || r.width < BOARD_BTN_MIN_W || r.height < MODERN_CARD_H) &&
+        return nothing
+    by = r.y + r.height - 2
+    bx_next = r.x + r.width - 2 - (BOARD_BTN_W - 1)
+    bx_prev = bx_next - BOARD_BTN_GAP - BOARD_BTN_W
+    prev_btn = Rect(bx_prev, by, BOARD_BTN_W, 1)
+    next_btn = Rect(bx_next, by, BOARD_BTN_W, 1)
+    gap_btn  = Rect(bx_prev + BOARD_BTN_W, by, BOARD_BTN_GAP, 1)
+    chrome   = Rect(bx_prev, by, BOARD_BTN_PAIR_W, 1)
+    return (prev_btn = prev_btn, next_btn = next_btn, gap_btn = gap_btn, chrome = chrome)
+end
+
+"""
+    board_layout(m, area) -> BoardLayout
+
+Encode stats strip, filter/header rows, lane heights, scroll-follow start,
+bordered vs flat cards, each visible card `Rect`, and B2 move-chrome rects.
+
+**Side effect:** calls `_clamp_selection!(m)` (same as render) so scroll-follow
+uses in-range `sel_*`. Not safe for speculative “what-if” layouts without
+restoring selection.
+"""
+function board_layout(m::AppModel, area::Rect)::BoardLayout
+    show_stats = m.show_stats && area.height >= STATS_HEIGHT + 6
+    grid_area = show_stats ?
+        Rect(area.x, area.y + STATS_HEIGHT, area.width, area.height - STATS_HEIGHT) :
+        Rect(area.x, area.y, area.width, area.height)
+
+    g = _clamp_selection!(m)
+    ncols = length(BOARD_STATUSES)
+    nlanes = length(g)
+    if grid_area.width < 4 || grid_area.height < 1
+        return BoardLayout(area, grid_area, show_stats, 0, nlanes, BoardCardSlot[])
+    end
+
+    inner_x = grid_area.x + 1
+    inner_w = grid_area.width - 2
+    col_w = max(0, inner_w ÷ ncols)
+    board_total = sum(sum(length, lane.cols; init = 0) for lane in g; init = 0)
+    avail_h = grid_area.height - 2                # minus filter line + header row
+    lane_h = max(MODERN_CARD_H + 2, avail_h ÷ max(1, nlanes))
+    bottom_lim = grid_area.y + grid_area.height
+    y = grid_area.y + 2                           # after filter (y0) + headers (y1)
+    if board_total == 0 && y < bottom_lim
+        y += 1                                    # empty-board hint row
+    end
+
+    slots = BoardCardSlot[]
+    for (li, lane) in enumerate(g)
+        lh = min(lane_h, bottom_lim - y)
+        lh < 3 && break
+        inner_h = lh - 2
+        bordered = inner_h >= MODERN_CARD_H
+        card_h = bordered ? MODERN_CARD_H : clamp(inner_h, 1, 4)
+        max_cards = max(1, inner_h ÷ max(1, card_h))
+        for (ci, cell) in enumerate(lane.cols)
+            cx = inner_x + (ci - 1) * col_w
+            sel_here = (li == m.sel_lane && ci == m.sel_col)
+            # scroll-follow: the cursor card is always included (finding U5)
+            start = (sel_here && m.sel_idx > max_cards) ? (m.sel_idx - max_cards + 1) : 1
+            last = min(length(cell), start + max_cards - 1)
+            slot_i = 0
+            for k in start:last
+                cy = y + 1 + slot_i * card_h
+                ch = min(card_h, y + lh - 1 - cy)   # clip to the lane interior
+                ch < 1 && break
+                r = Rect(cx, cy, max(0, col_w - 1), ch)
+                btns = _board_btn_rects(r; bordered = bordered)
+                push!(slots, BoardCardSlot(
+                    r, li, ci, k, cell[k].id, bordered,
+                    btns === nothing ? nothing : btns.prev_btn,
+                    btns === nothing ? nothing : btns.next_btn,
+                    btns === nothing ? nothing : btns.gap_btn,
+                    btns === nothing ? nothing : btns.chrome))
+                slot_i += 1
+            end
+        end
+        y += lh
+    end
+    BoardLayout(area, grid_area, show_stats, col_w, nlanes, slots)
+end
+
+"""
+Armed / hot target for move chrome under the 1002 press-drag-release path (K8).
+Stored in `AppModel.board_hover::Any` (app.jl included before board.jl — K12).
+"""
+struct BoardHoverTarget
+    kind::Symbol          # :move_prev | :move_next | :none (armed but not over a button)
+    issue_id::String
+    armed::Bool
+end
+
+_clear_board_mouse_ui!(m::AppModel) = (m.board_hover = nothing; m)
+
+_board_arm_active(m::AppModel) = begin
+    h = m.board_hover
+    h === nothing && return false
+    # NamedTuple or BoardHoverTarget both expose .armed
+    try
+        return h.armed === true
+    catch
+        return false
+    end
+end
+
+function _board_is_hot(m::AppModel, issue_id::AbstractString, kind::Symbol)
+    h = m.board_hover
+    h === nothing && return false
+    try
+        return h.kind === kind && h.issue_id == issue_id
+    catch
+        return false
+    end
+end
+
+# ═══════════════════════════ HIT-TEST + MOUSE (B1/B2) ═══════════════════════
+"""
+Hit kinds for pure board mouse hit-testing. Priority: move buttons → gap chrome
+band → card body → other chrome.
+"""
+@enum BoardHitKind begin
+    board_hit_none
+    board_hit_card_body      # select / open-detail
+    board_hit_move_prev      # [<]
+    board_hit_move_next      # [>]
+    board_hit_move_chrome    # gap / non-button chrome band — no-op
+    board_hit_chrome         # headers, filter line, lane frame, stats
+end
+
+"""Result of `board_hit_test`. Lane/col/idx/issue_id set when a card is hit."""
+struct BoardHit
+    kind::BoardHitKind
+    lane::Union{Nothing,Int}
+    col::Union{Nothing,Int}
+    idx::Union{Nothing,Int}
+    issue_id::Union{Nothing,String}
+end
+
+const _BOARD_HIT_NONE = BoardHit(board_hit_none, nothing, nothing, nothing, nothing)
+
+"""
+    board_hit_test(layout, x, y) -> BoardHit
+
+Pure hit-test against a `BoardLayout` snapshot. Coordinates are absolute
+terminal cells (same space as `MouseEvent.x/y` and `layout.area`). Uses
+`Base.contains` for rect membership — does not invent a parallel geometry.
+"""
+function board_hit_test(layout::BoardLayout, x::Int, y::Int)::BoardHit
+    area = layout.area
+    (area.width < 1 || area.height < 1) && return _BOARD_HIT_NONE
+    Base.contains(area, x, y) || return _BOARD_HIT_NONE
+
+    # Priority: specific buttons > gap chrome band > card body > other chrome
+    for s in layout.slots
+        if s.prev_btn !== nothing && Base.contains(s.prev_btn, x, y)
+            return BoardHit(board_hit_move_prev, s.lane, s.col, s.idx, s.issue_id)
+        end
+        if s.next_btn !== nothing && Base.contains(s.next_btn, x, y)
+            return BoardHit(board_hit_move_next, s.lane, s.col, s.idx, s.issue_id)
+        end
+        if s.chrome !== nothing && Base.contains(s.chrome, x, y)
+            # gap (or band padding): never body / never open detail
+            return BoardHit(board_hit_move_chrome, s.lane, s.col, s.idx, s.issue_id)
+        end
+        if Base.contains(s.rect, x, y)
+            return BoardHit(board_hit_card_body, s.lane, s.col, s.idx, s.issue_id)
+        end
+    end
+    return BoardHit(board_hit_chrome, nothing, nothing, nothing, nothing)
+end
+
+"""
+Left-press on card body: first press selects (cursor only — K13, no bulk
+`selected_ids` change); second press on the already-selected card opens detail
+via `_open_card_detail!` (same as `v`).
+"""
+function _board_body_press!(m::AppModel, hit::BoardHit)
+    hit.issue_id === nothing && return m
+    cur = selected_issue(m)
+    already = cur !== nothing && cur.id == hit.issue_id
+    if already
+        _clear_board_mouse_ui!(m)
+        return _open_card_detail!(m)
+    else
+        # Cursor only — do NOT touch selected_ids (K13)
+        _select_issue!(m, hit.issue_id)
+        return m
+    end
+end
+
+"""Drag while armed: update hot button kind from hit (do not fire)."""
+function _board_update_arm_from_hit!(m::AppModel, hit::BoardHit)
+    arm = m.board_hover
+    arm === nothing && return m
+    id = try arm.issue_id catch; return m end
+    if hit.kind === board_hit_move_prev && hit.issue_id == id
+        m.board_hover = BoardHoverTarget(:move_prev, id, true)
+    elseif hit.kind === board_hit_move_next && hit.issue_id == id
+        m.board_hover = BoardHoverTarget(:move_next, id, true)
+    else
+        # Off the armed issue's buttons: keep armed, drop hot paint
+        m.board_hover = BoardHoverTarget(:none, id, true)
+    end
+    m
+end
+
+"""Release while armed: fire `_move_status!` only if still over same button kind."""
+function _board_commit_or_cancel_arm!(m::AppModel, hit::BoardHit)
+    arm = m.board_hover
+    arm === nothing && return m
+    kind = try arm.kind catch; m.board_hover = nothing; return m end
+    id = arm.issue_id
+    m.board_hover = nothing
+    ok = (kind === :move_prev && hit.kind === board_hit_move_prev && hit.issue_id == id) ||
+         (kind === :move_next && hit.kind === board_hit_move_next && hit.issue_id == id)
+    ok || return m
+    _select_issue!(m, id)
+    _move_status!(m, kind === :move_prev ? -1 : +1)
+    m
+end
+
+"""
+    _handle_board_mouse!(m, evt)
+
+Body: left-press select / second-press open detail.
+Move chrome (B2, 1002 path): press arms hot state; drag updates hot target;
+release on same button kind fires `_move_status!` (ungated — K7); release off
+cancels. Gap (`board_hit_move_chrome`) is a no-op (never opens detail — K11).
+Free-pointer hover (B3 / DECSET 1003) is **not** implemented.
+"""
+function _handle_board_mouse!(m::AppModel, evt::MouseEvent)
+    area = m.board_last_area
+    (area.width < 1 || area.height < 1) && return m
+    lay = board_layout(m, area)
+    hit = board_hit_test(lay, evt.x, evt.y)
+
+    # ── MVP 1002 path: arm / drag / release for move chrome ──
+    if _board_arm_active(m)
+        if evt.button === mouse_left && evt.action === mouse_drag
+            return _board_update_arm_from_hit!(m, hit)
+        elseif evt.button === mouse_left && evt.action === mouse_release
+            return _board_commit_or_cancel_arm!(m, hit)
+        elseif evt.button === mouse_left && evt.action === mouse_press
+            # rare synthetic: commit previous then fall through to new press
+            _board_commit_or_cancel_arm!(m, hit)
+            # fall through
+        else
+            return m
+        end
+    end
+
+    if evt.button === mouse_left && evt.action === mouse_press
+        if hit.kind === board_hit_move_prev || hit.kind === board_hit_move_next
+            hit.issue_id === nothing && return m
+            _select_issue!(m, hit.issue_id)
+            kind = hit.kind === board_hit_move_prev ? :move_prev : :move_next
+            m.board_hover = BoardHoverTarget(kind, hit.issue_id, true)
+            return m
+        elseif hit.kind === board_hit_move_chrome
+            return m   # gap: no-op (do not open detail — K11)
+        elseif hit.kind === board_hit_card_body
+            return _board_body_press!(m, hit)
+        end
+    end
+    m
+end
+
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
 function _wrap_title(t::AbstractString, w::Int, maxlines::Int)
     w <= 0 && return String[]
@@ -401,9 +721,10 @@ Render one rich card's content into a rect; returns nothing. Selected/bulk
 styling applied. `bg` threads a card-surface background through every style
 (the modern bordered card fills its interior); `inline_marker=false` drops the
 leading ▸/space (the modern card draws its arrow on the frame instead).
+`right_reserve` shortens **only the meta chip line** (B2 move buttons).
 """
 function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, selected::Bool;
-                       bg = nothing, inline_marker::Bool = true)
+                       bg = nothing, inline_marker::Bool = true, right_reserve::Int = 0)
     (r.width < 4 || r.height < 1) && return
     stl(; kw...) = bg === nothing ? Style(; kw...) : Style(; kw..., bg = bg)
     bulk = iss.id in m.selected_ids
@@ -419,7 +740,7 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
         pxs = gx + 2
         isempty(pts) || pxs + length(pts) > r.x + r.width || set_string!(buf, pxs, r.y, pts, stl(; fg = col_text_dim()))
     end
-    # line 2-3: wrapped title
+    # line 2-3: wrapped title (full width — buttons live on meta row only)
     if r.height >= 2
         tlines = _wrap_title(iss.title, r.width, min(2, r.height - 1))
         for (i, ln) in enumerate(tlines)
@@ -427,42 +748,70 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
         end
     end
     # line 4: epic / work_type / asset chips / labels / assignee / due
+    # Meta-only right_reserve leaves room for ASCII move buttons (B2).
     if r.height >= 4
         y = r.y + 3
         x = r.x
+        meta_right = r.x + r.width - max(0, right_reserve)
         if iss.epic_id !== nothing
             tag = "◆" * _short(_epic_name(m, iss.epic_id), 7)
-            x + length(tag) <= r.x + r.width && set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
+            x + length(tag) <= meta_right && set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
             x += length(tag) + 1
         end
         if iss.work_type !== nothing
             wt = "⟨" * iss.work_type * "⟩"
-            if x + textwidth(wt) <= r.x + r.width
+            if x + textwidth(wt) <= meta_right
                 set_string!(buf, x, y, wt, stl(; fg = col_warn()))
                 x += textwidth(wt) + 1
             end
         end
         if iss.asset_tag !== nothing
             at = "⚙" * _short(iss.asset_tag, 6)
-            if x + textwidth(at) <= r.x + r.width
+            if x + textwidth(at) <= meta_right
                 set_string!(buf, x, y, at, stl(; fg = col_primary_hi()))
                 x += textwidth(at) + 1
             end
         end
         for lid in iss.labels
             chip = "•"
-            x + 1 <= r.x + r.width && set_string!(buf, x, y, chip, stl(; fg = col_warn()))
+            x + 1 <= meta_right && set_string!(buf, x, y, chip, stl(; fg = col_warn()))
             x += 1
         end
         if iss.assignee_id !== nothing
             ini = _initials(_user_name(m, iss.assignee_id))
-            x + length(ini) <= r.x + r.width && set_string!(buf, x, y, ini, stl(; fg = col_primary_hi()))
+            x + length(ini) <= meta_right && set_string!(buf, x, y, ini, stl(; fg = col_primary_hi()))
             x += length(ini) + 1
         end
         chip, overdue = _due_chip(iss)
-        if !isempty(chip) && x + length(chip) <= r.x + r.width
+        if !isempty(chip) && x + length(chip) <= meta_right
             set_string!(buf, x, y, chip, stl(; fg = overdue ? col_err() : col_text_muted()))
         end
+    end
+end
+
+"""
+Paint ASCII `[<]` / `[>]` on the meta row inside a modern card border.
+Hot state when `board_hover` matches kind+issue_id (armed 1002 path).
+Edge statuses dim with `col_text_muted`. No Unicode arrows.
+"""
+function _paint_card_move_buttons!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue,
+                                   selected::Bool; bordered::Bool = true)
+    btns = _board_btn_rects(r; bordered = bordered)
+    btns === nothing && return
+    card_bg = selected ? col_surface_hi() : col_surface()
+    for (btn_r, label, kind) in ((btns.prev_btn, "[<]", :move_prev),
+                                 (btns.next_btn, "[>]", :move_next))
+        hot = _board_is_hot(m, iss.id, kind)
+        edge = (kind === :move_prev && iss.status == BOARD_STATUSES[1]) ||
+               (kind === :move_next && iss.status == BOARD_STATUSES[end])
+        st = if hot
+            Style(; fg = col_bg(), bg = col_primary_hi(), bold = true)
+        elseif edge
+            Style(; fg = col_text_muted(), bg = card_bg)
+        else
+            Style(; fg = col_text_dim(), bg = card_bg)
+        end
+        set_string!(buf, btn_r.x, btn_r.y, label, st)
     end
 end
 
@@ -470,13 +819,17 @@ _short(s::AbstractString, n::Int) = ellipsize(s, n)
 
 "Main board render (view router calls this when m.view === :board)."
 function render_board!(m::AppModel, buf::Buffer, area::Rect)
+    # B0: cache area for future mouse hit-tests (B1/B2); zero default on AppModel.
+    m.board_last_area = area
     (area.width < 20 || area.height < 6) && return
-    # Optional stats strip at the top (toggle `t`); grid renders below it.
-    if m.show_stats && area.height >= STATS_HEIGHT + 6
-        used = render_board_stats!(m, buf, Rect(area.x, area.y, area.width, STATS_HEIGHT))
-        used > 0 && (area = Rect(area.x, area.y + used, area.width, area.height - used))
+    # Single layout snapshot: paint cards exclusively from layout.slots (acceptance A).
+    layout = board_layout(m, area)
+    # Invariant: show_stats ⇒ area.width ≥ 20 ⇒ render_board_stats! returns STATS_HEIGHT
+    # (never 0). Layout insets by STATS_HEIGHT; must stay aligned with used height.
+    if layout.show_stats
+        render_board_stats!(m, buf, Rect(area.x, area.y, area.width, STATS_HEIGHT))
     end
-    _render_board_grid!(m, buf, area)
+    _render_board_grid!(m, buf, layout)
 end
 
 "Column headers with WIP count/limit."
@@ -493,9 +846,6 @@ function _render_col_headers!(m::AppModel, buf::Buffer, x::Int, y::Int, col_w::I
     end
 end
 
-# ── The bordered card grid ───────────────────────────────────────────────
-const MODERN_CARD_H = 6                      # ╭ + key + 2 title lines + meta + ╰
-
 """
 One bordered task card: rounded frame over a card-surface fill, with the left
 edge tinted by priority. The selected card pops — bright border, raised
@@ -509,7 +859,12 @@ function _render_card_modern!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Iss
     render(Block(; border_style = border), r, buf)
     inner = Rect(r.x + 1, r.y + 1, r.width - 2, r.height - 2)
     set_style!(buf, inner, Style(; bg = bg))
-    _render_card!(m, buf, inner, iss, selected; bg = bg, inline_marker = false)
+    # Meta-only reserve for `[<]`/`[>]` when chrome is wide enough (K3).
+    show_btns = r.width >= BOARD_BTN_MIN_W && r.height >= MODERN_CARD_H
+    meta_reserve = show_btns ? BOARD_BTN_PAIR_W + 1 : 0
+    _render_card!(m, buf, inner, iss, selected; bg = bg, inline_marker = false,
+                  right_reserve = meta_reserve)
+    _paint_card_move_buttons!(m, buf, r, iss, selected; bordered = true)
     if selected
         animations_enabled() && border_shimmer!(buf, r, col_primary_hi(), m.tick; intensity = 0.25)
         set_string!(buf, r.x, r.y + 1, "▸", Style(; fg = col_primary_hi(), bold = true))
@@ -522,20 +877,19 @@ function _render_card_modern!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Iss
 end
 
 """
-The swimlane × status card grid (board render minus the optional stats strip):
-every swimlane is a rounded full-width panel with the lane name set into its
-frame, status columns separated by joined rules, and each card a bordered
-mini-panel (`_render_card_modern!`).
+The swimlane × status card grid from a `BoardLayout` snapshot (board render
+minus the optional stats strip). Lane frames / headers use shared lane metrics;
+**"+N more" and cards derive from `layout.slots`** (no second scroll-window formula).
 """
-function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
-    g = _clamp_selection!(m)
+function _render_board_grid!(m::AppModel, buf::Buffer, layout::BoardLayout)
+    area = layout.grid_area
+    g = board_grid(m)                         # selection already clamped in board_layout
     ncols = length(BOARD_STATUSES)
+    col_w = layout.col_w
     set_string!(buf, area.x, area.y, _short(_filter_line(m), area.width), Style(; fg = col_text_dim()))
 
     grid_y = area.y + 1
     inner_x = area.x + 1                     # lane panels inset content by the frame
-    inner_w = area.width - 2
-    col_w = inner_w ÷ ncols                  # floor-divide: never overruns (finding U4)
     _render_col_headers!(m, buf, inner_x, grid_y, col_w)
 
     nlanes = length(g)
@@ -551,6 +905,11 @@ function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
         set_string!(buf, area.x, y, _short(empty_msg, area.width),
                     Style(; fg = col_text_dim()))
         y += 1
+    end
+    # Index slots by (lane, col) once — drives +N more without re-deriving the window.
+    slots_by_cell = Dict{Tuple{Int,Int},Vector{BoardCardSlot}}()
+    for s in layout.slots
+        push!(get!(() -> BoardCardSlot[], slots_by_cell, (s.lane, s.col)), s)
     end
     frame = Style(; fg = col_text_muted())
     for (li, lane) in enumerate(g)
@@ -573,42 +932,34 @@ function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
                                         Style(; fg = col_text_dim())
             set_string!(buf, area.x + 2, y, _short(" $(lane.name) ($(total)) ", area.width - 4), tstyle)
         end
-        # When the lane interior can't hold a full bordered card, degrade to the
-        # flat card so the cursor card is never invisible while ops
-        # still target it (finding U5; verifier W1). Bordered slots always fit
-        # whole cards (max_cards = inner_h ÷ MODERN_CARD_H), so `hidden` counts
-        # exactly the cards not drawn in either mode.
-        inner_h = lh - 2
-        bordered = inner_h >= MODERN_CARD_H
-        card_h = bordered ? MODERN_CARD_H : clamp(inner_h, 1, 4)
-        max_cards = max(1, inner_h ÷ card_h)
+        # "+N more" from layout.slots (last shown idx + bottom of last slot rect).
         for (ci, cell) in enumerate(lane.cols)
-            cx = inner_x + (ci - 1) * col_w
-            sel_here = (li == m.sel_lane && ci == m.sel_col)
-            # scroll-follow: the cursor card is always rendered (finding U5)
-            start = (sel_here && m.sel_idx > max_cards) ? (m.sel_idx - max_cards + 1) : 1
-            last = min(length(cell), start + max_cards - 1)
-            slot = 0
-            for k in start:last
-                cy = y + 1 + slot * card_h
-                ch = min(card_h, y + lh - 1 - cy)          # clip to the lane interior
-                ch < 1 && break
-                sel = (sel_here && k == m.sel_idx)
-                if bordered
-                    _render_card_modern!(m, buf, Rect(cx, cy, col_w - 1, ch), cell[k], sel)
-                else
-                    _render_card!(m, buf, Rect(cx, cy, col_w - 1, ch), cell[k], sel)
-                end
-                slot += 1
-            end
-            hidden = length(cell) - last
-            if hidden > 0
-                my = y + 1 + slot * card_h
-                my <= y + lh - 2 &&
-                    set_string!(buf, cx, my, _short("+$(hidden) more", col_w - 1), Style(; fg = col_text_muted()))
-            end
+            col_slots = get(slots_by_cell, (li, ci), BoardCardSlot[])
+            isempty(col_slots) && continue
+            last_idx = maximum(s.idx for s in col_slots)
+            hidden = length(cell) - last_idx
+            hidden <= 0 && continue
+            bot = maximum(s.rect.y + s.rect.height for s in col_slots)
+            my = bot
+            cx = col_slots[1].rect.x
+            my <= y + lh - 2 &&
+                set_string!(buf, cx, my, _short("+$(hidden) more", col_w - 1), Style(; fg = col_text_muted()))
         end
         y += lh
+    end
+    # Acceptance A: paint cards exclusively from layout.slots.
+    # Resolve Issue from the in-memory grid by (lane,col,idx) — no N× store get_issue.
+    for s in layout.slots
+        cell = _cell(g, s.lane, s.col)
+        (1 <= s.idx <= length(cell)) || continue
+        iss = cell[s.idx]
+        iss.id == s.issue_id || continue      # layout/grid must agree
+        sel = (s.lane == m.sel_lane && s.col == m.sel_col && s.idx == m.sel_idx)
+        if s.bordered
+            _render_card_modern!(m, buf, s.rect, iss, sel)
+        else
+            _render_card!(m, buf, s.rect, iss, sel)
+        end
     end
 end
 

@@ -88,6 +88,7 @@ end
 # ── Opening / closing modals (set focus + which issue) ──────────────────────
 function _open_card_detail!(m::AppModel)
     iss = selected_issue(m); iss === nothing && return m
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = iss.id
     m.modal = :card_detail
     set_text!(m.comment_input, "")
@@ -104,6 +105,7 @@ function _open_card_edit!(m::AppModel; create::Bool = false, due_prefill = nothi
     else
         can!(m, :edit_issue; resource = iss) || return m
     end
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = create ? nothing : iss.id
     m.edit_form = _build_edit_form(m, iss)
     due_prefill === nothing || set_date_text!(m.edit_form.due_input, string(due_prefill))
@@ -121,6 +123,7 @@ own selection rather than the board grid). No-op when `iss === nothing`.
 """
 function _open_detail_issue!(m::AppModel, iss)
     iss === nothing && return m
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = iss.id
     m.modal = :card_detail
     set_text!(m.comment_input, "")
@@ -139,6 +142,7 @@ function _open_edit_issue!(m::AppModel, iss)
     iss === nothing && return m
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :edit_issue; resource = iss) || return m
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = iss.id
     m.edit_form = _build_edit_form(m, iss)
     m.modal = :card_edit
@@ -295,6 +299,7 @@ function _request_delete_one!(m::AppModel)
     iss = selected_issue(m); iss === nothing && return m
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :delete_issue) || return m
+    _clear_board_mouse_ui!(m)
     m.confirm_kind = :delete_one; m.confirm_target = iss.id
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -308,6 +313,7 @@ function _request_bulk_delete!(m::AppModel)
     isempty(targets) && (m.message = "No visible selected issues to delete"; return m)
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :delete_issue) || return m
+    _clear_board_mouse_ui!(m)
     m.confirm_kind = :bulk_delete; m.confirm_target = targets
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -352,6 +358,7 @@ end
 
 # ── Search ──────────────────────────────────────────────────────────────────
 function _open_search!(m::AppModel)
+    _clear_board_mouse_ui!(m)
     m.modal = :search
     m.focus = FocusState(Any[m.search_input]; active = true)
     m
@@ -370,6 +377,7 @@ end
 function _open_new_sprint!(m::AppModel)
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :manage_sprint) || return m
+    _clear_board_mouse_ui!(m)
     set_text!(m.sprint_name_input, ""); set_text!(m.sprint_goal_input, "")
     m.modal = :new_sprint
     m.focus = FocusState(Any[m.sprint_name_input, m.sprint_goal_input]; active = true)
@@ -437,33 +445,114 @@ function _modal_box(content_area::Rect, w::Int, h::Int, title::String, buf::Buff
                  title_style = Style(; fg = col_primary(), bold = true)), r, buf)
 end
 
+# ── Card detail v2 layout: ticket strip (chips + flowing meta) ───────────
+# Intentionally *not* a two-column form: status/priority are raised chips,
+# secondary facts are a prose-style middot line, sections use dashed rules.
+
+function _pretty_due(d::Union{Nothing,Date})
+    d === nothing && return "—"
+    Dates.format(d, dateformat"u d, yyyy")
+end
+
+"""
+Paint a chip `[ label ]` at (x,y). Returns next free x (after gap).
+
+No surface/surface_hi background — those colors are reserved for board cards
+and the no-bleed test treats them as board chrome leaking through the modal.
+"""
+function _detail_chip!(buf::Buffer, x::Int, y::Int, lim::Int, label::AbstractString;
+                       fg = col_primary_hi())
+    text = "[" * label * "]"
+    tw = textwidth(text)
+    x + tw > lim && return lim
+    set_string!(buf, x, y, text, Style(; fg = fg, bold = true))
+    return x + tw + 1
+end
+
+"""
+Paint a dashed section rule: `── Title ────…`. Returns y+1.
+"""
+function _detail_rule!(buf::Buffer, x::Int, y::Int, maxy::Int, iw::Int, title::AbstractString)
+    y > maxy && return y
+    # "── Title ──…"
+    head = "── " * title * " "
+    rest = max(0, iw - textwidth(head))
+    line = head * repeat("─", rest)
+    set_string!(buf, x, y, _short(line, iw), Style(; fg = col_primary()))
+    return y + 1
+end
+
+"Join non-empty fragments with middots; paint one flowing line."
+function _detail_flow!(buf::Buffer, x::Int, y::Int, iw::Int, parts::Vector{String};
+                       style::Style = Style(; fg = col_text_dim()))
+    isempty(parts) && return y
+    line = join(parts, "  ·  ")
+    set_string!(buf, x, y, _short(line, iw), style)
+    return y + 1
+end
+
 function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
     id = m.card_issue_id
     iss = id === nothing ? nothing : Stores.get_issue(m.boardstore, id)
     iss === nothing && return
-    # Compact, centered panel (not a near-fullscreen sheet). Color-rect bleed is
-    # killed by the full content_area clear + set_style!(RESET) in view; these
-    # caps only control the panel size/margins.
-    w = clamp(min(64, content_area.width - 10), 30, content_area.width)
-    h = clamp(min(16, content_area.height - 6), 10, content_area.height)
-    inner = _modal_box(content_area, w, h, "$(iss.key) — Enter comment, Esc close", buf)
+    # Compact, centered ticket panel (not a near-fullscreen sheet).
+    # Color-rect bleed is killed by content_area clear + RESET in view.
+    w = clamp(min(66, content_area.width - 8), 34, content_area.width)
+    h = clamp(min(18, content_area.height - 4), 12, content_area.height)
+    inner = _modal_box(content_area, w, h, "$(iss.key)  ·  Enter comment  ·  Esc close", buf)
     x = inner.x + 1; y = inner.y + 1; maxy = inner.y + inner.height - 1
-    set_string!(buf, x, y, _short(iss.title, inner.width - 2), Style(; fg = col_text(), bold = true)); y += 1
-    meta = "Status:$(iss.status)  Prio:$(iss.priority)  " *
-           (iss.story_points === nothing ? "" : "$(iss.story_points)sp  ") *
-           "Epic:$(_epic_name(m, iss.epic_id))"
-    set_string!(buf, x, y, _short(meta, inner.width - 2), Style(; fg = col_text_dim())); y += 1
-    # Work-order block (design §4.4): ASSET / LOCATION / TYPE / EST HRS when any set.
-    if iss.asset_tag !== nothing || iss.location !== nothing || iss.work_type !== nothing ||
-       iss.story_points !== nothing
-        wo = "ASSET:$(something(iss.asset_tag, "—"))  LOCATION:$(something(iss.location, "—"))  " *
-             "TYPE:$(something(iss.work_type, "—"))  EST HRS:$(something(iss.story_points, "—"))"
-        set_string!(buf, x, y, _short(wo, inner.width - 2), Style(; fg = col_text_muted())); y += 1
+    iw = inner.width - 2
+    lim = x + iw
+
+    # ── Title (hero) ──────────────────────────────────────────────────
+    set_string!(buf, x, y, _short(iss.title, iw), Style(; fg = col_text(), bold = true)); y += 1
+
+    # ── Chip strip: status + priority (+ hours if present) ─────────────
+    if y <= maxy
+        cx = x
+        cx = _detail_chip!(buf, cx, y, lim, iss.status; fg = col_primary_hi())
+        cx = _detail_chip!(buf, cx, y, lim, iss.priority;
+                           fg = priority_color(iss.priority))
+        if iss.story_points !== nothing
+            hrs = string(iss.story_points) * " hrs"
+            cx = _detail_chip!(buf, cx, y, lim, hrs; fg = col_text_dim())
+        end
+        y += 1
     end
+
+    # ── Flowing meta: assignee · due · epic · start ────────────────────
     asg = iss.assignee_id === nothing ? "Unassigned" : _user_name(m, iss.assignee_id)
-    due = iss.due_date === nothing ? "—" : string(iss.due_date)
-    set_string!(buf, x, y, _short("Assignee:$(asg)  Due:$(due)", inner.width - 2), Style(; fg = col_text_dim())); y += 1
-    # G6b: read-only blocks / blocked-by summary (create/delete via Gantt L/U)
+    overdue = iss.due_date !== nothing && iss.due_date < Dates.today() && iss.status != "Done"
+    due_s = iss.due_date === nothing ? nothing : ("Due " * _pretty_due(iss.due_date))
+    meta = String[asg]
+    due_s !== nothing && push!(meta, due_s)
+    if iss.epic_id !== nothing
+        push!(meta, _epic_name(m, iss.epic_id))
+    end
+    if iss.start_date !== nothing
+        push!(meta, "starts " * _pretty_due(iss.start_date))
+    end
+    if y <= maxy
+        # Overdue: repaint whole flow line in err so the due date stands out
+        st = overdue ? Style(; fg = col_err()) : Style(; fg = col_text_dim())
+        y = _detail_flow!(buf, x, y, iw, meta; style = st)
+    end
+
+    # ── Work order (inline, only when asset / location / type set) ─────
+    has_wo = iss.asset_tag !== nothing || iss.location !== nothing || iss.work_type !== nothing
+    if has_wo && y <= maxy
+        y = _detail_rule!(buf, x, y, maxy, iw, "WORK ORDER")
+        wo = String[]
+        iss.asset_tag !== nothing && push!(wo, "Asset " * iss.asset_tag)
+        iss.location !== nothing && push!(wo, iss.location)
+        iss.work_type !== nothing && push!(wo, iss.work_type)
+        # hours already on chip strip when present; still echo if only hours
+        # would be lonely here — skip
+        y <= maxy && (y = _detail_flow!(buf, x, y, iw, wo;
+                                         style = Style(; fg = col_primary_hi())))
+    end
+
+    # ── Links (G6b) ───────────────────────────────────────────────────
     if y <= maxy
         lnks = Stores.list_links(m.boardstore; issue_id = iss.id, kind = "blocks")
         if !isempty(lnks)
@@ -479,36 +568,47 @@ function render_card_detail!(m::AppModel, buf::Buffer, content_area::Rect)
                 end
             end
             parts = String[]
-            isempty(out_keys) || push!(parts, "blocks→" * join(out_keys, ","))
-            isempty(in_keys) || push!(parts, "blocked←" * join(in_keys, ","))
+            isempty(out_keys) || push!(parts, "blocks " * join(out_keys, ", "))
+            isempty(in_keys) || push!(parts, "blocked by " * join(in_keys, ", "))
             if !isempty(parts)
-                set_string!(buf, x, y, _short("Links: " * join(parts, "  "), inner.width - 2),
-                            Style(; fg = col_text_muted())); y += 1
+                y = _detail_flow!(buf, x, y, iw, parts;
+                                  style = Style(; fg = col_text_muted()))
             end
         end
     end
-    if !isempty(iss.description)
-        set_string!(buf, x, y, _short(iss.description, inner.width - 2), Style(; fg = col_text())); y += 1
+
+    # ── Description (no heavy banner — just body under a thin rule) ────
+    if !isempty(iss.description) && y + 1 <= maxy
+        y = _detail_rule!(buf, x, y, maxy, iw, "Notes")
+        y <= maxy && (set_string!(buf, x, y, _short(iss.description, iw),
+                                  Style(; fg = col_text())); y += 1)
     end
-    # comments
-    y += 1; y <= maxy && (set_string!(buf, x, y, "COMMENTS", Style(; fg = col_primary(), bold = true)); y += 1)
+
+    # ── Comments ──────────────────────────────────────────────────────
+    if y <= maxy
+        y = _detail_rule!(buf, x, y, maxy, iw, "COMMENTS")
+    end
     for c in Stores.list_comments(m.boardstore, iss.id)
         y > maxy - 3 && break
         who = _user_name(m, c.author_id)
-        set_string!(buf, x, y, _short("• $(who): $(c.body)", inner.width - 2), Style(; fg = col_text())); y += 1
+        set_string!(buf, x, y, _short(who * "  ·  " * c.body, iw),
+                    Style(; fg = col_text())); y += 1
     end
-    # activity tail
+
+    # ── Activity tail ─────────────────────────────────────────────────
     acts = Stores.list_activity(m.boardstore, iss.id)
     if !isempty(acts) && y <= maxy - 2
-        set_string!(buf, x, y, "ACTIVITY", Style(; fg = col_primary(), bold = true)); y += 1
+        y = _detail_rule!(buf, x, y, maxy, iw, "ACTIVITY")
         for a in acts[max(1, end - 2):end]
             y > maxy - 1 && break
-            set_string!(buf, x, y, _short("· $(a.kind): $(a.detail)", inner.width - 2), Style(; fg = col_text_muted())); y += 1
+            set_string!(buf, x, y, _short(string(a.kind) * "  ·  " * a.detail, iw),
+                        Style(; fg = col_text_muted())); y += 1
         end
     end
+
     # comment input on the last line
     set_string!(buf, x, maxy, "> ", Style(; fg = col_primary()))
-    render(m.comment_input, Rect(x + 2, maxy, inner.width - 4, 1), buf)
+    render(m.comment_input, Rect(x + 2, maxy, max(1, inner.width - 4), 1), buf)
 end
 
 function render_card_edit!(m::AppModel, buf::Buffer, content_area::Rect)

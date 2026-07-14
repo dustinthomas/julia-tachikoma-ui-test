@@ -58,7 +58,7 @@ typ!(m, s) = (for ch in collect(s); u!(m, ch); end)
         @test occursin("PMP", joined) || occursin("PMP-9", joined)
     end
 
-    @testset "Given WO When detail opens Then ASSET/LOCATION/TYPE/EST HRS block shows" begin
+    @testset "Given WO When detail opens Then work-order flow + chips show" begin
         m = _login_wo("Detail")
         iss = Qm.Stores.create_issue!(m.boardstore; title = "ZzDetailWO",
                                       asset_tag = "LATHE-1", location = "Bay 1",
@@ -68,11 +68,14 @@ typ!(m, s) = (for ch in collect(s); u!(m, ch); end)
         u!(m, 'v')
         @test m.modal == :card_detail
         tb = app_tb(m; w = 100, h = 30)
-        @test T.find_text(tb, "ASSET:") !== nothing
+        @test T.find_text(tb, "WORK ORDER") !== nothing
+        @test T.find_text(tb, "Asset") !== nothing || T.find_text(tb, "LATHE-1") !== nothing
         @test T.find_text(tb, "LATHE-1") !== nothing
-        @test T.find_text(tb, "LOCATION:") !== nothing || T.find_text(tb, "Bay 1") !== nothing
-        @test T.find_text(tb, "TYPE:") !== nothing || T.find_text(tb, "Safety") !== nothing
-        @test T.find_text(tb, "EST HRS:") !== nothing || T.find_text(tb, "2") !== nothing
+        @test T.find_text(tb, "Bay 1") !== nothing
+        @test T.find_text(tb, "Safety") !== nothing
+        # hours live on the chip strip as "2 hrs"
+        rows = app_rows(m; w = 100, h = 30)
+        @test occursin("2 hrs", join(rows, "\n")) || T.find_text(tb, "2") !== nothing
         u!(m, :escape)
     end
 
