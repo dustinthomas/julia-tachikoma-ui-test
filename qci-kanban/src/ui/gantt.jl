@@ -1368,6 +1368,19 @@ end
 
 # ═══════════════════════════ LAYOUT (G4.1) ═══════════════════════════════════
 """
+Absolute terminal geometry for the title-row stretch affordance glyphs `[+][-]`.
+Right-aligned in the content area when the frame is not narrow. Shared by paint
+and hit-test so click boxes never drift from painted cells.
+"""
+struct GanttStretchBtns
+    y::Int        # title row (= area.y)
+    in_x0::Int    # inclusive absolute x of first cell of [+]
+    in_x1::Int    # inclusive end of [+]
+    out_x0::Int   # inclusive absolute x of first cell of [-]
+    out_x1::Int   # inclusive end of [-]
+end
+
+"""
 Snapshot of Gantt chart geometry for a given AppModel + content Rect.
 Built by pure computation from m + area (same formulas as `render_gantt!`).
 Introduced in G4.1; consumed by paint (and later by hit-testing).
@@ -1404,6 +1417,7 @@ struct GanttLayout
     ruler_rows::Int           # axis strip rows only (tab+tick; quarter counted separately)
     paint_weekends::Bool
     paint_week_seps::Bool
+    stretch_btns::Union{Nothing,GanttStretchBtns}  # nothing when narrow / not painted
 end
 
 """
@@ -1485,12 +1499,21 @@ function gantt_layout(m::AppModel, area::Rect;
     paint_weekends = m.gantt_scale !== :month
     paint_week_seps = m.gantt_scale !== :month
 
+    # Title stretch buttons `[+][-]` (6 cells), right-aligned — only when wide enough
+    # that paint shows them (`!is_narrow` ⇔ area.width ≥ 60).
+    stretch_btns = if !is_narrow && area.width >= 6
+        x0 = area.x + area.width - 6
+        GanttStretchBtns(area.y, x0, x0 + 2, x0 + 3, x0 + 5)
+    else
+        nothing
+    end
+
     GanttLayout(area, left_w, chart_x, physical_ncols, view_ncols, label_ncols,
                 dpc, cols_per_day, paint_ncols, m.gantt_scale, win_start, is_narrow, compact,
                 has_ruler, has_dual, has_quarter, has_footer,
                 band_y, quarter_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
                 nshow, row_stride, row_start, footer_y, ruler_rows,
-                paint_weekends, paint_week_seps)
+                paint_weekends, paint_week_seps, stretch_btns)
 end
 
 # ═══════════════════════════ HIT-TEST (M1) ═══════════════════════════════════
@@ -1507,6 +1530,9 @@ Shared metrics with paint via `GanttLayout` — no render-side side effects.
     gantt_hit_axis        # period tab / tick row
     gantt_hit_band        # sprint band row
     gantt_hit_empty_chart # chart background / wash only
+    # Append-only: title stretch affordances (PR3). Order after existing variants for stability.
+    gantt_hit_stretch_in  # title [+] → _gantt_stretch!(m, +1)
+    gantt_hit_stretch_out # title [-] → _gantt_stretch!(m, -1)
 end
 
 """
@@ -1549,6 +1575,17 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
     if x < area.x || x >= area.x + area.width ||
        y < area.y || y >= area.y + area.height
         return _GANTT_HIT_NONE
+    end
+
+    # Title row stretch buttons (above band). Rest of title is non-interactive.
+    sb = layout.stretch_btns
+    if sb !== nothing && y == sb.y
+        if sb.in_x0 <= x <= sb.in_x1
+            return GanttHit(gantt_hit_stretch_in, nothing, nothing, nothing, nothing, nothing)
+        elseif sb.out_x0 <= x <= sb.out_x1
+            return GanttHit(gantt_hit_stretch_out, nothing, nothing, nothing, nothing, nothing)
+        end
+        # else fall through — non-button title cells → none at end
     end
 
     # Band (sprint strip under title)
@@ -1851,12 +1888,16 @@ function _handle_gantt_mouse!(m::AppModel, evt::MouseEvent)
         return _gantt_scroll!(m, dir)
     end
 
-    # M1 select + M3 drag start on left press
+    # M1 select + M3 drag start on left press; title stretch buttons (PR3).
     (evt.button === mouse_left && evt.action === mouse_press) || return m
     rows = gantt_rows(m)
     lay = gantt_layout(m, area; rows = rows)
     hit = gantt_hit_test(lay, rows, evt.x, evt.y)
-    if hit.kind === gantt_hit_left_rail
+    if hit.kind === gantt_hit_stretch_in
+        return _gantt_stretch!(m, +1)
+    elseif hit.kind === gantt_hit_stretch_out
+        return _gantt_stretch!(m, -1)
+    elseif hit.kind === gantt_hit_left_rail
         hit.row_index === nothing && return m
         rows[hit.row_index].kind === :epic && return m
         hit.issue_id === nothing && return m
@@ -1950,10 +1991,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         base = base * " · $(win_n)"
     end
     title = base
-    # Stretch affordance glyphs (paint-only in PR2; hit-test in PR3). Right-aligned.
-    # `!is_narrow` already implies area.width ≥ 60 (narrow threshold).
+    # Stretch affordance glyphs from layout snapshot (paint + hit-test share geometry).
     btns = "[+][-]"
-    show_btns = !is_narrow
+    show_btns = lay.stretch_btns !== nothing
     title_budget = show_btns ? max(1, area.width - textwidth(btns)) : area.width
     if ncols >= 10
         leg = if !is_narrow && area.width >= 90
@@ -1973,8 +2013,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 _short(title, title_budget),
                 Style(; fg = col_primary(), bold = true))
     if show_btns
-        set_string!(buf, area.x + area.width - textwidth(btns), area.y, btns,
-                    Style(; fg = col_text_dim()))
+        sb = lay.stretch_btns
+        set_string!(buf, sb.in_x0, sb.y, btns, Style(; fg = col_text_dim()))
     end
 
     # z1 — alternating period wash on band (under weekend + sprint); expand logical → physical

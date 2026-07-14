@@ -2596,7 +2596,7 @@ end
                 lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
                 lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, nshow_g,
                 2, lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows,
-                lay_w.paint_weekends, lay_w.paint_week_seps)
+                lay_w.paint_weekends, lay_w.paint_week_seps, nothing)
             gap_y = lay_gap.grid_y0 + 1
             hit_gap = G4.gantt_hit_test(lay_gap, rows, lay_gap.chart_x + 2, gap_y)
             @test hit_gap.kind === G4.gantt_hit_empty_chart
@@ -2612,7 +2612,7 @@ end
                 lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
                 lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, nshow_g,
                 2, lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows,
-                lay_w.paint_weekends, lay_w.paint_week_seps)
+                lay_w.paint_weekends, lay_w.paint_week_seps, nothing)
             @test G4.gantt_hit_test(lay_gap_narrow, rows, lay_w.chart_x + 5, gap_y).kind ===
                   G4.gantt_hit_none
         end
@@ -2636,7 +2636,7 @@ end
             lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
             lay_w.ruler_y, lay_w.grid_y0, lay_w.content_start, lay_w.nshow,
             lay_w.row_stride, lay_w.row_start, lay_w.footer_y, lay_w.ruler_rows,
-            lay_w.paint_weekends, lay_w.paint_week_seps)
+            lay_w.paint_weekends, lay_w.paint_week_seps, nothing)
         # x far enough that col >= physical_ncols=2 but still inside area (content y)
         hit_far = G4.gantt_hit_test(lay_def, rows, lay_w.chart_x + 5, lay_w.grid_y0)
         @test hit_far.kind === G4.gantt_hit_none
@@ -3421,6 +3421,140 @@ end
         lay_hi = G4.gantt_layout(m, T.Rect(1, 1, 120, 20))
         @test lay_hi.cols_per_day > lay_lo.cols_per_day
         @test lay_hi.view_ncols < lay_lo.view_ncols || lay_hi.cols_per_day >= lay_lo.cols_per_day
+    end
+
+    # ── PR3: clickable title stretch buttons ───────────────────────────────
+    @testset "PR3 stretch buttons: layout geom, hit-test, click, wheel no-stretch" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "BtnEp")
+        near = G4.Stores.create_issue!(m.boardstore; title = "BtnNear", epic_id = e.id,
+                                       start_date = Dates.today() - Day(1),
+                                       due_date = Dates.today() + Day(3))
+        far = G4.Stores.create_issue!(m.boardstore; title = "BtnFar", epic_id = e.id,
+                                      start_date = Dates.today() + Day(40),
+                                      due_date = Dates.today() + Day(45))
+        g4!(m, 'G')
+        @test m.gantt_scale === :day
+        @test m.gantt_win_day == G4.GANTT_DAY_VIEW_WINDOW
+
+        # Wide: stretch_btns present and right-aligned 6 cells
+        area_w = T.Rect(1, 1, 120, 20)
+        rows = G4.gantt_rows(m)
+        lay_w = G4.gantt_layout(m, area_w; rows = rows)
+        @test !lay_w.is_narrow
+        @test lay_w.stretch_btns !== nothing
+        sb = lay_w.stretch_btns
+        @test sb.y == area_w.y
+        @test sb.in_x0 == area_w.x + area_w.width - 6
+        @test sb.in_x1 == sb.in_x0 + 2
+        @test sb.out_x0 == sb.in_x0 + 3
+        @test sb.out_x1 == sb.in_x0 + 5
+
+        # Narrow: no stretch buttons
+        area_n = T.Rect(1, 1, 50, 16)
+        lay_n = G4.gantt_layout(m, area_n; rows = rows)
+        @test lay_n.is_narrow
+        @test lay_n.stretch_btns === nothing
+
+        # Pure hit-test: [+] → stretch_in, [-] → stretch_out, rest of title → none
+        hit_plus = G4.gantt_hit_test(lay_w, rows, sb.in_x0 + 1, sb.y)
+        @test hit_plus.kind === G4.gantt_hit_stretch_in
+        hit_minus = G4.gantt_hit_test(lay_w, rows, sb.out_x0 + 1, sb.y)
+        @test hit_minus.kind === G4.gantt_hit_stretch_out
+        hit_title_mid = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x, area_w.y)
+        @test hit_title_mid.kind === G4.gantt_hit_none
+        # Narrow title never stretch even at right edge
+        hit_n = G4.gantt_hit_test(lay_n, rows, area_n.x + area_n.width - 2, area_n.y)
+        @test hit_n.kind === G4.gantt_hit_none
+
+        # Paint: buttons visible; click [+] via handler
+        tb0 = gantt_render(m; w = 120, h = 20)
+        title0 = something(T.row_text(tb0, 1), "")
+        @test occursin("[+]", title0) && occursin("[-]", title0)
+        m.gantt_last_area = area_w
+        win0 = m.gantt_win_day
+        click_plus = T.MouseEvent(sb.in_x0 + 1, sb.y, T.mouse_left, T.mouse_press,
+                                  false, false, false)
+        G4._handle_gantt_mouse!(m, click_plus)
+        @test m.gantt_win_day == win0 - 1
+        @test m.message == "Gantt stretch [day]: window $(win0 - 1)"
+        tb1 = gantt_render(m; w = 120, h = 20)
+        title1 = something(T.row_text(tb1, 1), "")
+        @test occursin("[day]", title1)
+        @test occursin(" · $(win0 - 1)", title1) || occursin("· $(win0 - 1)", title1)
+        @test occursin("[+]", title1) && occursin("[-]", title1)
+
+        # Click [-] restores; re-render badge
+        lay1 = G4.gantt_layout(m, area_w; rows = G4.gantt_rows(m))
+        sb1 = lay1.stretch_btns
+        @test sb1 !== nothing
+        click_minus = T.MouseEvent(sb1.out_x0 + 1, sb1.y, T.mouse_left, T.mouse_press,
+                                   false, false, false)
+        G4._handle_gantt_mouse!(m, click_minus)
+        @test m.gantt_win_day == win0
+        @test m.message == "Gantt stretch [day]: window $(win0)"
+        tb2 = gantt_render(m; w = 120, h = 20)
+        @test occursin(" · $(win0)", something(T.row_text(tb2, 1), "")) ||
+              occursin("· $(win0)", something(T.row_text(tb2, 1), ""))
+
+        # Click stretch saves prefs
+        @test isfile(G4._gantt_ui_prefs_path(m))
+        @test occursin("win_day = $(win0)", read(G4._gantt_ui_prefs_path(m), String))
+
+        # Drag cancelled on stretch click
+        m.gantt_drag = (issue_id = near.id, mode = :body, origin_col = 0,
+                        orig_start = near.start_date, orig_due = near.due_date,
+                        preview_start = near.start_date, preview_due = near.due_date)
+        G4._handle_gantt_mouse!(m, click_plus)
+        @test m.gantt_drag === nothing
+        @test m.gantt_win_day == win0 - 1
+        tb_d = gantt_render(m; w = 120, h = 20)
+        @test occursin("[day]", something(T.row_text(tb_d, 1), ""))
+
+        # Ensure-visible after stretch-in click (far selected)
+        G4.gantt_set_view_window!(m, :day, 40)
+        G4._gantt_select_issue_id!(m, far.id)
+        m.gantt_start = Dates.today() - Day(1)
+        m.gantt_last_area = area_w
+        lay_f = G4.gantt_layout(m, area_w)
+        sbf = lay_f.stretch_btns
+        G4._handle_gantt_mouse!(m, T.MouseEvent(sbf.in_x0, sbf.y, T.mouse_left,
+                                                T.mouse_press, false, false, false))
+        @test m.gantt_win_day == 39
+        dpc = G4.gantt_days_per_col(:day)
+        span = G4.gantt_issue_span(far)
+        win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), dpc,
+                                          G4.gantt_view_window(m), span)
+        @test G4.gantt_bar_in_window(win, dpc, G4.gantt_view_window(m), span[1], span[2])
+        tb_f = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb_f, far.key) !== nothing
+
+        # Wheel still scrolls only — never stretch (window + scale unchanged by wheel)
+        G4.gantt_set_view_window!(m, :day, 14)
+        m.gantt_scale = :day
+        m.gantt_last_area = area_w
+        st0 = m.gantt_start
+        win_w = m.gantt_win_day
+        week_w = m.gantt_win_week
+        month_w = m.gantt_win_month
+        step = Day(G4.gantt_scroll_days(m.gantt_scale))
+        cx = area_w.x + area_w.width ÷ 2
+        cy = area_w.y + area_w.height ÷ 2
+        G4._handle_gantt_mouse!(m, T.MouseEvent(cx, cy, T.mouse_scroll_down, T.mouse_press,
+                                                false, false, false))
+        @test m.gantt_start == st0 + step
+        @test m.gantt_win_day == win_w
+        @test m.gantt_win_week == week_w
+        @test m.gantt_win_month == month_w
+        @test m.gantt_scale === :day
+        # Wheel on title row / button x also must not stretch
+        G4._handle_gantt_mouse!(m, T.MouseEvent(sb.in_x0 + 1, sb.y, T.mouse_scroll_up,
+                                                T.mouse_press, false, false, false))
+        @test m.gantt_start == st0
+        @test m.gantt_win_day == win_w
+        tb_wh = gantt_render(m; w = 120, h = 20)
+        @test occursin(" · 14", something(T.row_text(tb_wh, 1), "")) ||
+              occursin("· 14", something(T.row_text(tb_wh, 1), ""))
     end
 end
 

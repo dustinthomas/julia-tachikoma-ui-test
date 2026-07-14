@@ -8,7 +8,9 @@
 #   • Login / modal / non-gantt / empty gantt_last_area ignore mouse
 #   M2 wheel scroll:
 #   • mouse_scroll_up/down over gantt body → _gantt_scroll!(±1); advances gantt_start
-#   • No zoom on wheel; keyboard h/l remain first-class
+#   • No zoom / stretch on wheel; keyboard h/l remain first-class
+#   PR3 title stretch buttons:
+#   • Left-press on title [+] / [-] → _gantt_stretch!(±1); wheel never stretch
 #   M3 drag-reschedule:
 #   • Drag bar body shifts start/due in store (duration preserved)
 #   • Denied role (viewer + enforce_roles) does not write
@@ -241,18 +243,22 @@ end
         step = Day(GM.gantt_scroll_days(m.gantt_scale))
 
         @testset "When wheel-down over body Then gantt_start advances one scroll step" begin
+            win_before = m.gantt_win_day
             T.update!(m, gm_wheel(cx, cy, T.mouse_scroll_down))
             @test m.gantt_start == st0 + step
             @test m.gantt_scale === scale0   # no zoom
+            @test m.gantt_win_day == win_before  # wheel never stretch
             @test m.modal === :none
             # message matches keyboard scroll helper
             @test occursin("Gantt window from", something(m.message, ""))
         end
 
         @testset "When wheel-up over body Then gantt_start returns one step" begin
+            win_before = m.gantt_win_day
             T.update!(m, gm_wheel(cx, cy, T.mouse_scroll_up))
             @test m.gantt_start == st0
             @test m.gantt_scale === scale0
+            @test m.gantt_win_day == win_before
         end
 
         @testset "When keyboard h/l used after wheel Then they remain first-class" begin
@@ -291,6 +297,76 @@ end
             @test m.gantt_sel == 1
             @test m.modal === :none
             @test m.gantt_start == st0
+        end
+    end
+end
+
+@testset "FEATURE: Gantt title stretch buttons (PR3 BDD)" begin
+
+    @testset "Given wide Gantt When user clicks title [+] then [-] Then window stretches" begin
+        m = gmlogin()
+        e = GM.Stores.create_epic!(m.boardstore; name = "StretchBtnRoadmap")
+        GM.Stores.create_issue!(m.boardstore; title = "StretchBtnBar", epic_id = e.id,
+                                start_date = Dates.today() - Day(1),
+                                due_date = Dates.today() + Day(4))
+        gm!(m, 'G')
+        @test m.view === :gantt
+        @test m.gantt_scale === :day
+        @test m.gantt_win_day == 14
+        W, H = 120, 28
+        tb = app_tb(m; w = W, h = H)
+        area = m.gantt_last_area
+        @test area.width >= 60
+        lay = GM.gantt_layout(m, area)
+        @test lay.stretch_btns !== nothing
+        sb = lay.stretch_btns
+        # Title row is area.y in full-app chrome (not necessarily terminal row 1).
+        title = something(T.row_text(tb, sb.y), "")
+        @test occursin("[+]", title) && occursin("[-]", title)
+        @test occursin("[day]", title)
+        @test occursin(" · 14", title) || occursin("· 14", title)
+
+        @testset "When left-click [+] Then day window shrinks by step and message updates" begin
+            T.update!(m, gm_click(sb.in_x0 + 1, sb.y))
+            @test m.gantt_win_day == 13
+            @test m.message == "Gantt stretch [day]: window 13"
+            @test m.modal === :none
+            tb2 = app_tb(m; w = W, h = H)
+            title2 = something(T.row_text(tb2, sb.y), "")
+            @test occursin("[day]", title2)
+            @test occursin(" · 13", title2) || occursin("· 13", title2)
+            @test occursin("[+]", title2) && occursin("[-]", title2)
+        end
+
+        @testset "When left-click [-] Then day window restores" begin
+            # re-layout after stretch (button x stable when area fixed)
+            lay2 = GM.gantt_layout(m, m.gantt_last_area)
+            sb2 = lay2.stretch_btns
+            @test sb2 !== nothing
+            T.update!(m, gm_click(sb2.out_x0 + 1, sb2.y))
+            @test m.gantt_win_day == 14
+            @test m.message == "Gantt stretch [day]: window 14"
+            tb3 = app_tb(m; w = W, h = H)
+            title3 = something(T.row_text(tb3, sb2.y), "")
+            @test occursin(" · 14", title3) || occursin("· 14", title3)
+        end
+
+        @testset "When wheel over body after click Then scroll only (no further stretch)" begin
+            win_before = m.gantt_win_day
+            st0 = m.gantt_start
+            step = Day(GM.gantt_scroll_days(m.gantt_scale))
+            cx = area.x + area.width ÷ 2
+            cy = area.y + area.height ÷ 2
+            T.update!(m, gm_wheel(cx, cy, T.mouse_scroll_down))
+            @test m.gantt_start == st0 + step
+            @test m.gantt_win_day == win_before
+            @test m.gantt_scale === :day
+            T.update!(m, gm_wheel(cx, cy, T.mouse_scroll_up))
+            @test m.gantt_start == st0
+            @test m.gantt_win_day == win_before
+            tb4 = app_tb(m; w = W, h = H)
+            title4 = something(T.row_text(tb4, sb.y), "")
+            @test occursin(" · 14", title4) || occursin("· 14", title4)
         end
     end
 end
