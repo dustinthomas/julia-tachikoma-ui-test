@@ -471,6 +471,105 @@ end
 
 _clear_board_mouse_ui!(m::AppModel) = (m.board_hover = nothing; m)
 
+# ═══════════════════════════ HIT-TEST + MOUSE (B1) ══════════════════════════
+"""
+Hit kinds for pure board mouse hit-testing. Priority: move buttons → gap chrome
+band → card body → other chrome. B1 only acts on `board_hit_card_body`; move
+kinds are reserved for B2 arm/release (slots still carry `nothing` rects in B1).
+"""
+@enum BoardHitKind begin
+    board_hit_none
+    board_hit_card_body      # select / open-detail
+    board_hit_move_prev      # [<]  (B2)
+    board_hit_move_next      # [>]  (B2)
+    board_hit_move_chrome    # gap / non-button chrome band — no-op (B2)
+    board_hit_chrome         # headers, filter line, lane frame, stats
+end
+
+"""Result of `board_hit_test`. Lane/col/idx/issue_id set when a card is hit."""
+struct BoardHit
+    kind::BoardHitKind
+    lane::Union{Nothing,Int}
+    col::Union{Nothing,Int}
+    idx::Union{Nothing,Int}
+    issue_id::Union{Nothing,String}
+end
+
+const _BOARD_HIT_NONE = BoardHit(board_hit_none, nothing, nothing, nothing, nothing)
+
+"""
+    board_hit_test(layout, x, y) -> BoardHit
+
+Pure hit-test against a `BoardLayout` snapshot. Coordinates are absolute
+terminal cells (same space as `MouseEvent.x/y` and `layout.area`). Uses
+`Base.contains` for rect membership — does not invent a parallel geometry.
+"""
+function board_hit_test(layout::BoardLayout, x::Int, y::Int)::BoardHit
+    area = layout.area
+    (area.width < 1 || area.height < 1) && return _BOARD_HIT_NONE
+    Base.contains(area, x, y) || return _BOARD_HIT_NONE
+
+    # Priority: specific buttons > gap chrome band > card body > other chrome
+    for s in layout.slots
+        if s.prev_btn !== nothing && Base.contains(s.prev_btn, x, y)
+            return BoardHit(board_hit_move_prev, s.lane, s.col, s.idx, s.issue_id)
+        end
+        if s.next_btn !== nothing && Base.contains(s.next_btn, x, y)
+            return BoardHit(board_hit_move_next, s.lane, s.col, s.idx, s.issue_id)
+        end
+        if s.chrome !== nothing && Base.contains(s.chrome, x, y)
+            # gap (or band padding): never body / never open detail
+            return BoardHit(board_hit_move_chrome, s.lane, s.col, s.idx, s.issue_id)
+        end
+        if Base.contains(s.rect, x, y)
+            return BoardHit(board_hit_card_body, s.lane, s.col, s.idx, s.issue_id)
+        end
+    end
+    return BoardHit(board_hit_chrome, nothing, nothing, nothing, nothing)
+end
+
+"""
+Left-press on card body: first press selects (cursor only — K13, no bulk
+`selected_ids` change); second press on the already-selected card opens detail
+via `_open_card_detail!` (same as `v`).
+"""
+function _board_body_press!(m::AppModel, hit::BoardHit)
+    hit.issue_id === nothing && return m
+    cur = selected_issue(m)
+    already = cur !== nothing && cur.id == hit.issue_id
+    if already
+        _clear_board_mouse_ui!(m)
+        return _open_card_detail!(m)
+    else
+        # Cursor only — do NOT touch selected_ids (K13)
+        _select_issue!(m, hit.issue_id)
+        return m
+    end
+end
+
+"""
+    _handle_board_mouse!(m, evt)
+
+B1: left-press card body → select or open detail. Move-chrome arm/drag/release
+is reserved for B2 (press on move kinds is a no-op while button rects are
+`nothing`). Wheel and free-hover ignored.
+"""
+function _handle_board_mouse!(m::AppModel, evt::MouseEvent)
+    area = m.board_last_area
+    (area.width < 1 || area.height < 1) && return m
+    lay = board_layout(m, area)
+    hit = board_hit_test(lay, evt.x, evt.y)
+
+    # B1 body press only. B2 will extend with arm/drag/release on move chrome.
+    if evt.button === mouse_left && evt.action === mouse_press
+        if hit.kind === board_hit_card_body
+            return _board_body_press!(m, hit)
+        end
+        # move_prev / move_next / move_chrome / chrome / none: no-op in B1
+    end
+    m
+end
+
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
 function _wrap_title(t::AbstractString, w::Int, maxlines::Int)
     w <= 0 && return String[]

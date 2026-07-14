@@ -275,6 +275,7 @@ function _open_project_switch!(m::AppModel)
         # Zero projects → forced create-project modal (blocks board).
         return _open_project_create!(m; forced = true)
     end
+    _clear_board_mouse_ui!(m)
     idx = findfirst(p -> p.id == m.active_project_id, m.projects_cache)
     m.project_sel = something(idx, 1)
     m.modal = :project_switch
@@ -316,6 +317,7 @@ end
 
 """Open the create-project modal (focus-routed name + key, like new_sprint)."""
 function _open_project_create!(m::AppModel; forced::Bool = false)
+    _clear_board_mouse_ui!(m)
     set_text!(m.project_name_input, "")
     set_text!(m.project_key_input, "")
     m.modal = :project_create
@@ -520,9 +522,10 @@ end
 """
     update!(m::AppModel, evt::MouseEvent)
 
-Mouse path (not KEYMAP): idle parity, then Gantt-only handling (M1 click-select
-+ M2 wheel scroll + M3 drag-reschedule) when logged in, no modal, view is
-`:gantt`, and `gantt_last_area` is non-empty.
+Mouse path (not KEYMAP): idle parity, then view-local handlers when logged in
+and no modal. `:gantt` → M1–M3 (click-select / wheel scroll / drag-reschedule);
+`:board` → B1 body click-select / select-then-activate open detail (B2 move
+chrome later). Requires a non-empty `*_last_area` cache from the last paint.
 """
 function update!(m::AppModel, evt::MouseEvent)
     m.tick += 1
@@ -533,10 +536,14 @@ function update!(m::AppModel, evt::MouseEvent)
 
     m.current_user === nothing && return m
     m.modal !== :none && return m
-    m.view !== :gantt && return m
-    (m.gantt_last_area.width < 1 || m.gantt_last_area.height < 1) && return m
 
-    _handle_gantt_mouse!(m, evt)
+    if m.view === :gantt
+        (m.gantt_last_area.width < 1 || m.gantt_last_area.height < 1) && return m
+        _handle_gantt_mouse!(m, evt)
+    elseif m.view === :board
+        (m.board_last_area.width < 1 || m.board_last_area.height < 1) && return m
+        _handle_board_mouse!(m, evt)
+    end
     m
 end
 
@@ -544,6 +551,7 @@ function _do_action!(m::AppModel, act::Symbol)
     if act === :quit
         m.quit = true
     elseif act === :toggle_help
+        m.modal !== :help && _clear_board_mouse_ui!(m)
         m.modal = m.modal === :help ? :none : :help
     elseif act === :close_help
         m.modal = :none

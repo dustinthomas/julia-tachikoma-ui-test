@@ -21,14 +21,14 @@ Run from `qci-kanban/`: `julia --project=. test/runtests.jl` (full suite). Most 
 | `src/auth/*` (password, jwt, session) | `test_auth.jl` | `test_fixwave.jl` |
 | `src/store/*` (sqlite, remote, interface) | `test_stores.jl` | nearly all view tests (fixtures seed via Stores) |
 | `src/notify/*` (outbox, smtp) | `test_notify.jl` | `test_card_modals.jl` |
-| `src/ui/app.jl` (AppModel, dispatch, login gate, project switcher/create, CSV export) | `test_app_shell.jl`, `features/multi_project.jl`, `features/project_switcher_export.jl` | `test_fixwave.jl`, `test_focus.jl` |
+| `src/ui/app.jl` (AppModel, dispatch, login gate, project switcher/create, CSV export, MouseEvent view router) | `test_app_shell.jl`, `features/multi_project.jl`, `features/project_switcher_export.jl`, `features/board_mouse.jl`, `features/gantt_mouse.jl` | `test_fixwave.jl`, `test_focus.jl` |
 | `src/ui/theme.jl` | `test_theme.jl` (incl. raw-ColorRGB grep enforcement) | — |
 | `src/ui/focus.jl`, `src/ui/keymap.jl` | `test_focus.jl` | `test_app_shell.jl`, `features/project_switcher_export.jl`, `features/card_edit_ux.jl` |
-| `src/ui/board.jl` | `test_board_view.jl` (incl. B0 `BoardLayout` / `board_layout` fixtures) | `test_focus.jl`, `test_notify.jl`, `test_stores.jl`, `features/phase3_board.jl` |
+| `src/ui/board.jl` | `test_board_view.jl` (B0 layout + B1 `board_hit_test` / body mouse), `features/board_mouse.jl` | `test_focus.jl`, `test_notify.jl`, `test_stores.jl`, `features/phase3_board.jl` |
 | `src/ui/backlog.jl` | `test_backlog.jl` | `test_gfx.jl` (burndown footer), `features/project_switcher_export.jl` (E export) |
 | `src/ui/calendar.jl` | `test_calendar_view.jl` | — |
-| `src/ui/gantt.jl` | `test_gantt.jl` | — |
-| `src/ui/modals.jl` | `test_card_modals.jl` | `test_backlog.jl`, `test_board_view.jl` (no-bleed), `features/project_switcher_export.jl`, `features/card_edit_ux.jl` |
+| `src/ui/gantt.jl` | `test_gantt.jl`, `features/gantt_mouse.jl` | — |
+| `src/ui/modals.jl` | `test_card_modals.jl` | `test_backlog.jl`, `test_board_view.jl` (no-bleed + board_hover clear), `features/board_mouse.jl`, `features/project_switcher_export.jl`, `features/card_edit_ux.jl` |
 | `src/ui/widgets.jl` | `test_widgets.jl` | `test_card_modals.jl`, `features/card_edit_ux.jl`, all view tests indirectly |
 | `src/gfx/*` (logo, charts) | `test_gfx.jl` | `test_app_shell.jl` (header logo) |
 | `src/precompile.jl` | none directly (precompile-time-only workload, coverage-excluded) — a broken workload fails `Pkg.precompile`, so any test run catches it | — |

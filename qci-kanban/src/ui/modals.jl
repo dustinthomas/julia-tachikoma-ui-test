@@ -88,6 +88,7 @@ end
 # ── Opening / closing modals (set focus + which issue) ──────────────────────
 function _open_card_detail!(m::AppModel)
     iss = selected_issue(m); iss === nothing && return m
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = iss.id
     m.modal = :card_detail
     set_text!(m.comment_input, "")
@@ -104,6 +105,7 @@ function _open_card_edit!(m::AppModel; create::Bool = false, due_prefill = nothi
     else
         can!(m, :edit_issue; resource = iss) || return m
     end
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = create ? nothing : iss.id
     m.edit_form = _build_edit_form(m, iss)
     due_prefill === nothing || set_date_text!(m.edit_form.due_input, string(due_prefill))
@@ -121,6 +123,7 @@ own selection rather than the board grid). No-op when `iss === nothing`.
 """
 function _open_detail_issue!(m::AppModel, iss)
     iss === nothing && return m
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = iss.id
     m.modal = :card_detail
     set_text!(m.comment_input, "")
@@ -139,6 +142,7 @@ function _open_edit_issue!(m::AppModel, iss)
     iss === nothing && return m
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :edit_issue; resource = iss) || return m
+    _clear_board_mouse_ui!(m)
     m.card_issue_id = iss.id
     m.edit_form = _build_edit_form(m, iss)
     m.modal = :card_edit
@@ -295,6 +299,7 @@ function _request_delete_one!(m::AppModel)
     iss = selected_issue(m); iss === nothing && return m
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :delete_issue) || return m
+    _clear_board_mouse_ui!(m)
     m.confirm_kind = :delete_one; m.confirm_target = iss.id
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -308,6 +313,7 @@ function _request_bulk_delete!(m::AppModel)
     isempty(targets) && (m.message = "No visible selected issues to delete"; return m)
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :delete_issue) || return m
+    _clear_board_mouse_ui!(m)
     m.confirm_kind = :bulk_delete; m.confirm_target = targets
     m.modal = :confirm; m.focus = FocusState()
     m
@@ -352,6 +358,7 @@ end
 
 # ── Search ──────────────────────────────────────────────────────────────────
 function _open_search!(m::AppModel)
+    _clear_board_mouse_ui!(m)
     m.modal = :search
     m.focus = FocusState(Any[m.search_input]; active = true)
     m
@@ -370,6 +377,7 @@ end
 function _open_new_sprint!(m::AppModel)
     # H1 subset; full Q6 matrix for edit/create; other mutates deferred.
     can!(m, :manage_sprint) || return m
+    _clear_board_mouse_ui!(m)
     set_text!(m.sprint_name_input, ""); set_text!(m.sprint_goal_input, "")
     m.modal = :new_sprint
     m.focus = FocusState(Any[m.sprint_name_input, m.sprint_goal_input]; active = true)

@@ -559,3 +559,135 @@ end
         @test m.board_hover === nothing
     end
 end
+
+@testset "B1 — board_hit_test pure + body select handler" begin
+    content_area(w, h) = T.Rect(1, 3, w, h)
+    bm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, false, false)
+
+    @testset "pure hit: body / chrome / outside / empty area" begin
+        m = lb()
+        area = content_area(100, 26)
+        lay = Q3.board_layout(m, area)
+        @test !isempty(lay.slots)
+        s = first(lay.slots)
+        # Center of first card body
+        hx = s.rect.x + max(0, s.rect.width ÷ 2)
+        hy = s.rect.y + max(0, s.rect.height ÷ 2)
+        hit = Q3.board_hit_test(lay, hx, hy)
+        @test hit.kind === Q3.board_hit_card_body
+        @test hit.issue_id == s.issue_id
+        @test hit.lane == s.lane && hit.col == s.col && hit.idx == s.idx
+
+        # Outside layout area → none
+        hit_out = Q3.board_hit_test(lay, 0, 0)
+        @test hit_out.kind === Q3.board_hit_none
+        @test hit_out.issue_id === nothing
+
+        # Inside area but not on a card (filter/header chrome) → chrome
+        # grid_area.y is filter line (y0); cards start later
+        hit_chrome = Q3.board_hit_test(lay, area.x + 2, lay.grid_area.y)
+        @test hit_chrome.kind === Q3.board_hit_chrome
+        @test hit_chrome.issue_id === nothing
+
+        # Degenerate empty layout area
+        empty_lay = Q3.BoardLayout(T.Rect(1, 1, 0, 0), T.Rect(1, 1, 0, 0), false, 0, 1,
+                                   Q3.BoardCardSlot[])
+        @test Q3.board_hit_test(empty_lay, 1, 1).kind === Q3.board_hit_none
+    end
+
+    @testset "pure hit: button priority order (synthetic chrome rects)" begin
+        # B1 slots leave buttons nothing; exercise priority with a synthetic slot
+        # so B2 can fill rects without API churn (design §7).
+        body = T.Rect(10, 10, 20, 6)
+        prev = T.Rect(20, 14, 3, 1)
+        gap  = T.Rect(23, 14, 1, 1)
+        next = T.Rect(24, 14, 3, 1)
+        chrome = T.Rect(20, 14, 7, 1)
+        slot = Q3.BoardCardSlot(body, 1, 1, 1, "iss-synthetic", true,
+                                prev, next, gap, chrome)
+        lay = Q3.BoardLayout(T.Rect(1, 1, 40, 20), T.Rect(1, 1, 40, 20), false, 8, 1,
+                             [slot])
+        @test Q3.board_hit_test(lay, prev.x, prev.y).kind === Q3.board_hit_move_prev
+        @test Q3.board_hit_test(lay, next.x, next.y).kind === Q3.board_hit_move_next
+        @test Q3.board_hit_test(lay, gap.x, gap.y).kind === Q3.board_hit_move_chrome
+        # Body cell not covered by chrome band
+        @test Q3.board_hit_test(lay, body.x + 1, body.y + 1).kind === Q3.board_hit_card_body
+        @test Q3.board_hit_test(lay, body.x + 1, body.y + 1).issue_id == "iss-synthetic"
+    end
+
+    @testset "body press selects; second press opens detail; bulk set stable" begin
+        m = lb()
+        app_tb(m; w = 100, h = 30)
+        @test m.view === :board
+        @test m.board_last_area.width >= 1
+        lay = Q3.board_layout(m, m.board_last_area)
+        @test length(lay.slots) >= 2
+        s0 = lay.slots[1]
+        s1 = lay.slots[2]
+        # Pre-fill bulk selection (K13 — must not clear on mouse select)
+        push!(m.selected_ids, s0.issue_id)
+        bulk_before = copy(m.selected_ids)
+
+        # Click different card body → select only, no modal, bulk unchanged
+        hx1 = s1.rect.x + max(0, s1.rect.width ÷ 2)
+        hy1 = s1.rect.y + max(0, s1.rect.height ÷ 2)
+        T.update!(m, bm_click(hx1, hy1))
+        @test Q3.selected_issue(m).id == s1.issue_id
+        @test m.modal === :none
+        @test m.selected_ids == bulk_before
+
+        # Second click same body → open detail
+        T.update!(m, bm_click(hx1, hy1))
+        @test m.modal === :card_detail
+        @test m.card_issue_id == s1.issue_id
+        @test m.board_hover === nothing
+        mkey(m, :escape)
+        @test m.modal === :none
+
+        # Click different body reselects, does not open
+        hx0 = s0.rect.x + max(0, s0.rect.width ÷ 2)
+        hy0 = s0.rect.y + max(0, s0.rect.height ÷ 2)
+        T.update!(m, bm_click(hx0, hy0))
+        @test Q3.selected_issue(m).id == s0.issue_id
+        @test m.modal === :none
+        @test m.selected_ids == bulk_before
+    end
+
+    @testset "chrome / release / empty area: no selection change" begin
+        m = lb()
+        app_tb(m; w = 100, h = 30)
+        sel0 = Q3.selected_issue(m)
+        lay = Q3.board_layout(m, m.board_last_area)
+        # Header/filter chrome
+        T.update!(m, bm_click(m.board_last_area.x + 2, lay.grid_area.y))
+        @test Q3.selected_issue(m).id == sel0.id
+        @test m.modal === :none
+        # Release is ignored
+        if !isempty(lay.slots)
+            s = first(lay.slots)
+            rel = T.MouseEvent(s.rect.x + 1, s.rect.y + 1, T.mouse_left, T.mouse_release,
+                               false, false, false)
+            T.update!(m, rel)
+            @test Q3.selected_issue(m).id == sel0.id
+        end
+        # Empty board_last_area: no-op
+        m2 = lb()
+        @test m2.board_last_area.width == 0
+        sel_a = Q3.selected_issue(m2)
+        T.update!(m2, bm_click(10, 10))
+        @test Q3.selected_issue(m2).id == sel_a.id
+    end
+
+    @testset "modal open clears board_hover" begin
+        m = lb()
+        m.board_hover = (kind = :move_next, issue_id = "x", armed = true)
+        mkey(m, 'v')   # open card detail via keyboard
+        @test m.modal === :card_detail
+        @test m.board_hover === nothing
+        mkey(m, :escape)
+        m.board_hover = :stale
+        mkey(m, '?')   # help
+        @test m.modal === :help
+        @test m.board_hover === nothing
+    end
+end
