@@ -365,6 +365,108 @@ function _cycle_label_filter!(m::AppModel)
     m
 end
 
+# ── The bordered card grid ───────────────────────────────────────────────
+const MODERN_CARD_H = 6                      # ╭ + key + 2 title lines + meta + ╰
+
+# ═══════════════════════════ LAYOUT (B0) ════════════════════════════════════
+"""
+One painted card cell on the board grid. Geometry matches `_render_board_grid!`
+so paint and (later) hit-test share a single snapshot. Button rects are `nothing`
+in B0 (chrome lands in B2); `bordered=false` is the flat-card degrade path.
+"""
+struct BoardCardSlot
+    rect::Rect
+    lane::Int
+    col::Int
+    idx::Int                 # 1-based index within the status cell
+    issue_id::String
+    bordered::Bool
+    prev_btn::Union{Nothing,Rect}
+    next_btn::Union{Nothing,Rect}
+    gap_btn::Union{Nothing,Rect}
+    chrome::Union{Nothing,Rect}
+end
+
+"""
+Snapshot of board card geometry for a given AppModel + content Rect.
+Built by pure computation from m + area (same formulas as paint). B0: paint
+consumes `slots`; later hit-test reuses the same builder.
+"""
+struct BoardLayout
+    area::Rect                 # original body rect (pre-stats split input)
+    grid_area::Rect            # after optional stats strip
+    show_stats::Bool
+    col_w::Int
+    nlanes::Int
+    slots::Vector{BoardCardSlot}
+end
+
+"""
+    board_layout(m, area) -> BoardLayout
+
+Encode stats strip, filter/header rows, lane heights, scroll-follow start,
+bordered vs flat cards, and each visible card `Rect` — identical to the paint
+path. Clamps selection (same as render) so scroll-follow uses in-range `sel_*`.
+B0 leaves move-button rects as `nothing`.
+"""
+function board_layout(m::AppModel, area::Rect)::BoardLayout
+    show_stats = m.show_stats && area.height >= STATS_HEIGHT + 6
+    grid_area = show_stats ?
+        Rect(area.x, area.y + STATS_HEIGHT, area.width, area.height - STATS_HEIGHT) :
+        Rect(area.x, area.y, area.width, area.height)
+
+    g = _clamp_selection!(m)
+    ncols = length(BOARD_STATUSES)
+    nlanes = length(g)
+    if grid_area.width < 4 || grid_area.height < 1
+        return BoardLayout(area, grid_area, show_stats, 0, nlanes, BoardCardSlot[])
+    end
+
+    inner_x = grid_area.x + 1
+    inner_w = grid_area.width - 2
+    col_w = max(0, inner_w ÷ ncols)
+    board_total = sum(sum(length, lane.cols; init = 0) for lane in g; init = 0)
+    avail_h = grid_area.height - 2                # minus filter line + header row
+    lane_h = max(MODERN_CARD_H + 2, avail_h ÷ max(1, nlanes))
+    bottom_lim = grid_area.y + grid_area.height
+    y = grid_area.y + 2                           # after filter (y0) + headers (y1)
+    if board_total == 0 && y < bottom_lim
+        y += 1                                    # empty-board hint row
+    end
+
+    slots = BoardCardSlot[]
+    for (li, lane) in enumerate(g)
+        lh = min(lane_h, bottom_lim - y)
+        lh < 3 && break
+        inner_h = lh - 2
+        bordered = inner_h >= MODERN_CARD_H
+        card_h = bordered ? MODERN_CARD_H : clamp(inner_h, 1, 4)
+        max_cards = max(1, inner_h ÷ max(1, card_h))
+        for (ci, cell) in enumerate(lane.cols)
+            cx = inner_x + (ci - 1) * col_w
+            sel_here = (li == m.sel_lane && ci == m.sel_col)
+            # scroll-follow: the cursor card is always included (finding U5)
+            start = (sel_here && m.sel_idx > max_cards) ? (m.sel_idx - max_cards + 1) : 1
+            last = min(length(cell), start + max_cards - 1)
+            slot_i = 0
+            for k in start:last
+                cy = y + 1 + slot_i * card_h
+                ch = min(card_h, y + lh - 1 - cy)   # clip to the lane interior
+                ch < 1 && break
+                push!(slots, BoardCardSlot(
+                    Rect(cx, cy, max(0, col_w - 1), ch),
+                    li, ci, k, cell[k].id, bordered,
+                    nothing, nothing, nothing, nothing))  # B0: no move chrome yet
+                slot_i += 1
+            end
+        end
+        y += lh
+    end
+    BoardLayout(area, grid_area, show_stats, col_w, nlanes, slots)
+end
+
+_clear_board_mouse_ui!(m::AppModel) = (m.board_hover = nothing; m)
+
 # ═══════════════════════════ RENDER ═════════════════════════════════════════
 function _wrap_title(t::AbstractString, w::Int, maxlines::Int)
     w <= 0 && return String[]
@@ -470,13 +572,15 @@ _short(s::AbstractString, n::Int) = ellipsize(s, n)
 
 "Main board render (view router calls this when m.view === :board)."
 function render_board!(m::AppModel, buf::Buffer, area::Rect)
+    # B0: cache area for future mouse hit-tests (B1/B2); zero default on AppModel.
+    m.board_last_area = area
     (area.width < 20 || area.height < 6) && return
-    # Optional stats strip at the top (toggle `t`); grid renders below it.
-    if m.show_stats && area.height >= STATS_HEIGHT + 6
-        used = render_board_stats!(m, buf, Rect(area.x, area.y, area.width, STATS_HEIGHT))
-        used > 0 && (area = Rect(area.x, area.y + used, area.width, area.height - used))
+    # Single layout snapshot: paint cards exclusively from layout.slots (acceptance A).
+    layout = board_layout(m, area)
+    if layout.show_stats
+        render_board_stats!(m, buf, Rect(area.x, area.y, area.width, STATS_HEIGHT))
     end
-    _render_board_grid!(m, buf, area)
+    _render_board_grid!(m, buf, layout)
 end
 
 "Column headers with WIP count/limit."
@@ -492,9 +596,6 @@ function _render_col_headers!(m::AppModel, buf::Buffer, x::Int, y::Int, col_w::I
         set_string!(buf, cx, y, _short(hdr, col_w - 1), hstyle)
     end
 end
-
-# ── The bordered card grid ───────────────────────────────────────────────
-const MODERN_CARD_H = 6                      # ╭ + key + 2 title lines + meta + ╰
 
 """
 One bordered task card: rounded frame over a card-surface fill, with the left
@@ -522,20 +623,19 @@ function _render_card_modern!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Iss
 end
 
 """
-The swimlane × status card grid (board render minus the optional stats strip):
-every swimlane is a rounded full-width panel with the lane name set into its
-frame, status columns separated by joined rules, and each card a bordered
-mini-panel (`_render_card_modern!`).
+The swimlane × status card grid from a `BoardLayout` snapshot (board render
+minus the optional stats strip). Lane frames / headers / "+N more" use the same
+metrics as `board_layout`; **cards paint exclusively from `layout.slots`**.
 """
-function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
-    g = _clamp_selection!(m)
+function _render_board_grid!(m::AppModel, buf::Buffer, layout::BoardLayout)
+    area = layout.grid_area
+    g = board_grid(m)                         # selection already clamped in board_layout
     ncols = length(BOARD_STATUSES)
+    col_w = layout.col_w
     set_string!(buf, area.x, area.y, _short(_filter_line(m), area.width), Style(; fg = col_text_dim()))
 
     grid_y = area.y + 1
     inner_x = area.x + 1                     # lane panels inset content by the frame
-    inner_w = area.width - 2
-    col_w = inner_w ÷ ncols                  # floor-divide: never overruns (finding U4)
     _render_col_headers!(m, buf, inner_x, grid_y, col_w)
 
     nlanes = length(g)
@@ -573,42 +673,36 @@ function _render_board_grid!(m::AppModel, buf::Buffer, area::Rect)
                                         Style(; fg = col_text_dim())
             set_string!(buf, area.x + 2, y, _short(" $(lane.name) ($(total)) ", area.width - 4), tstyle)
         end
-        # When the lane interior can't hold a full bordered card, degrade to the
-        # flat card so the cursor card is never invisible while ops
-        # still target it (finding U5; verifier W1). Bordered slots always fit
-        # whole cards (max_cards = inner_h ÷ MODERN_CARD_H), so `hidden` counts
-        # exactly the cards not drawn in either mode.
+        # "+N more" still needs per-cell scroll window (cards themselves come from slots).
         inner_h = lh - 2
         bordered = inner_h >= MODERN_CARD_H
         card_h = bordered ? MODERN_CARD_H : clamp(inner_h, 1, 4)
-        max_cards = max(1, inner_h ÷ card_h)
+        max_cards = max(1, inner_h ÷ max(1, card_h))
         for (ci, cell) in enumerate(lane.cols)
             cx = inner_x + (ci - 1) * col_w
             sel_here = (li == m.sel_lane && ci == m.sel_col)
-            # scroll-follow: the cursor card is always rendered (finding U5)
             start = (sel_here && m.sel_idx > max_cards) ? (m.sel_idx - max_cards + 1) : 1
             last = min(length(cell), start + max_cards - 1)
-            slot = 0
-            for k in start:last
-                cy = y + 1 + slot * card_h
-                ch = min(card_h, y + lh - 1 - cy)          # clip to the lane interior
-                ch < 1 && break
-                sel = (sel_here && k == m.sel_idx)
-                if bordered
-                    _render_card_modern!(m, buf, Rect(cx, cy, col_w - 1, ch), cell[k], sel)
-                else
-                    _render_card!(m, buf, Rect(cx, cy, col_w - 1, ch), cell[k], sel)
-                end
-                slot += 1
-            end
+            shown = max(0, last - start + 1)
             hidden = length(cell) - last
             if hidden > 0
-                my = y + 1 + slot * card_h
+                my = y + 1 + shown * card_h
                 my <= y + lh - 2 &&
                     set_string!(buf, cx, my, _short("+$(hidden) more", col_w - 1), Style(; fg = col_text_muted()))
             end
         end
         y += lh
+    end
+    # Acceptance A: paint cards exclusively from layout.slots (no parallel card loop).
+    for s in layout.slots
+        iss = Stores.get_issue(m.boardstore, s.issue_id)
+        iss === nothing && continue
+        sel = (s.lane == m.sel_lane && s.col == m.sel_col && s.idx == m.sel_idx)
+        if s.bordered
+            _render_card_modern!(m, buf, s.rect, iss, sel)
+        else
+            _render_card!(m, buf, s.rect, iss, sel)
+        end
     end
 end
 

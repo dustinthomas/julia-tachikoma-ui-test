@@ -76,6 +76,10 @@ mutable struct AppModel <: Model
     gantt_drag::Any
     # G6b two-step blocks-link source (nothing | issue id). First L stashes; second creates.
     gantt_link_from_id::Union{String,Nothing}
+    # Board mouse (B0 layout cache + B2 hover/arm payload). `Any` because board.jl
+    # is included after app.jl — same pattern as gantt_drag (K12).
+    board_last_area::Rect              # last content Rect passed to render_board!; zero default
+    board_hover::Any                   # nothing | BoardHoverTarget / NamedTuple (board.jl only)
     # ── Phase 5: graphics polish ───────────────────────────────────────────
     show_stats::Bool                   # board stats strip toggle (`t`)
     # ── Multi-project (PR-M2 / PR-M7) ──────────────────────────────────────
@@ -150,6 +154,7 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
                  td, :day, 1, Rect(0, 0, 0, 0), nothing, nothing,
+                 Rect(0, 0, 0, 0), nothing,   # board_last_area, board_hover (B0)
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
@@ -738,6 +743,7 @@ function _switch_view!(m::AppModel, v::Symbol)
     m.modal = :none
     m.gantt_drag = nothing          # M3: never carry shadow drag across views
     m.gantt_link_from_id = nothing  # G6b: drop pending link source
+    m.board_hover = nothing         # B0/B2: never carry board mouse chrome across views
     m.message = "$(VIEW_TITLES[v]) view"
     v === :calendar && _cal_init!(m)
     v === :gantt && _gantt_init!(m)
@@ -850,6 +856,7 @@ function _logout!(m::AppModel)
     m.modal = :none
     m.gantt_drag = nothing
     m.gantt_link_from_id = nothing
+    m.board_hover = nothing
     m.confirm_kind = :none
     m.confirm_target = nothing
     m.card_issue_id = nothing

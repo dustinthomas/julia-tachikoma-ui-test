@@ -370,3 +370,171 @@ end
         @test any(occursin(sel2.key, r) for r in rows2)
     end
 end
+
+@testset "B0 — BoardLayout pure metrics + paint consumption" begin
+    # Content area approximates full-app body (header/footer already stripped in
+    # real view); for pure layout unit tests we pass a synthetic Rect.
+    content_area(w, h) = T.Rect(1, 3, w, h)
+
+    @testset "default zero cache; render fills board_last_area" begin
+        m = lb()
+        @test m.board_last_area.width == 0 && m.board_last_area.height == 0
+        @test m.board_hover === nothing
+        # Full app view populates the cache (same path as live TUI).
+        app_tb(m; w = 100, h = 30)
+        @test m.board_last_area.width >= 1 && m.board_last_area.height >= 1
+        area = m.board_last_area
+        lay = Q3.board_layout(m, area)
+        @test lay isa Q3.BoardLayout
+        @test lay.area == area
+        @test lay.show_stats === false
+        @test lay.grid_area == area
+        @test lay.col_w > 0
+        @test lay.nlanes >= 1
+        @test !isempty(lay.slots)
+        # B0: no move chrome on slots
+        @test all(s -> s.prev_btn === nothing && s.next_btn === nothing &&
+                       s.gap_btn === nothing && s.chrome === nothing, lay.slots)
+        # Every slot rect is non-empty and inside the grid area
+        for s in lay.slots
+            @test s.rect.width >= 1 && s.rect.height >= 1
+            @test s.rect.x >= lay.grid_area.x
+            @test s.rect.y >= lay.grid_area.y
+            @test s.bordered === true          # tall enough for modern cards
+        end
+        # Paint path re-caches the same area
+        tb = T.TestBackend(100, 30); T.reset!(tb.buf)
+        Q3.render_board!(m, tb.buf, area)
+        @test m.board_last_area == area
+    end
+
+    @testset "stats on insets grid_area by STATS_HEIGHT" begin
+        m = lb()
+        m.show_stats = true
+        area = content_area(100, 28)          # tall enough for stats + grid
+        lay = Q3.board_layout(m, area)
+        @test lay.show_stats === true
+        @test lay.area == area
+        @test lay.grid_area.y == area.y + Q3.STATS_HEIGHT
+        @test lay.grid_area.height == area.height - Q3.STATS_HEIGHT
+        @test lay.grid_area.width == area.width
+        @test !isempty(lay.slots)
+        # Slots live in the post-stats grid, not on the stats strip
+        @test all(s -> s.rect.y >= lay.grid_area.y, lay.slots)
+    end
+
+    @testset "stats off: grid_area equals area" begin
+        m = lb()
+        m.show_stats = false
+        area = content_area(100, 28)
+        lay = Q3.board_layout(m, area)
+        @test lay.show_stats === false
+        @test lay.grid_area == area
+    end
+
+    @testset "multi-lane (epic swimlanes) produces slots across lanes" begin
+        m = lb()
+        mkey(m, 's'); mkey(m, 's')            # → epic
+        @test m.swimlane_by == :epic
+        area = content_area(110, 34)
+        lay = Q3.board_layout(m, area)
+        @test lay.nlanes >= 2
+        lane_ids = unique(s.lane for s in lay.slots)
+        @test length(lane_ids) >= 2
+        # Each slot lane/col/idx is in range
+        g = Q3.board_grid(m)
+        for s in lay.slots
+            @test 1 <= s.lane <= length(g)
+            @test 1 <= s.col <= length(Q3.BOARD_STATUSES)
+            cell = g[s.lane].cols[s.col]
+            @test 1 <= s.idx <= length(cell)
+            @test cell[s.idx].id == s.issue_id
+        end
+    end
+
+    @testset "scroll-follow: sel_idx > max_cards still yields selected slot" begin
+        m = lb()
+        for i in 1:14
+            Q3.Stores.create_issue!(m.boardstore; title = "LayScroll $i", status = "Backlog")
+        end
+        # Drive selection deep into Backlog so scroll-follow kicks in
+        for _ in 1:11; mkey(m, 'j'); end
+        sel = Q3.selected_issue(m)
+        @test sel !== nothing
+        @test m.sel_idx > 1
+        # Short content height → few max_cards → start shifts
+        area = content_area(100, 12)
+        lay = Q3.board_layout(m, area)
+        sel_slots = filter(s -> s.issue_id == sel.id, lay.slots)
+        @test !isempty(sel_slots)
+        s = only(sel_slots)
+        @test s.lane == m.sel_lane && s.col == m.sel_col && s.idx == m.sel_idx
+        # Window starts past index 1 when selection is deep
+        col_slots = filter(s -> s.lane == m.sel_lane && s.col == m.sel_col, lay.slots)
+        @test minimum(s.idx for s in col_slots) > 1 || m.sel_idx <= length(col_slots)
+    end
+
+    @testset "flat degrade: short height → bordered=false slots" begin
+        m = lb()
+        # Very short body: lane interior < MODERN_CARD_H
+        area = content_area(100, 8)
+        lay = Q3.board_layout(m, area)
+        @test !isempty(lay.slots)
+        @test all(s -> s.bordered === false, lay.slots)
+        # Selected issue still has a slot (U5)
+        sel = Q3.selected_issue(m)
+        @test sel !== nothing
+        @test any(s -> s.issue_id == sel.id, lay.slots)
+    end
+
+    @testset "empty board: zero slots + empty-state still paints" begin
+        m = fresh_app(; seed = false); app_login_new(m; name = "Empty Board")
+        @test isempty(Q3.Stores.list_issues(m.boardstore))
+        area = content_area(90, 20)
+        lay = Q3.board_layout(m, area)
+        @test isempty(lay.slots)
+        @test lay.nlanes >= 1                   # placeholder "(no matches)" / All Issues lane
+        # Render does not error and shows create hint
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        Q3.render_board!(m, tb.buf, area)
+        @test m.board_last_area == area
+        blob = join([T.row_text(tb, i) for i in 1:24], "\n")
+        @test occursin("No work orders", blob) || occursin("Backlog", blob)
+    end
+
+    @testset "layout.slots cover painted card keys (acceptance A)" begin
+        m = lb()
+        area = content_area(100, 26)
+        lay = Q3.board_layout(m, area)
+        tb = T.TestBackend(100, 30); T.reset!(tb.buf)
+        Q3.render_board!(m, tb.buf, area)
+        blob = join([T.row_text(tb, i) for i in 1:30], "\n")
+        for s in lay.slots
+            iss = Q3.Stores.get_issue(m.boardstore, s.issue_id)
+            iss === nothing && continue
+            # Key appears in paint when the slot was drawn (wide enough columns)
+            if s.rect.width >= 8
+                @test occursin(iss.key, blob)
+            end
+        end
+    end
+
+    @testset "degenerate area: empty slots + zero col_w" begin
+        m = lb()
+        lay = Q3.board_layout(m, T.Rect(1, 1, 2, 0))
+        @test lay.col_w == 0
+        @test isempty(lay.slots)
+        @test lay.nlanes >= 1
+    end
+
+    @testset "_clear_board_mouse_ui! clears board_hover" begin
+        m = lb()
+        m.board_hover = (kind = :move_next, issue_id = "x", armed = true)
+        Q3._clear_board_mouse_ui!(m)
+        @test m.board_hover === nothing
+        # View switch also clears (hygiene for B1/B2)
+        m.board_hover = :stale
+        mkey(m, 'G')                              # board → gantt
+        @test m.board_hover === nothing
+    end
+end
