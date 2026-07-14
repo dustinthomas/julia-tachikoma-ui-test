@@ -925,9 +925,12 @@ end
         @test m.gantt_scale == :day  # NEW default per design (was week)
         tb = gantt_render(m)
         @test T.find_text(tb, "[day]") !== nothing
-        # lightweight exercise of generated UI from keymap (AC3): status_hints/help_lines contain updated zoom label
+        # lightweight exercise of generated UI from keymap (AC3): Scale label + stretch hints
         hints = G4.status_hints([:gantt, :global])
-        @test occursin("Zoom day/wk/mo", hints)
+        @test occursin("Scale day/wk/mo", hints)
+        @test !occursin("Zoom day/wk/mo", hints)
+        @test occursin("Stretch +", hints)
+        @test occursin("Stretch −", hints) || occursin("Stretch -", hints)
         @test any(occursin("day/wk/mo", l) for l in G4.help_lines([:gantt]))
         g4!(m, 'z'); @test m.gantt_scale == :week
         @test m.message == "Gantt scale: week"
@@ -1354,7 +1357,8 @@ end
         chartish = axis_w[min(end, 20):end]
         @test count(==(' '), chartish) >= 6
         @test count(isdigit, chartish) < length(chartish) - 4
-        # Month filter: dual tick row still anti-smoosh; tab row has full month names.
+        # Month filter: dual tick row still anti-smoosh; tab row has month labels
+        # (full names when columns allow; abbreviated Jul/Aug under default window=26).
         g4!(m, 'z')
         @test m.gantt_scale == :month
         tbm = gantt_render(m; w = 100, h = 12)
@@ -1366,9 +1370,11 @@ end
         @test count(==(' '), chartish_m) >= 6
         @test count(isdigit, chartish_m) < length(chartish_m) - 4
         mblob = gantt_screen_blob(tbm; h = 12)
+        mon = Dates.monthabbr(Dates.today())
         @test occursin(Dates.monthname(Dates.today()), mblob) ||
               occursin(Dates.format(Dates.today(), "U"), mblob) ||
-              occursin(r"January|February|March|April|May|June|July|August|September|October|November|December", mblob)
+              occursin(mon, mblob) ||
+              occursin(r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec", mblob)
     end
 
     @testset "overhaul: j/k keep-in-view brings off-window selection bar into chart" begin
@@ -1728,12 +1734,12 @@ end
         blob_w = gantt_screen_blob(tb_w; h = 14)
         @test T.find_text(tb_w, "[week]") !== nothing
         @test occursin(r"W\d+", blob_w)
-        # Month dual: full month names
+        # Month dual: month labels (full or abbreviated under default window=26)
         g4!(m, 'z'); @test m.gantt_scale == :month
         tb_m = gantt_render(m; w = 100, h = 14)
         blob_m = gantt_screen_blob(tb_m; h = 14)
         @test T.find_text(tb_m, "[month]") !== nothing
-        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December", blob_m)
+        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec", blob_m)
         # height budget: dual only at h≥12; single at h=10 has no second axis strip of full names required
         g4!(m, 'z'); @test m.gantt_scale == :day  # back to day
         tb10 = gantt_render(m; w = 100, h = 10)
@@ -1759,9 +1765,10 @@ end
         tb = gantt_render(m; w = 100, h = 10)  # single axis + footer, no dual
         blob = gantt_screen_blob(tb; h = 10)
         @test T.find_text(tb, "[month]") !== nothing
-        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December", blob) ||
+        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec", blob) ||
               occursin(Dates.format(Dates.today(), "U"), blob) ||
-              occursin(Dates.monthname(Dates.today()), blob)
+              occursin(Dates.monthname(Dates.today()), blob) ||
+              occursin(Dates.monthabbr(Dates.today()), blob)
         # single-row month: TODAY label must not clobber month chips
         @test !occursin(r"JTODAY|TODAYus|TODAYp|TODAYu", blob)
         # TODAY string itself may be absent on single-row month (by design)
@@ -2169,7 +2176,9 @@ end
         @test m.gantt_scale === :week
         lay_w = G4.gantt_layout(m, area)
         @test lay_w.scale === :week
-        @test lay_w.view_ncols == lay_w.physical_ncols
+        # Live window wire: view capped at gantt_view_window (default week=42)
+        @test lay_w.view_ncols == min(lay_w.physical_ncols, G4.gantt_view_window(m, :week))
+        @test lay_w.view_ncols == min(lay_w.physical_ncols, G4.GANTT_WEEK_VIEW_WINDOW)
         @test lay_w.label_ncols == lay_w.view_ncols
         @test lay_w.dpc == 1
         @test lay_w.paint_weekends === true
@@ -2179,7 +2188,8 @@ end
         @test m.gantt_scale === :month
         lay_m = G4.gantt_layout(m, area)
         @test lay_m.scale === :month
-        @test lay_m.view_ncols == lay_m.physical_ncols
+        @test lay_m.view_ncols == min(lay_m.physical_ncols, G4.gantt_view_window(m, :month))
+        @test lay_m.view_ncols == min(lay_m.physical_ncols, G4.GANTT_MONTH_VIEW_WINDOW)
         @test lay_m.label_ncols == lay_m.view_ncols
         @test lay_m.dpc == 7
         @test lay_m.paint_weekends === false
@@ -3102,6 +3112,160 @@ end
             @test occursin('▶', blob2) || occursin('╮', blob2) || occursin('╰', blob2) ||
                   occursin('─', blob2)
         end
+    end
+
+    # ── PR2: keyboard stretch, layout wire, prefs, title badge ─────────────
+    @testset "PR2 stretch: defaults, +/− keys, per-scale memory, clamp, drag cancel, prefs, title" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "StretchEp")
+        near = G4.Stores.create_issue!(m.boardstore; title = "NearStretch", epic_id = e.id,
+                                       start_date = Dates.today() - Day(1),
+                                       due_date = Dates.today() + Day(3))
+        far = G4.Stores.create_issue!(m.boardstore; title = "FarStretch", epic_id = e.id,
+                                      start_date = Dates.today() + Day(40),
+                                      due_date = Dates.today() + Day(45))
+        g4!(m, 'G')
+        @test m.gantt_scale === :day
+        @test m.gantt_win_day == G4.GANTT_DAY_VIEW_WINDOW
+        @test m.gantt_win_week == G4.GANTT_WEEK_VIEW_WINDOW
+        @test m.gantt_win_month == G4.GANTT_MONTH_VIEW_WINDOW
+        @test G4.gantt_view_window(m) == 14
+
+        # Title: closed [day] token + window badge · N + paint [+][-] on wide frame
+        tb0 = gantt_render(m; w = 120, h = 20)
+        title0 = T.row_text(tb0, 1)
+        @test title0 !== nothing
+        @test occursin("[day]", title0)
+        @test occursin(" · 14", title0) || occursin("· 14", title0)
+        @test occursin("[+]", title0)
+        @test occursin("[-]", title0)
+
+        # Stretch in on day (+): window shrinks by step 1
+        g4!(m, '+')
+        @test m.gantt_win_day == 13
+        @test m.gantt_win_week == 42   # other scales untouched
+        @test m.gantt_win_month == 26
+        @test m.message == "Gantt stretch [day]: window 13"
+        tb1 = gantt_render(m; w = 120, h = 20)
+        title1 = T.row_text(tb1, 1)
+        @test title1 !== nothing && occursin("[day]", title1)
+        @test occursin(" · 13", title1) || occursin("· 13", title1)
+
+        # = alias for stretch in
+        g4!(m, '=')
+        @test m.gantt_win_day == 12
+        @test m.message == "Gantt stretch [day]: window 12"
+
+        # Stretch out (-)
+        g4!(m, '-')
+        @test m.gantt_win_day == 13
+        @test m.message == "Gantt stretch [day]: window 13"
+
+        # Per-scale memory across z: set day to 12, week stretch, z back restores day
+        G4.gantt_set_view_window!(m, :day, 12)
+        g4!(m, 'z')  # week
+        @test m.gantt_scale === :week
+        @test m.gantt_win_day == 12
+        @test G4.gantt_view_window(m) == 42
+        g4!(m, '+')  # week step 7 → 35
+        @test m.gantt_win_week == 35
+        @test m.gantt_win_day == 12
+        @test m.message == "Gantt stretch [week]: window 35"
+        tbw = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tbw, "[week]") !== nothing
+        lay_w = G4.gantt_layout(m, T.Rect(1, 1, 120, 20))
+        @test lay_w.view_ncols == min(lay_w.physical_ncols, 35)
+        g4!(m, 'z'); g4!(m, 'z')  # month → day
+        @test m.gantt_scale === :day
+        @test m.gantt_win_day == 12
+        @test m.gantt_win_week == 35
+
+        # Clamp at min → (limit) message; window unchanged
+        G4.gantt_set_view_window!(m, :day, G4.GANTT_DAY_WIN_MIN)
+        g4!(m, '+')
+        @test m.gantt_win_day == G4.GANTT_DAY_WIN_MIN
+        @test m.message == "Gantt stretch [day]: window $(G4.GANTT_DAY_WIN_MIN) (limit)"
+        # Clamp at max
+        G4.gantt_set_view_window!(m, :day, G4.GANTT_DAY_WIN_MAX)
+        g4!(m, '-')
+        @test m.gantt_win_day == G4.GANTT_DAY_WIN_MAX
+        @test m.message == "Gantt stretch [day]: window $(G4.GANTT_DAY_WIN_MAX) (limit)"
+
+        # Drag cancelled on stretch and on z
+        m.gantt_drag = (issue_id = near.id, mode = :body, origin_col = 0,
+                        orig_start = near.start_date, orig_due = near.due_date,
+                        preview_start = near.start_date, preview_due = near.due_date)
+        G4.gantt_set_view_window!(m, :day, 20)
+        g4!(m, '+')
+        @test m.gantt_drag === nothing
+        m.gantt_drag = (issue_id = near.id, mode = :body, origin_col = 0,
+                        orig_start = near.start_date, orig_due = near.due_date,
+                        preview_start = near.start_date, preview_due = near.due_date)
+        g4!(m, 'z')
+        @test m.gantt_drag === nothing
+        @test m.gantt_scale === :week
+        g4!(m, 'z'); g4!(m, 'z')  # back to day
+        @test m.gantt_scale === :day
+
+        # Selection stays visible after stretch-in (far issue selected, shrink window)
+        G4.gantt_set_view_window!(m, :day, 40)
+        G4._gantt_select_issue_id!(m, far.id)
+        start_before = m.gantt_start
+        # force a start that leaves far off-window, then stretch-in should ensure-visible
+        m.gantt_start = Dates.today() - Day(1)
+        g4!(m, '+')  # window 39
+        @test m.gantt_win_day == 39
+        # After stretch, far bar should be in the effective window
+        dpc = G4.gantt_days_per_col(:day)
+        ncols = G4.gantt_view_window(m)
+        span = G4.gantt_issue_span(far)
+        win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, ncols, span)
+        @test G4.gantt_bar_in_window(win, dpc, ncols, span[1], span[2])
+        tb_far = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb_far, far.key) !== nothing || bar_run(row_with(tb_far, far.key, 20) === nothing ? "" : row_with(tb_far, far.key, 20)) >= 0
+
+        # Prefs round-trip: stretch writes gantt_ui.toml; new AppModel same token loads it
+        tok = m.session.token_path
+        G4.gantt_set_view_window!(m, :day, 18)
+        G4.gantt_set_view_window!(m, :week, 28)
+        G4.gantt_set_view_window!(m, :month, 12)
+        G4._save_gantt_ui_prefs!(m)
+        prefs_path = G4._gantt_ui_prefs_path(m)
+        @test isfile(prefs_path)
+        body = read(prefs_path, String)
+        @test occursin("win_day = 18", body)
+        @test occursin("win_week = 28", body)
+        @test occursin("win_month = 12", body)
+        m3 = G4.AppModel(; token_path = tok, secret = "test-secret", seed = false, restore = false)
+        @test m3.gantt_win_day == 18
+        @test m3.gantt_win_week == 28
+        @test m3.gantt_win_month == 12
+
+        # Missing prefs → defaults
+        m4 = G4.AppModel(; token_path = joinpath(mktempdir(), "session.jwt"),
+                         secret = "test-secret", seed = false, restore = false)
+        @test m4.gantt_win_day == 14 && m4.gantt_win_week == 42 && m4.gantt_win_month == 26
+
+        # Out-of-range values clamp on load
+        dir5 = mktempdir()
+        tok5 = joinpath(dir5, "session.jwt")
+        G4.Config._atomic_write_0600(joinpath(dir5, "gantt_ui.toml"),
+            "[gantt]\nwin_day = 1\nwin_week = 999\nwin_month = 3\n")
+        m5 = G4.AppModel(; token_path = tok5, secret = "test-secret", seed = false, restore = false)
+        @test m5.gantt_win_day == G4.GANTT_DAY_WIN_MIN
+        @test m5.gantt_win_week == G4.GANTT_WEEK_WIN_MAX
+        @test m5.gantt_win_month == G4.GANTT_MONTH_WIN_MIN
+
+        # _gantt_init! does not reset windows (D7/Q5)
+        m.gantt_win_day = 11
+        G4._gantt_init!(m)
+        @test m.gantt_win_day == 11
+        @test m.gantt_scale === :day
+
+        # Accessors: unknown scale falls back to default (1); set ignores unknown field
+        @test G4.gantt_view_window(m, :unknown) == 1
+        @test G4.gantt_set_view_window!(m, :unknown, 9) == 9  # clamp floor only; no field write
+        @test m.gantt_win_day == 11  # unchanged by unknown set
     end
 end
 

@@ -4,8 +4,10 @@
 
 Q = QciKanban
 
-# Fresh v2 model on isolated :memory: stores + a throwaway token path.
-fresh_app(; kwargs...) = Q.AppModel(; token_path = tempname(), secret = "test-secret", kwargs...)
+# Fresh v2 model on isolated :memory: stores + a throwaway session dir.
+# Token lives in mktempdir() so last_project / gantt_ui.toml never collide under /tmp.
+fresh_app(; kwargs...) = Q.AppModel(; token_path = joinpath(mktempdir(), "session.jwt"),
+                                    secret = "test-secret", kwargs...)
 
 app_rows(m; w = 80, h = 20) = begin
     tb = T.TestBackend(w, h)

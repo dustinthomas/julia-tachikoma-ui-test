@@ -69,6 +69,11 @@ mutable struct AppModel <: Model
     cal_sel_day::Int                   # selected day within the month (1-based)
     gantt_start::Date                  # left edge (earliest visible date) of the Gantt window
     gantt_scale::Symbol                # :day (1 day/col) | :week (1 day/col) | :month (7 days/col)
+    # Per-scale logical view windows (stretch density). Init in constructor body from
+    # GANTT_*_VIEW_WINDOW (gantt.jl is included after app.jl — no field defaults).
+    gantt_win_day::Int
+    gantt_win_week::Int
+    gantt_win_month::Int
     gantt_sel::Int                     # 1-based index into the Gantt issue rows
     gantt_last_area::Rect              # last content Rect passed to render_gantt! (G4.1; zero default)
     # M3 drag-reschedule shadow state (nothing | NamedTuple with issue_id, mode,
@@ -153,12 +158,18 @@ function AppModel(; user_db::AbstractString = ":memory:",
                  _make_input(), _make_input(),
                  1,
                  Dates.year(td), Dates.month(td), Dates.day(td),
-                 td, :day, 1, Rect(0, 0, 0, 0), nothing, nothing,
+                 # gantt_start, scale, win_day/week/month (placeholders), sel, last_area, drag, link
+                 td, :day, 14, 42, 26, 1, Rect(0, 0, 0, 0), nothing, nothing,
                  Rect(0, 0, 0, 0), nothing,   # board_last_area, board_hover (B0)
                  false,
                  nothing, Domain.Project[], 1,
                  _make_input(), _make_input(),
                  Dates.now(UTC))
+    # Named consts + prefs load resolved at call time (gantt.jl included after app.jl).
+    m.gantt_win_day = GANTT_DAY_VIEW_WINDOW
+    m.gantt_win_week = GANTT_WEEK_VIEW_WINDOW
+    m.gantt_win_month = GANTT_MONTH_VIEW_WINDOW
+    _load_gantt_ui_prefs!(m)
     _init_login_focus!(m)
     if restore && Auth.restore_from_file!(sess, us) && sess.current_user !== nothing
         _complete_login!(m, sess.current_user)
@@ -694,6 +705,10 @@ function _do_action!(m::AppModel, act::Symbol)
         _gantt_row!(m, -1)
     elseif act === :gantt_zoom
         _gantt_zoom!(m)
+    elseif act === :gantt_stretch_in
+        _gantt_stretch!(m, +1)
+    elseif act === :gantt_stretch_out
+        _gantt_stretch!(m, -1)
     elseif act === :gantt_view_card
         _gantt_open_detail!(m)
     elseif act === :gantt_edit_card

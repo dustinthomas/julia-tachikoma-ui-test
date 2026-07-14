@@ -17,6 +17,7 @@
 
 using .Theming
 using Dates
+using TOML
 
 # ── Scale geometry (pure) ───────────────────────────────────────────────────
 "Days represented by one chart column at the given scale."
@@ -113,6 +114,37 @@ function gantt_cols_per_day(scale::Symbol, physical_ncols::Int)::Int
     physical_ncols < 1 && return 1
     scale in (:day, :week, :month) || return 1
     gantt_cols_per_day(physical_ncols, gantt_default_view_window(scale))
+end
+
+"""
+    gantt_view_window(m::AppModel, scale::Symbol = m.gantt_scale) -> Int
+
+Live logical view-window for `scale` from model fields (per-scale stretch memory).
+"""
+function gantt_view_window(m::AppModel, scale::Symbol = m.gantt_scale)::Int
+    scale === :day   && return m.gantt_win_day
+    scale === :week  && return m.gantt_win_week
+    scale === :month && return m.gantt_win_month
+    return gantt_default_view_window(scale)
+end
+
+"""
+    gantt_set_view_window!(m::AppModel, scale::Symbol, w::Int) -> Int
+
+Clamp `w` into the product min/max for `scale` and store on the matching model
+field. Returns the clamped value. Unknown scales are ignored (return clamped
+floor only; no field write).
+"""
+function gantt_set_view_window!(m::AppModel, scale::Symbol, w::Int)::Int
+    cw = gantt_clamp_view_window(scale, w)
+    if scale === :day
+        m.gantt_win_day = cw
+    elseif scale === :week
+        m.gantt_win_week = cw
+    elseif scale === :month
+        m.gantt_win_month = cw
+    end
+    return cw
 end
 
 """
@@ -989,8 +1021,61 @@ function status_progress(iss::Domain.Issue)::Float64
     0.25
 end
 
+# ── Gantt UI prefs (D14): gantt_ui.toml next to session token ───────────────
+"""Path of the Gantt stretch prefs file (same dir as session token / last_project)."""
+_gantt_ui_prefs_path(m::AppModel) =
+    joinpath(dirname(m.session.token_path), "gantt_ui.toml")
+
+"""
+Load `gantt_ui.toml` if present; clamp windows via `gantt_set_view_window!`.
+Missing/unreadable/corrupt → leave constructor defaults. Never throws.
+"""
+function _load_gantt_ui_prefs!(m::AppModel)
+    path = _gantt_ui_prefs_path(m)
+    isfile(path) || return m
+    try
+        t = TOML.parsefile(path)
+        g = get(t, "gantt", nothing)
+        g isa AbstractDict || return m
+        if haskey(g, "win_day")
+            gantt_set_view_window!(m, :day, Int(g["win_day"]))
+        end
+        if haskey(g, "win_week")
+            gantt_set_view_window!(m, :week, Int(g["win_week"]))
+        end
+        if haskey(g, "win_month")
+            gantt_set_view_window!(m, :month, Int(g["win_month"]))
+        end
+    catch err
+        @warn "could not read gantt_ui.toml" error = err  # COV_EXCL_LINE (I/O failure rare)
+    end
+    m
+end
+
+"""
+Persist current per-scale windows to `gantt_ui.toml` (0600 atomic).
+Failures warn only — do not fail the stretch action.
+"""
+function _save_gantt_ui_prefs!(m::AppModel)
+    path = _gantt_ui_prefs_path(m)
+    contents = string(
+        "# Gantt UI prefs — operator density; not plant AppConfig\n",
+        "[gantt]\n",
+        "win_day = ", m.gantt_win_day, "\n",
+        "win_week = ", m.gantt_win_week, "\n",
+        "win_month = ", m.gantt_win_month, "\n",
+    )
+    try
+        Config._atomic_write_0600(path, contents)
+    catch err
+        @warn "could not write gantt_ui.toml" error = err  # COV_EXCL_LINE (I/O failure rare)
+    end
+    m
+end
+
 # ── Initialisation + actions ────────────────────────────────────────────────
-"Set the window to start at the earliest dated issue (or today), day scale (day/wk/mo 3-way cycle)."
+"Set the window to start at the earliest dated issue (or today), day scale (day/wk/mo 3-way cycle).
+Does **not** reset per-scale stretch windows (D7 / Q5)."
 function _gantt_init!(m::AppModel)
     dates = Date[]
     for i in gantt_dated_issues(m)
@@ -1043,11 +1128,32 @@ function _gantt_row!(m::AppModel, delta::Int)
 end
 
 function _gantt_zoom!(m::AppModel)
+    m.gantt_drag = nothing                    # D15 / Q7: scale change desyncs drag thirds
     m.gantt_scale = if m.gantt_scale === :day; :week
                     elseif m.gantt_scale === :week; :month
                     else :day
                     end
     m.message = "Gantt scale: $(m.gantt_scale)"
+    m
+end
+
+"""
+    _gantt_stretch!(m, dir)
+
+Adjust the logical view-window for the **active** scale only.
+`dir > 0` → more stretch (smaller window); `dir < 0` → less stretch (larger).
+Cancels drag, ensures selection visible, sets status message last, saves prefs.
+"""
+function _gantt_stretch!(m::AppModel, dir::Int)
+    m.gantt_drag = nothing                    # D12
+    scale = m.gantt_scale
+    cur = gantt_view_window(m, scale)
+    new_w = gantt_set_view_window!(m, scale, cur - dir * gantt_stretch_step(scale))
+    _gantt_ensure_selection_visible!(m)       # D11
+    m.message = new_w == cur ?
+        "Gantt stretch [$(scale)]: window $(new_w) (limit)" :
+        "Gantt stretch [$(scale)]: window $(new_w)"
+    _save_gantt_ui_prefs!(m)                  # D14
     m
 end
 
@@ -1062,7 +1168,7 @@ end
 
 If the selected issue's bar/point lies wholly outside the current chart window,
 scroll `m.gantt_start` so the bar is visible (modern Gantt keep-in-view).
-Uses day-view 14-col cap for day scale; a representative width for week/month.
+Uses the live per-scale view window (`gantt_view_window`).
 """
 function _gantt_ensure_selection_visible!(m::AppModel)
     iss = _gantt_selected_issue(m)
@@ -1071,7 +1177,7 @@ function _gantt_ensure_selection_visible!(m::AppModel)
     span === nothing && return m
     sd, ed = span
     dpc = gantt_days_per_col(m.gantt_scale)
-    ncols = m.gantt_scale === :day ? GANTT_DAY_VIEW_WINDOW : 60
+    ncols = gantt_view_window(m)
     # Match render: day scale applies near-term clamp unless selection needs past
     win = gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, ncols, span)
     if gantt_bar_in_window(win, dpc, ncols, sd, ed)
@@ -1279,9 +1385,10 @@ function gantt_layout(m::AppModel, area::Rect;
     left_w = max(10, min(left_w, area.width - 10))
     chart_x = area.x + left_w
     physical_ncols = area.width - left_w   # physical chart columns
-    # Day view: hard-capped 14-day window. view_ncols drives bars/axis/today;
-    # label_ncols may use the physical gutter past the day strip (legacy G4 geom).
-    view_ncols = m.gantt_scale === :day ? min(physical_ncols, GANTT_DAY_VIEW_WINDOW) : physical_ncols
+    # Live per-scale view window (stretch control). view_ncols drives bars/axis/today;
+    # day label_ncols may use the physical gutter past the day strip (legacy G4 geom).
+    win = gantt_view_window(m)
+    view_ncols = min(physical_ncols, win)
     label_ncols = m.gantt_scale === :day ? physical_ncols : view_ncols
     sel_issue = _gantt_selected_issue(m)
     sel_span = sel_issue === nothing ? nothing : gantt_issue_span(sel_issue)
@@ -1771,12 +1878,19 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     sel_issue_early = _gantt_selected_issue(m)
     scale_lbl = lay.scale === :month ? "month" :
                 lay.scale === :day   ? "day"   : "week"
+    win_n = gantt_view_window(m)
+    # Closed scale token `[day]` first (tests); window badge ` · N` when wide (D10/Q6).
     base = "GANTT — $(win_start) → $(win_end)  [$(scale_lbl)]"
-    # Compact legend (PR6 / G5): bar / key / diamond / today glyphs must stay readable.
     if is_narrow && ncols >= 8
-        base = "GANTT[$(scale_lbl)]"
+        base = "GANTT[$(scale_lbl)]"   # narrow: no badge, no stretch buttons
+    elseif !is_narrow
+        base = base * " · $(win_n)"
     end
     title = base
+    # Stretch affordance glyphs (paint-only in PR2; hit-test in PR3). Right-aligned.
+    btns = "[+][-]"
+    show_btns = !is_narrow && area.width >= 36
+    title_budget = show_btns ? max(1, area.width - textwidth(btns)) : area.width
     if ncols >= 10
         leg = if !is_narrow && area.width >= 90
             # Wide: full legend with key token (PR-V chart identity)
@@ -1787,13 +1901,17 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             " " * string(gantt_safe_char('░', is_narrow)) * string(gantt_safe_char('█', is_narrow)) *
                   "K" * string(gantt_safe_char('◆', is_narrow)) * string(gantt_safe_char('┃', is_narrow))
         end
-        if textwidth(title) + textwidth(leg) <= area.width
+        if textwidth(title) + textwidth(leg) <= title_budget
             title = title * leg
         end
     end
     set_string!(buf, area.x, area.y,
-                _short(title, area.width),
+                _short(title, title_budget),
                 Style(; fg = col_primary(), bold = true))
+    if show_btns
+        set_string!(buf, area.x + area.width - textwidth(btns), area.y, btns,
+                    Style(; fg = col_text_dim()))
+    end
 
     # z1 — alternating period wash on band (under weekend + sprint)
     for c in gantt_period_shade_cols(win_start, dpc, view_ncols, lay.scale)

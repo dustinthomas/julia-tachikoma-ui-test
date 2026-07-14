@@ -3,7 +3,7 @@
 #   • Calendar day drill-down lists EXACTLY that day's issues + create-with-due.
 #   • Gantt bar extents deterministic for known dates at a fixed size.
 #   • Today marker column correct (computed from Dates.today()).
-#   • Zoom changes the scale.
+#   • Scale (z) cycles day/week/month; stretch (+/−) adjusts view window.
 #   • No-conflict: any printable char in the calendar create modal mutates only
 #     the focused editor — never a view/global shortcut.
 # Given/When/Then, driven purely via update!(m, KeyEvent(...)) + TestBackend.
@@ -285,7 +285,8 @@ end
         @test count(isdigit, chart_m) >= 3
         @test count(==(' '), chart_m) >= 6
         mblob = p4_screen_blob(tbm; h = 12)
-        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December", mblob)
+        # Default month window (26 week-cols) may abbreviate tabs (Jul/Aug); full names when wider.
+        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec", mblob)
         # Pure contract: wide week + month ticks leave gaps (not a digit wall)
         wt = P4.gantt_axis_tick_labels(Dates.today() - Day(1), 1, 60)
         @test any(begin
@@ -315,7 +316,8 @@ end
         p4!(m, 'z'); @test m.gantt_scale == :month
         tbm = T.TestBackend(110, 14); T.reset!(tbm.buf)
         P4.render_gantt!(m, tbm.buf, T.Rect(1, 1, 110, 14))
-        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December",
+        # Full or abbreviated month tabs under default view window
+        @test occursin(r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec",
                        p4_screen_blob(tbm; h = 14))
     end
 
@@ -451,5 +453,136 @@ end
             @test T.text(m.edit_form.title_input) == before * string(ch)
         end
         @test T.text(m.edit_form.title_input) == base * "CGBKqzhjkl123/nvae"
+    end
+
+    @testset "FEATURE: Gantt keyboard stretch (PR2)" begin
+        @testset "Given day Gantt When + Then window shrinks and title badge updates" begin
+            m = p4login()
+            e = P4.Stores.create_epic!(m.boardstore; name = "StretchBDD")
+            P4.Stores.create_issue!(m.boardstore; title = "SBar", epic_id = e.id,
+                                    start_date = Dates.today() - Day(1),
+                                    due_date = Dates.today() + Day(4))
+            p4!(m, 'G')
+            @test m.view == :gantt && m.gantt_scale == :day
+            @test m.gantt_win_day == 14
+            tb = T.TestBackend(120, 18); T.reset!(tb.buf)
+            P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 18))
+            title = T.row_text(tb, 1)
+            @test title !== nothing && occursin("[day]", title)
+            @test occursin(" · 14", title) || occursin("· 14", title)
+            @test occursin("[+]", title) && occursin("[-]", title)
+            p4!(m, '+')
+            @test m.gantt_win_day == 13
+            @test m.message == "Gantt stretch [day]: window 13"
+            tb2 = T.TestBackend(120, 18); T.reset!(tb2.buf)
+            P4.render_gantt!(m, tb2.buf, T.Rect(1, 1, 120, 18))
+            title2 = T.row_text(tb2, 1)
+            @test title2 !== nothing && occursin("[day]", title2)
+            @test occursin(" · 13", title2) || occursin("· 13", title2)
+            lay = P4.gantt_layout(m, T.Rect(1, 1, 120, 18))
+            @test lay.view_ncols == min(lay.physical_ncols, 13)
+        end
+
+        @testset "Given per-scale windows When z cycles Then each scale keeps its window" begin
+            m = p4login()
+            e = P4.Stores.create_epic!(m.boardstore; name = "MemBDD")
+            P4.Stores.create_issue!(m.boardstore; title = "MBar", epic_id = e.id,
+                                    start_date = Dates.today(), due_date = Dates.today() + Day(2))
+            p4!(m, 'G')
+            p4!(m, '+'); p4!(m, '+')  # day → 12
+            @test m.gantt_win_day == 12
+            p4!(m, 'z')               # week
+            @test m.gantt_scale == :week
+            @test m.gantt_win_day == 12
+            p4!(m, '+')               # week step 7 → 35
+            @test m.gantt_win_week == 35
+            tb = T.TestBackend(100, 16); T.reset!(tb.buf)
+            P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 100, 16))
+            @test T.find_text(tb, "[week]") !== nothing
+            p4!(m, 'z'); p4!(m, 'z')  # month → day
+            @test m.gantt_scale == :day
+            @test m.gantt_win_day == 12
+            @test m.gantt_win_week == 35
+        end
+
+        @testset "Given day window at min When + Then limit message and no change" begin
+            m = p4login()
+            e = P4.Stores.create_epic!(m.boardstore; name = "LimBDD")
+            P4.Stores.create_issue!(m.boardstore; title = "LBar", epic_id = e.id,
+                                    start_date = Dates.today(), due_date = Dates.today() + Day(1))
+            p4!(m, 'G')
+            P4.gantt_set_view_window!(m, :day, P4.GANTT_DAY_WIN_MIN)
+            p4!(m, '+')
+            @test m.gantt_win_day == P4.GANTT_DAY_WIN_MIN
+            @test m.message == "Gantt stretch [day]: window $(P4.GANTT_DAY_WIN_MIN) (limit)"
+            # re-render after clamp no-op
+            tb = T.TestBackend(100, 16); T.reset!(tb.buf)
+            P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 100, 16))
+            @test T.find_text(tb, "[day]") !== nothing
+        end
+
+        @testset "Given far selected When stretch-in Then selection stays in window" begin
+            m = p4login()
+            e = P4.Stores.create_epic!(m.boardstore; name = "VisBDD")
+            near = P4.Stores.create_issue!(m.boardstore; title = "NearV", epic_id = e.id,
+                                           start_date = Dates.today() - Day(1),
+                                           due_date = Dates.today() + Day(2))
+            far = P4.Stores.create_issue!(m.boardstore; title = "FarV", epic_id = e.id,
+                                          start_date = Dates.today() + Day(50),
+                                          due_date = Dates.today() + Day(55))
+            p4!(m, 'G')
+            P4.gantt_set_view_window!(m, :day, 40)
+            P4._gantt_select_issue_id!(m, far.id)
+            m.gantt_start = Dates.today() - Day(1)
+            p4!(m, '+')
+            @test m.gantt_win_day == 39
+            dpc = P4.gantt_days_per_col(:day)
+            ncols = P4.gantt_view_window(m)
+            span = P4.gantt_issue_span(far)
+            win = P4.gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, ncols, span)
+            @test P4.gantt_bar_in_window(win, dpc, ncols, span[1], span[2])
+            tb = T.TestBackend(120, 20); T.reset!(tb.buf)
+            P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 20))
+            @test T.find_text(tb, far.key) !== nothing || occursin("GANTT", something(T.row_text(tb, 1), ""))
+        end
+
+        @testset "Given active drag When stretch or z Then drag is cancelled" begin
+            m = p4login()
+            e = P4.Stores.create_epic!(m.boardstore; name = "DragBDD")
+            iss = P4.Stores.create_issue!(m.boardstore; title = "DBar", epic_id = e.id,
+                                          start_date = Dates.today() + Day(1),
+                                          due_date = Dates.today() + Day(3))
+            p4!(m, 'G')
+            m.gantt_drag = (issue_id = iss.id, mode = :body, origin_col = 0,
+                            orig_start = iss.start_date, orig_due = iss.due_date,
+                            preview_start = iss.start_date, preview_due = iss.due_date)
+            p4!(m, '+')
+            @test m.gantt_drag === nothing
+            m.gantt_drag = (issue_id = iss.id, mode = :body, origin_col = 0,
+                            orig_start = iss.start_date, orig_due = iss.due_date,
+                            preview_start = iss.start_date, preview_due = iss.due_date)
+            p4!(m, 'z')
+            @test m.gantt_drag === nothing
+            @test m.gantt_scale == :week
+            tb = T.TestBackend(100, 16); T.reset!(tb.buf)
+            P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 100, 16))
+            @test T.find_text(tb, "[week]") !== nothing
+        end
+
+        @testset "Given stretch When prefs saved Then new model loads windows" begin
+            m = p4login()
+            e = P4.Stores.create_epic!(m.boardstore; name = "PrefsBDD")
+            P4.Stores.create_issue!(m.boardstore; title = "PBar", epic_id = e.id,
+                                    start_date = Dates.today(), due_date = Dates.today() + Day(1))
+            p4!(m, 'G')
+            p4!(m, '+'); p4!(m, '+'); p4!(m, '+')  # day 11
+            @test m.gantt_win_day == 11
+            @test isfile(P4._gantt_ui_prefs_path(m))
+            m2 = P4.AppModel(; token_path = m.session.token_path, secret = "test-secret",
+                             seed = false, restore = false)
+            @test m2.gantt_win_day == 11
+            @test m2.gantt_win_week == 42
+            @test m2.gantt_win_month == 26
+        end
     end
 end
