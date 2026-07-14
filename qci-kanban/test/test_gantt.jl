@@ -127,6 +127,71 @@ end
         @test G4.gantt_bar_extent(ws, 1, Date(2026, 3, 12), Date(2026, 4, 30), 20) == (2, 19) # right-clamped
     end
 
+    # Stretch control pure API (PR1): default/clamp/step + window-first cpd.
+    # Frozen table: day 14 [7,56]/1; week 42 [14,90]/7; month 26 [8,52]/2.
+    @testset "gantt view-window helpers (default / clamp / step / cols_per_day)" begin
+        # Frozen default windows match product consts
+        @test G4.GANTT_DAY_VIEW_WINDOW == 14
+        @test G4.GANTT_WEEK_VIEW_WINDOW == 42
+        @test G4.GANTT_MONTH_VIEW_WINDOW == 26
+        @test G4.gantt_default_view_window(:day) == 14
+        @test G4.gantt_default_view_window(:week) == 42
+        @test G4.gantt_default_view_window(:month) == 26
+        @test G4.gantt_default_view_window(:unknown) == 1
+        @test G4.gantt_default_view_window(:year) == 1
+
+        # Stretch steps
+        @test G4.GANTT_DAY_STRETCH_STEP == 1
+        @test G4.GANTT_WEEK_STRETCH_STEP == 7
+        @test G4.GANTT_MONTH_STRETCH_STEP == 2
+        @test G4.gantt_stretch_step(:day) == 1
+        @test G4.gantt_stretch_step(:week) == 7
+        @test G4.gantt_stretch_step(:month) == 2
+        @test G4.gantt_stretch_step(:unknown) == 1
+
+        # Clamp table + below-min → min, above-max → max
+        @test G4.GANTT_DAY_WIN_MIN == 7 && G4.GANTT_DAY_WIN_MAX == 56
+        @test G4.GANTT_WEEK_WIN_MIN == 14 && G4.GANTT_WEEK_WIN_MAX == 90
+        @test G4.GANTT_MONTH_WIN_MIN == 8 && G4.GANTT_MONTH_WIN_MAX == 52
+        @test G4.gantt_clamp_view_window(:day, 14) == 14
+        @test G4.gantt_clamp_view_window(:day, 6) == 7      # below min → min
+        @test G4.gantt_clamp_view_window(:day, 0) == 7
+        @test G4.gantt_clamp_view_window(:day, 100) == 56   # above max → max
+        @test G4.gantt_clamp_view_window(:week, 42) == 42
+        @test G4.gantt_clamp_view_window(:week, 10) == 14
+        @test G4.gantt_clamp_view_window(:week, 200) == 90
+        @test G4.gantt_clamp_view_window(:month, 26) == 26
+        @test G4.gantt_clamp_view_window(:month, 1) == 8
+        @test G4.gantt_clamp_view_window(:month, 99) == 52
+        # Unknown scale: floor at 1, no upper clamp
+        @test G4.gantt_clamp_view_window(:unknown, 0) == 1
+        @test G4.gantt_clamp_view_window(:unknown, 5) == 5
+        @test G4.gantt_clamp_view_window(:unknown, -3) == 1
+
+        # Window-first cpd: cpd = ⌊physical / window⌋, min 1
+        @test G4.gantt_cols_per_day(56, 14) == 4
+        @test G4.gantt_cols_per_day(42, 42) == 1
+        @test G4.gantt_cols_per_day(100, 26) == 3
+        @test G4.gantt_cols_per_day(13, 14) == 1   # physical < window → 1
+        @test G4.gantt_cols_per_day(0, 14) == 1    # physical < 1 → 1
+        @test G4.gantt_cols_per_day(-5, 14) == 1
+        @test G4.gantt_cols_per_day(20, 0) == 20   # window clamped to ≥1 via max(1, window)
+
+        # Scale overload at defaults equals window-first with default window
+        @test G4.gantt_cols_per_day(:day, 56) == G4.gantt_cols_per_day(56, G4.gantt_default_view_window(:day))
+        @test G4.gantt_cols_per_day(:week, 84) == G4.gantt_cols_per_day(84, G4.gantt_default_view_window(:week))
+        @test G4.gantt_cols_per_day(:month, 52) == G4.gantt_cols_per_day(52, G4.gantt_default_view_window(:month))
+        @test G4.gantt_cols_per_day(:day, 56) == 4
+        @test G4.gantt_cols_per_day(:week, 84) == 2
+        @test G4.gantt_cols_per_day(:month, 52) == 2
+        # Unknown scale MUST return 1 (D9 / existing contract)
+        @test G4.gantt_cols_per_day(:unknown, 100) == 1
+        @test G4.gantt_cols_per_day(:year, 100) == 1
+        # physical < 1 on scale form also → 1
+        @test G4.gantt_cols_per_day(:day, 0) == 1
+        @test G4.gantt_cols_per_day(:week, -1) == 1
+    end
+
     @testset "row_stride pure helpers (1 blank row between bars)" begin
         # Product: one terminal gap row between content rows (stride 2).
         @test G4.GANTT_ROW_STRIDE == 2
@@ -1190,8 +1255,11 @@ end
         @test T.find_text(tb, "PolishSprint") !== nothing || T.find_text(tb, "Polish") !== nothing || T.find_text(tb, "Poli") !== nothing
         brow = row_with(tb, "InS", 12)
         @test brow !== nothing
-        # band row has ░ (or fallback) and possibly edge polish
-        @test occursin("░", brow) || occursin("#", brow) || occursin(".", brow) || occursin("▓", brow)
+        # Sprint band polish lives on the band row (title+1). Issue bars can overwrite
+        # weekend ░ under the bar depending on Dates.today() weekday — assert the band.
+        band = T.row_text(tb, 2)
+        @test band !== nothing
+        @test occursin("░", band) || occursin("▓", band) || occursin("#", band) || occursin(".", band)
         # re-render after update!
         g4!(m, 'z')
         tb2 = gantt_render(m; w=80, h=12)

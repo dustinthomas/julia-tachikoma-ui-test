@@ -30,6 +30,91 @@ gantt_scroll_days(scale::Symbol)::Int =
 timeline strip even on wide terminals so day zoom does not devolve into months."
 const GANTT_DAY_VIEW_WINDOW = 14
 
+"Default logical window size for week view (day-columns; each column = 1 day)."
+const GANTT_WEEK_VIEW_WINDOW = 42
+
+"Default logical window size for month view (week-columns; each column = 7 days)."
+const GANTT_MONTH_VIEW_WINDOW = 26
+
+# Stretch clamp / step table (product-frozen Q2). Min/max are inclusive;
+# step is the delta applied per stretch-in / stretch-out press.
+const GANTT_DAY_WIN_MIN,   GANTT_DAY_WIN_MAX   = 7,  56
+const GANTT_WEEK_WIN_MIN,  GANTT_WEEK_WIN_MAX  = 14, 90
+const GANTT_MONTH_WIN_MIN, GANTT_MONTH_WIN_MAX = 8,  52
+
+const GANTT_DAY_STRETCH_STEP   = 1
+const GANTT_WEEK_STRETCH_STEP  = 7
+const GANTT_MONTH_STRETCH_STEP = 2
+
+"""
+    gantt_default_view_window(scale::Symbol) -> Int
+
+Default logical view-window size for `scale` (`:day` / `:week` / `:month`).
+Unknown scales return `1` (defensive; stretch UI never selects them).
+"""
+function gantt_default_view_window(scale::Symbol)::Int
+    scale === :day   && return GANTT_DAY_VIEW_WINDOW
+    scale === :week  && return GANTT_WEEK_VIEW_WINDOW
+    scale === :month && return GANTT_MONTH_VIEW_WINDOW
+    return 1
+end
+
+"""
+    gantt_clamp_view_window(scale::Symbol, w::Int) -> Int
+
+Clamp a proposed view-window `w` into the product min/max for `scale`.
+Unknown scales: floor at 1 (no upper bound).
+"""
+function gantt_clamp_view_window(scale::Symbol, w::Int)::Int
+    if scale === :day
+        return clamp(w, GANTT_DAY_WIN_MIN, GANTT_DAY_WIN_MAX)
+    elseif scale === :week
+        return clamp(w, GANTT_WEEK_WIN_MIN, GANTT_WEEK_WIN_MAX)
+    elseif scale === :month
+        return clamp(w, GANTT_MONTH_WIN_MIN, GANTT_MONTH_WIN_MAX)
+    else
+        return max(1, w)
+    end
+end
+
+"""
+    gantt_stretch_step(scale::Symbol) -> Int
+
+Integer delta applied to the view-window per stretch-in / stretch-out press.
+Unknown scales return `1`.
+"""
+function gantt_stretch_step(scale::Symbol)::Int
+    scale === :day   && return GANTT_DAY_STRETCH_STEP
+    scale === :week  && return GANTT_WEEK_STRETCH_STEP
+    scale === :month && return GANTT_MONTH_STRETCH_STEP
+    return 1
+end
+
+"""
+    gantt_cols_per_day(physical_ncols::Int, view_window::Int) -> Int
+
+How many physical terminal columns map to one logical window unit when a
+`view_window`-sized logical span fills `physical_ncols` chart columns:
+`⌊physical / window⌋`, floored at 1. Non-positive physical → 1.
+Primary form used by layout once stretch wires live windows.
+"""
+function gantt_cols_per_day(physical_ncols::Int, view_window::Int)::Int
+    physical_ncols < 1 && return 1
+    max(1, fld(physical_ncols, max(1, view_window)))
+end
+
+"""
+    gantt_cols_per_day(scale::Symbol, physical_ncols::Int) -> Int
+
+Scale overload at **default** view-window for `scale`. Unknown scales **must**
+return `1` (D9 / pure-test contract). Non-positive physical → 1.
+"""
+function gantt_cols_per_day(scale::Symbol, physical_ncols::Int)::Int
+    physical_ncols < 1 && return 1
+    scale in (:day, :week, :month) || return 1
+    gantt_cols_per_day(physical_ncols, gantt_default_view_window(scale))
+end
+
 """
 Terminal rows per logical Gantt row: 1 content line + (`stride - 1`) blank
 inter-bar gap lines. Product default is stride `2` (one blank row between bars);
