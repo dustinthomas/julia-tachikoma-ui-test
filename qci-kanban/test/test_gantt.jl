@@ -9,6 +9,21 @@ G4 = QciKanban
 g4!(m, x) = T.update!(m, T.KeyEvent(x))
 gantt_login() = (m = fresh_app(; seed = false); app_login_new(m; name = "Gantt User"); m)
 
+# Stretch-aware absolute x helpers (logical col → terminal x under layout.cols_per_day).
+_gpx(lay, log_c) = lay.chart_x + G4.gantt_phys_c0(log_c, lay.cols_per_day)
+_gpmid(lay, c0, c1) = begin
+    p0, p1 = G4.gantt_phys_extent(c0, c1, lay.cols_per_day)
+    lay.chart_x + p0 + (p1 - p0) ÷ 2
+end
+# Physical delta for N logical columns (mouse drag by N day-cols).
+_gpd(lay, n_log) = n_log * max(1, lay.cols_per_day)
+# Post-bar geom in physical space (matches paint + hit-test).
+_gpost(lay, c0, c1; gap=1, max_w=nothing, tcol=nothing) = begin
+    p0, p1 = G4.gantt_phys_extent(c0, c1, lay.cols_per_day)
+    tphys = tcol === nothing ? nothing : G4.gantt_phys_c0(tcol, lay.cols_per_day)
+    G4.gantt_post_bar_label_geom(p0, p1, lay.label_ncols; gap = gap, max_w = max_w, tcol = tphys)
+end
+
 # longest run of char `ch` in string `s`
 function maxrun(s::AbstractString, ch::Char)
     best = 0; cur = 0
@@ -190,6 +205,22 @@ end
         # physical < 1 on scale form also → 1
         @test G4.gantt_cols_per_day(:day, 0) == 1
         @test G4.gantt_cols_per_day(:week, -1) == 1
+
+        # Logical ↔ physical mapping for cpd fattening
+        @test G4.gantt_phys_c0(0, 4) == 0
+        @test G4.gantt_phys_c1(0, 4) == 3
+        @test G4.gantt_phys_c0(2, 4) == 8
+        @test G4.gantt_phys_c1(2, 4) == 11
+        @test G4.gantt_phys_extent(1, 3, 3) == (3, 11)
+        @test G4.gantt_logical_col(0, 4) == 0
+        @test G4.gantt_logical_col(3, 4) == 0
+        @test G4.gantt_logical_col(4, 4) == 1
+        @test G4.gantt_logical_col(11, 4) == 2
+        @test G4.gantt_paint_ncols(14, 4) == 56
+        @test G4.gantt_paint_ncols(14, 1) == 14
+        # cpd ≤ 0 treated as 1
+        @test G4.gantt_phys_c0(2, 0) == 2
+        @test G4.gantt_logical_col(5, 0) == 5
     end
 
     @testset "row_stride pure helpers (1 blank row between bars)" begin
@@ -2003,7 +2034,7 @@ end
         yd = gantt_y(lay, rd)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, pt.due_date, lay.view_ncols)
         @test pcol !== nothing
-        post = G4.gantt_post_bar_label_geom(pcol, pcol, lay.label_ncols; gap = 1, max_w = kw)
+        post = _gpost(lay, pcol, pcol; gap = 1, max_w = kw)
         @test post !== nothing && post.max_chars >= kw
         st = T.style_at(tb, lay.chart_x + post.start, yd)
         @test st.fg == G4.Theming.col_primary_hi()
@@ -2043,29 +2074,35 @@ end
     end
 
     @testset "PR-V: in-bar key when post-bar cannot fit (flush-right bar)" begin
-        # Bar ends at right edge → post_geom nothing; bw≥5 → key painted inside bar.
+        # Bar fills entire physical chart (cpd=1, view=physical) → no post-bar room;
+        # bw≥5 physical → key painted inside bar.
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "InBarFlushEp")
         a = G4.Stores.create_issue!(m.boardstore; title = "FlushInBarKey", epic_id = e.id,
                                     start_date = Dates.today() - Day(1),
                                     due_date = Dates.today() + Day(200))
         g4!(m, 'G')
-        g4!(m, 'z')  # week — full physical width
+        # Max day window + medium width → cpd=1 and view=physical (no gutter past paint).
+        G4.gantt_set_view_window!(m, :day, G4.GANTT_DAY_WIN_MAX)
         m.gantt_start = Dates.today() - Day(1)
-        @test m.gantt_scale == :week
-        w, h = 120, 14
+        @test m.gantt_scale == :day
+        w, h = 70, 14   # physical chart < 56 so view fills physical at cpd=1
         area = T.Rect(1, 1, w, h)
         rows = G4.gantt_rows(m)
         lay = G4.gantt_layout(m, area; rows = rows)
+        @test lay.cols_per_day == 1
+        @test lay.paint_ncols == lay.view_ncols
+        @test lay.paint_ncols == lay.physical_ncols
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         @test ext !== nothing
         c0, c1 = ext
-        bw = c1 - c0 + 1
+        p0, p1 = G4.gantt_phys_extent(c0, c1, lay.cols_per_day)
+        pbw = p1 - p0 + 1
         kw = textwidth(a.key)
-        post = G4.gantt_post_bar_label_geom(c0, c1, lay.label_ncols; gap = 1, max_w = kw)
+        post = _gpost(lay, c0, c1; gap = 1, max_w = kw)
         # Flush-right: no room after bar for full key
         @test post === nothing || post.max_chars < kw
-        @test bw >= max(5, kw + 2)
+        @test pbw >= max(5, kw + 2)
         tb = gantt_render(m; w = w, h = h)
         r = row_with(tb, a.key, h)
         @test r !== nothing
@@ -2109,11 +2146,16 @@ end
         @test lay.grid_y0 == area.y + lay.content_start
         @test lay.chart_x == area.x + lay.left_w
         @test lay.physical_ncols == area.width - lay.left_w
-        # Day: view capped at 14; label_ncols may still track physical gutter
+        # Day: view capped at 14; cpd fattening fills physical; labels clip in physical space
         @test lay.view_ncols == min(lay.physical_ncols, G4.GANTT_DAY_VIEW_WINDOW)
         @test lay.view_ncols == G4.GANTT_DAY_VIEW_WINDOW  # wide terminal → full 14
+        @test lay.cols_per_day == G4.gantt_cols_per_day(lay.physical_ncols, G4.GANTT_DAY_VIEW_WINDOW)
+        @test lay.paint_ncols == G4.gantt_paint_ncols(lay.view_ncols, lay.cols_per_day)
+        @test lay.paint_ncols <= lay.physical_ncols
+        @test lay.cols_per_day >= 1
+        # On wide frames day default cpd > 1 (stretch fills chart)
+        @test lay.cols_per_day > 1 || lay.physical_ncols < G4.GANTT_DAY_VIEW_WINDOW * 2
         @test lay.label_ncols == lay.physical_ncols
-        @test lay.label_ncols > lay.view_ncols
         @test lay.left_w >= 10
         @test lay.nshow >= 1
         @test lay.row_start == 1
@@ -2150,12 +2192,13 @@ end
         @test lay.footer_y === nothing
         @test lay.left_w <= 14
         @test lay.left_w >= 10
-        # Day view still caps at min(physical, 14)
+        # Day view still caps logical at min(physical, 14); labels use physical clip
         @test lay.view_ncols == min(lay.physical_ncols, G4.GANTT_DAY_VIEW_WINDOW)
         @test lay.label_ncols == lay.physical_ncols
+        @test lay.cols_per_day == G4.gantt_cols_per_day(lay.physical_ncols, G4.gantt_view_window(m))
     end
 
-    @testset "day vs week/month view_ncols + label_ncols" begin
+    @testset "day vs week/month view_ncols + cpd fattening + label_ncols" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "ColsEp")
         G4.Stores.create_issue!(m.boardstore; title = "ColsIssue", epic_id = e.id,
@@ -2167,7 +2210,8 @@ end
         @test lay_d.scale === :day
         @test lay_d.view_ncols == G4.GANTT_DAY_VIEW_WINDOW
         @test lay_d.label_ncols == lay_d.physical_ncols
-        @test lay_d.label_ncols > lay_d.view_ncols
+        @test lay_d.cols_per_day == G4.gantt_cols_per_day(lay_d.physical_ncols, 14)
+        @test lay_d.paint_ncols == lay_d.view_ncols * lay_d.cols_per_day
         @test lay_d.dpc == 1
         @test lay_d.has_dual === true
         @test lay_d.paint_weekends === true
@@ -2179,7 +2223,9 @@ end
         # Live window wire: view capped at gantt_view_window (default week=42)
         @test lay_w.view_ncols == min(lay_w.physical_ncols, G4.gantt_view_window(m, :week))
         @test lay_w.view_ncols == min(lay_w.physical_ncols, G4.GANTT_WEEK_VIEW_WINDOW)
-        @test lay_w.label_ncols == lay_w.view_ncols
+        @test lay_w.cols_per_day == G4.gantt_cols_per_day(lay_w.physical_ncols, G4.GANTT_WEEK_VIEW_WINDOW)
+        @test lay_w.paint_ncols == G4.gantt_paint_ncols(lay_w.view_ncols, lay_w.cols_per_day)
+        @test lay_w.label_ncols == lay_w.physical_ncols
         @test lay_w.dpc == 1
         @test lay_w.paint_weekends === true
         @test lay_w.paint_week_seps === true
@@ -2190,7 +2236,9 @@ end
         @test lay_m.scale === :month
         @test lay_m.view_ncols == min(lay_m.physical_ncols, G4.gantt_view_window(m, :month))
         @test lay_m.view_ncols == min(lay_m.physical_ncols, G4.GANTT_MONTH_VIEW_WINDOW)
-        @test lay_m.label_ncols == lay_m.view_ncols
+        @test lay_m.cols_per_day == G4.gantt_cols_per_day(lay_m.physical_ncols, G4.GANTT_MONTH_VIEW_WINDOW)
+        @test lay_m.paint_ncols == G4.gantt_paint_ncols(lay_m.view_ncols, lay_m.cols_per_day)
+        @test lay_m.label_ncols == lay_m.physical_ncols
         @test lay_m.dpc == 7
         @test lay_m.paint_weekends === false
         @test lay_m.paint_week_seps === false
@@ -2328,7 +2376,7 @@ end
         @test expected_sel_a < ra   # epic offsets full-list vs issue-only
 
         # Bar cell on A
-        hit_bar = G4.gantt_hit_test(lay, rows, lay.chart_x + c0a, ya)
+        hit_bar = G4.gantt_hit_test(lay, rows, _gpx(lay, c0a), ya)
         @test hit_bar.kind === G4.gantt_hit_bar
         @test hit_bar.issue_id == a.id
         @test hit_bar.issue_sel == expected_sel_a
@@ -2337,7 +2385,7 @@ end
 
         # Post-bar key on A (after c1, gap 1)
         kw_a = textwidth(a.key)
-        post_a = G4.gantt_post_bar_label_geom(c0a, c1a, lay.label_ncols; gap = 1, max_w = kw_a)
+        post_a = _gpost(lay, c0a, c1a; gap = 1, max_w = kw_a)
         @test post_a !== nothing && post_a.max_chars >= kw_a
         hit_post = G4.gantt_hit_test(lay, rows, lay.chart_x + post_a.start, ya)
         @test hit_post.kind === G4.gantt_hit_post_bar
@@ -2347,7 +2395,7 @@ end
         # Gap between bar end and post-bar key is empty chart (not bar)
         gap_col = c1a + 1
         if gap_col < lay.view_ncols
-            hit_gap = G4.gantt_hit_test(lay, rows, lay.chart_x + gap_col, ya)
+            hit_gap = G4.gantt_hit_test(lay, rows, _gpx(lay, gap_col), ya)
             @test hit_gap.kind === G4.gantt_hit_empty_chart
         end
 
@@ -2355,7 +2403,7 @@ end
         ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
         @test ext_b !== nothing
         expected_sel_b = count(r -> r.kind === :issue, rows[1:rb])
-        hit_b = G4.gantt_hit_test(lay, rows, lay.chart_x + ext_b[1], yb)
+        hit_b = G4.gantt_hit_test(lay, rows, _gpx(lay, ext_b[1]), yb)
         @test hit_b.kind === G4.gantt_hit_bar
         @test hit_b.issue_id == b.id
         @test hit_b.issue_sel == expected_sel_b
@@ -2366,7 +2414,7 @@ end
         yd = gantt_y(lay, rd)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, dmd.due_date, lay.view_ncols)
         @test pcol !== nothing
-        hit_d = G4.gantt_hit_test(lay, rows, lay.chart_x + pcol, yd)
+        hit_d = G4.gantt_hit_test(lay, rows, _gpx(lay, pcol), yd)
         @test hit_d.kind === G4.gantt_hit_bar
         @test hit_d.issue_id == dmd.id
     end
@@ -2417,7 +2465,7 @@ end
         @test m.gantt_sel == 1
 
         # Click bar of B
-        click_b = T.MouseEvent(lay.chart_x + ext_b[1], yb, T.mouse_left, T.mouse_press, false, false, false)
+        click_b = T.MouseEvent(_gpx(lay, ext_b[1]), yb, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, click_b)
         @test m.gantt_sel == 2
         @test G4._gantt_selected_issue(m).id == b.id
@@ -2441,7 +2489,7 @@ end
         @test m.gantt_sel == 2
 
         # Release / non-left ignored
-        rel = T.MouseEvent(lay.chart_x + ext_b[1], yb, T.mouse_left, T.mouse_release, false, false, false)
+        rel = T.MouseEvent(_gpx(lay, ext_b[1]), yb, T.mouse_left, T.mouse_release, false, false, false)
         G4._handle_gantt_mouse!(m, rel)
         @test m.gantt_sel == 2
         mid = T.MouseEvent(area.x + 1, ya, T.mouse_middle, T.mouse_press, false, false, false)
@@ -2531,7 +2579,7 @@ end
         pcol = G4.gantt_point_col(lay_w.win_start, lay_w.dpc, dmd.due_date, lay_w.view_ncols)
         @test pcol !== nothing
         kwd = textwidth(dmd.key)
-        post_d = G4.gantt_post_bar_label_geom(pcol, pcol, lay_w.label_ncols; gap = 1, max_w = kwd)
+        post_d = _gpost(lay_w, pcol, pcol; gap = 1, max_w = kwd)
         @test post_d !== nothing && post_d.max_chars >= kwd
         hit_dpost = G4.gantt_hit_test(lay_w, rows, lay_w.chart_x + post_d.start, yd)
         @test hit_dpost.kind === G4.gantt_hit_post_bar
@@ -2542,7 +2590,7 @@ end
             nshow_g = min(lay_w.nshow, 3)
             lay_gap = G4.GanttLayout(
                 area_w, lay_w.left_w, lay_w.chart_x, lay_w.physical_ncols, lay_w.view_ncols,
-                lay_w.label_ncols, lay_w.dpc, lay_w.scale,
+                lay_w.label_ncols, lay_w.dpc, lay_w.cols_per_day, lay_w.paint_ncols, lay_w.scale,
                 lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
                 lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
                 lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
@@ -2558,7 +2606,7 @@ end
             @test hit_gap_rail.kind === G4.gantt_hit_none
             # Gap with col past physical_ncols → none
             lay_gap_narrow = G4.GanttLayout(
-                area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, lay_w.scale,
+                area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, 1, 2, lay_w.scale,
                 lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
                 lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
                 lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
@@ -2582,7 +2630,7 @@ end
         # col beyond physical_ncols defensive path: hand-built layout with
         # physical_ncols smaller than area width implies
         lay_def = G4.GanttLayout(
-            area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, lay_w.scale,
+            area_w, lay_w.left_w, lay_w.chart_x, 2, 2, 2, lay_w.dpc, 1, 2, lay_w.scale,
             lay_w.win_start, lay_w.is_narrow, lay_w.compact, lay_w.has_ruler,
             lay_w.has_dual, lay_w.has_quarter, lay_w.has_footer, lay_w.band_y,
             lay_w.quarter_y, lay_w.tab_y, lay_w.tick_y,
@@ -2671,7 +2719,7 @@ end
         c0, c1 = ext
         # Press mid-body
         mid = c0 + (c1 - c0) ÷ 2
-        press = T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false)
+        press = T.MouseEvent(_gpmid(lay, c0, c1), ya, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, press)
         @test m.gantt_drag !== nothing
         @test m.gantt_drag.issue_id == a.id
@@ -2680,14 +2728,14 @@ end
         # Store unchanged while dragging
         @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
         # Drag +2 cols
-        drag = T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        drag = T.MouseEvent(_gpmid(lay, c0, c1) + _gpd(lay, 2), ya, T.mouse_left, T.mouse_drag, false, false, false)
         G4._handle_gantt_mouse!(m, drag)
         @test m.gantt_drag.preview_start == a.start_date + Day(2)
         @test m.gantt_drag.preview_due == a.due_date + Day(2)
         # Still not in store
         @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
         # Release commits
-        rel = T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_release, false, false, false)
+        rel = T.MouseEvent(_gpmid(lay, c0, c1) + _gpd(lay, 2), ya, T.mouse_left, T.mouse_release, false, false, false)
         G4._handle_gantt_mouse!(m, rel)
         @test m.gantt_drag === nothing
         updated = G4.Stores.get_issue(m.boardstore, a.id)
@@ -2711,10 +2759,10 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
-        press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
+        press = T.MouseEvent(_gpx(lay, ext[1]), ya, T.mouse_left, T.mouse_press, false, false, false)
         T.update!(m, press)
         @test m.gantt_drag !== nothing
-        drag = T.MouseEvent(lay.chart_x + ext[1] + 3, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        drag = T.MouseEvent(_gpx(lay, ext[1]) + _gpd(lay, 3), ya, T.mouse_left, T.mouse_drag, false, false, false)
         T.update!(m, drag)
         T.update!(m, T.KeyEvent(:escape))
         @test m.gantt_drag === nothing
@@ -2743,7 +2791,7 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
-        press = T.MouseEvent(lay.chart_x + ext[1], ya, T.mouse_left, T.mouse_press, false, false, false)
+        press = T.MouseEvent(_gpx(lay, ext[1]), ya, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, press)
         @test m.gantt_drag === nothing
         @test occursin("Permission denied", m.message)
@@ -2766,15 +2814,15 @@ end
         yd = gantt_y(lay, rd)
         pcol = G4.gantt_point_col(lay.win_start, lay.dpc, d.due_date, lay.view_ncols)
         @test pcol !== nothing
-        press = T.MouseEvent(lay.chart_x + pcol, yd, T.mouse_left, T.mouse_press, false, false, false)
+        press = T.MouseEvent(_gpx(lay, pcol), yd, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, press)
         @test m.gantt_drag !== nothing
         @test m.gantt_drag.mode === :point
-        drag = T.MouseEvent(lay.chart_x + pcol + 2, yd, T.mouse_left, T.mouse_drag, false, false, false)
+        drag = T.MouseEvent(_gpx(lay, pcol) + _gpd(lay, 2), yd, T.mouse_left, T.mouse_drag, false, false, false)
         G4._handle_gantt_mouse!(m, drag)
         @test m.gantt_drag.preview_start === nothing
         @test m.gantt_drag.preview_due == d.due_date + Day(2)
-        rel = T.MouseEvent(lay.chart_x + pcol + 2, yd, T.mouse_left, T.mouse_release, false, false, false)
+        rel = T.MouseEvent(_gpx(lay, pcol) + _gpd(lay, 2), yd, T.mouse_left, T.mouse_release, false, false, false)
         G4._handle_gantt_mouse!(m, rel)
         @test G4.Stores.get_issue(m.boardstore, d.id).due_date == d.due_date + Day(2)
         @test G4.Stores.get_issue(m.boardstore, d.id).start_date === nothing
@@ -2797,15 +2845,15 @@ end
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
         c0, c1 = ext
         @test G4.gantt_drag_mode_for_bar(c0, c1, c0) === :start
-        press = T.MouseEvent(lay.chart_x + c0, ya, T.mouse_left, T.mouse_press, false, false, false)
+        press = T.MouseEvent(_gpx(lay, c0), ya, T.mouse_left, T.mouse_press, false, false, false)
         G4._handle_gantt_mouse!(m, press)
         @test m.gantt_drag.mode === :start
         # Drag start edge +2 cols
-        drag = T.MouseEvent(lay.chart_x + c0 + 2, ya, T.mouse_left, T.mouse_drag, false, false, false)
+        drag = T.MouseEvent(_gpx(lay, c0) + _gpd(lay, 2), ya, T.mouse_left, T.mouse_drag, false, false, false)
         G4._handle_gantt_mouse!(m, drag)
         @test m.gantt_drag.preview_start == a.start_date + Day(2)
         @test m.gantt_drag.preview_due == a.due_date
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + c0 + 2, ya, T.mouse_left, T.mouse_release, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpx(lay, c0) + _gpd(lay, 2), ya, T.mouse_left, T.mouse_release, false, false, false))
         u = G4.Stores.get_issue(m.boardstore, a.id)
         @test u.start_date == a.start_date + Day(2)
         @test u.due_date == a.due_date
@@ -2854,29 +2902,30 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         ya = gantt_y(lay, ra)
         ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
-        mid = ext[1] + (ext[2] - ext[1]) ÷ 2
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))
+        @test ext !== nothing
+        c0e, c1e = ext
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpmid(lay, c0e, c1e), ya, T.mouse_left, T.mouse_press, false, false, false))
         @test m.gantt_drag !== nothing
         st0 = m.gantt_start
         # Wheel swallowed during drag
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_scroll_down, T.mouse_press, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpmid(lay, c0e, c1e), ya, T.mouse_scroll_down, T.mouse_press, false, false, false))
         @test m.gantt_start == st0
         @test m.gantt_drag !== nothing
         # Middle button during drag leaves state
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_middle, T.mouse_press, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpmid(lay, c0e, c1e), ya, T.mouse_middle, T.mouse_press, false, false, false))
         @test m.gantt_drag !== nothing
         # Escape cancel
         T.update!(m, T.KeyEvent(:escape))
         @test m.gantt_drag === nothing
 
         # Deny on commit: begin drag as admin, demote before release
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid, ya, T.mouse_left, T.mouse_press, false, false, false))
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_drag, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpmid(lay, c0e, c1e), ya, T.mouse_left, T.mouse_press, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpmid(lay, c0e, c1e) + _gpd(lay, 2), ya, T.mouse_left, T.mouse_drag, false, false, false))
         m.current_user = G4.Domain.User(; id = m.current_user.id, email = m.current_user.email,
                                         name = m.current_user.name, role = "viewer")
         m.config.enforce_roles = true
         m.message = ""
-        G4._handle_gantt_mouse!(m, T.MouseEvent(lay.chart_x + mid + 2, ya, T.mouse_left, T.mouse_release, false, false, false))
+        G4._handle_gantt_mouse!(m, T.MouseEvent(_gpmid(lay, c0e, c1e) + _gpd(lay, 2), ya, T.mouse_left, T.mouse_release, false, false, false))
         @test m.gantt_drag === nothing
         @test occursin("Permission denied", m.message)
         @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
@@ -3151,15 +3200,29 @@ end
         @test title1 !== nothing && occursin("[day]", title1)
         @test occursin(" · 13", title1) || occursin("· 13", title1)
 
-        # = alias for stretch in
+        # = alias for stretch in + re-render badge
         g4!(m, '=')
         @test m.gantt_win_day == 12
         @test m.message == "Gantt stretch [day]: window 12"
+        tb_eq = gantt_render(m; w = 120, h = 20)
+        @test occursin("[day]", something(T.row_text(tb_eq, 1), ""))
+        @test occursin(" · 12", something(T.row_text(tb_eq, 1), "")) ||
+              occursin("· 12", something(T.row_text(tb_eq, 1), ""))
 
-        # Stretch out (-)
+        # Stretch out (-) + re-render
         g4!(m, '-')
         @test m.gantt_win_day == 13
         @test m.message == "Gantt stretch [day]: window 13"
+        tb_m = gantt_render(m; w = 120, h = 20)
+        @test occursin(" · 13", something(T.row_text(tb_m, 1), "")) ||
+              occursin("· 13", something(T.row_text(tb_m, 1), ""))
+
+        # `_` stretch-out alias
+        g4!(m, '_')
+        @test m.gantt_win_day == 14
+        @test m.message == "Gantt stretch [day]: window 14"
+        tb_u = gantt_render(m; w = 120, h = 20)
+        @test occursin("[day]", something(T.row_text(tb_u, 1), ""))
 
         # Per-scale memory across z: set day to 12, week stretch, z back restores day
         G4.gantt_set_view_window!(m, :day, 12)
@@ -3167,79 +3230,136 @@ end
         @test m.gantt_scale === :week
         @test m.gantt_win_day == 12
         @test G4.gantt_view_window(m) == 42
+        tb_z1 = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb_z1, "[week]") !== nothing
         g4!(m, '+')  # week step 7 → 35
         @test m.gantt_win_week == 35
         @test m.gantt_win_day == 12
         @test m.message == "Gantt stretch [week]: window 35"
         tbw = gantt_render(m; w = 120, h = 20)
         @test T.find_text(tbw, "[week]") !== nothing
+        @test occursin(" · 35", something(T.row_text(tbw, 1), "")) ||
+              occursin("· 35", something(T.row_text(tbw, 1), ""))
         lay_w = G4.gantt_layout(m, T.Rect(1, 1, 120, 20))
         @test lay_w.view_ncols == min(lay_w.physical_ncols, 35)
+        @test lay_w.cols_per_day == G4.gantt_cols_per_day(lay_w.physical_ncols, 35)
+        @test lay_w.paint_ncols == G4.gantt_paint_ncols(lay_w.view_ncols, lay_w.cols_per_day)
         g4!(m, 'z'); g4!(m, 'z')  # month → day
         @test m.gantt_scale === :day
         @test m.gantt_win_day == 12
         @test m.gantt_win_week == 35
+        tbd = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tbd, "[day]") !== nothing
+        @test occursin(" · 12", something(T.row_text(tbd, 1), "")) ||
+              occursin("· 12", something(T.row_text(tbd, 1), ""))
 
-        # Clamp at min → (limit) message; window unchanged
+        # Clamp at min → (limit) message; window unchanged; re-render badge stays at min
         G4.gantt_set_view_window!(m, :day, G4.GANTT_DAY_WIN_MIN)
+        prefs_before_lim = isfile(G4._gantt_ui_prefs_path(m)) ?
+                           read(G4._gantt_ui_prefs_path(m), String) : ""
         g4!(m, '+')
         @test m.gantt_win_day == G4.GANTT_DAY_WIN_MIN
         @test m.message == "Gantt stretch [day]: window $(G4.GANTT_DAY_WIN_MIN) (limit)"
-        # Clamp at max
+        # Limit no-op still saves prefs (design: save even on limit)
+        @test isfile(G4._gantt_ui_prefs_path(m))
+        @test occursin("win_day = $(G4.GANTT_DAY_WIN_MIN)", read(G4._gantt_ui_prefs_path(m), String))
+        tb_lim = gantt_render(m; w = 120, h = 20)
+        @test occursin(" · $(G4.GANTT_DAY_WIN_MIN)", something(T.row_text(tb_lim, 1), "")) ||
+              occursin("· $(G4.GANTT_DAY_WIN_MIN)", something(T.row_text(tb_lim, 1), ""))
+        # Clamp at max via `_`
         G4.gantt_set_view_window!(m, :day, G4.GANTT_DAY_WIN_MAX)
-        g4!(m, '-')
+        g4!(m, '_')
         @test m.gantt_win_day == G4.GANTT_DAY_WIN_MAX
         @test m.message == "Gantt stretch [day]: window $(G4.GANTT_DAY_WIN_MAX) (limit)"
+        tb_max = gantt_render(m; w = 120, h = 20)
+        @test occursin("[day]", something(T.row_text(tb_max, 1), ""))
 
-        # Drag cancelled on stretch and on z
+        # Week clamp at min (step 7) → (limit)
+        g4!(m, 'z')  # week
+        G4.gantt_set_view_window!(m, :week, G4.GANTT_WEEK_WIN_MIN)
+        g4!(m, '+')
+        @test m.gantt_win_week == G4.GANTT_WEEK_WIN_MIN
+        @test m.message == "Gantt stretch [week]: window $(G4.GANTT_WEEK_WIN_MIN) (limit)"
+        tb_wlim = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb_wlim, "[week]") !== nothing
+        # Month step=2 stretch once then clamp at max
+        g4!(m, 'z')  # month
+        @test m.gantt_scale === :month
+        G4.gantt_set_view_window!(m, :month, G4.GANTT_MONTH_VIEW_WINDOW)
+        g4!(m, '+')
+        @test m.gantt_win_month == G4.GANTT_MONTH_VIEW_WINDOW - G4.GANTT_MONTH_STRETCH_STEP
+        @test m.message == "Gantt stretch [month]: window $(m.gantt_win_month)"
+        tb_mo = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb_mo, "[month]") !== nothing
+        G4.gantt_set_view_window!(m, :month, G4.GANTT_MONTH_WIN_MAX)
+        g4!(m, '-')
+        @test m.gantt_win_month == G4.GANTT_MONTH_WIN_MAX
+        @test m.message == "Gantt stretch [month]: window $(G4.GANTT_MONTH_WIN_MAX) (limit)"
+        g4!(m, 'z')  # back to day
+        @test m.gantt_scale === :day
+
+        # Drag cancelled on stretch and on z (+ re-render)
         m.gantt_drag = (issue_id = near.id, mode = :body, origin_col = 0,
                         orig_start = near.start_date, orig_due = near.due_date,
                         preview_start = near.start_date, preview_due = near.due_date)
         G4.gantt_set_view_window!(m, :day, 20)
         g4!(m, '+')
         @test m.gantt_drag === nothing
+        tb_ds = gantt_render(m; w = 120, h = 20)
+        @test occursin("[day]", something(T.row_text(tb_ds, 1), ""))
         m.gantt_drag = (issue_id = near.id, mode = :body, origin_col = 0,
                         orig_start = near.start_date, orig_due = near.due_date,
                         preview_start = near.start_date, preview_due = near.due_date)
         g4!(m, 'z')
         @test m.gantt_drag === nothing
         @test m.gantt_scale === :week
+        tb_dz = gantt_render(m; w = 120, h = 20)
+        @test T.find_text(tb_dz, "[week]") !== nothing
         g4!(m, 'z'); g4!(m, 'z')  # back to day
         @test m.gantt_scale === :day
 
         # Selection stays visible after stretch-in (far issue selected, shrink window)
         G4.gantt_set_view_window!(m, :day, 40)
         G4._gantt_select_issue_id!(m, far.id)
-        start_before = m.gantt_start
         # force a start that leaves far off-window, then stretch-in should ensure-visible
         m.gantt_start = Dates.today() - Day(1)
         g4!(m, '+')  # window 39
         @test m.gantt_win_day == 39
-        # After stretch, far bar should be in the effective window
         dpc = G4.gantt_days_per_col(:day)
         ncols = G4.gantt_view_window(m)
         span = G4.gantt_issue_span(far)
         win = G4.gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, ncols, span)
         @test G4.gantt_bar_in_window(win, dpc, ncols, span[1], span[2])
         tb_far = gantt_render(m; w = 120, h = 20)
-        @test T.find_text(tb_far, far.key) !== nothing || bar_run(row_with(tb_far, far.key, 20) === nothing ? "" : row_with(tb_far, far.key, 20)) >= 0
+        # Hard UI assert — no vacuous GANTT escape hatch
+        @test T.find_text(tb_far, far.key) !== nothing
 
-        # Prefs round-trip: stretch writes gantt_ui.toml; new AppModel same token loads it
+        # Keyboard stretch saves prefs (no direct _save call)
         tok = m.session.token_path
+        G4.gantt_set_view_window!(m, :day, 20)
+        G4.gantt_set_view_window!(m, :week, 42)
+        G4.gantt_set_view_window!(m, :month, 26)
+        g4!(m, '+')  # day 19 via keyboard → must write file
+        prefs_path = G4._gantt_ui_prefs_path(m)
+        @test isfile(prefs_path)
+        body = read(prefs_path, String)
+        @test occursin("win_day = 19", body)
+        m3 = G4.AppModel(; token_path = tok, secret = "test-secret", seed = false, restore = false)
+        @test m3.gantt_win_day == 19
+
+        # Direct multi-key save + load round-trip
         G4.gantt_set_view_window!(m, :day, 18)
         G4.gantt_set_view_window!(m, :week, 28)
         G4.gantt_set_view_window!(m, :month, 12)
         G4._save_gantt_ui_prefs!(m)
-        prefs_path = G4._gantt_ui_prefs_path(m)
-        @test isfile(prefs_path)
-        body = read(prefs_path, String)
-        @test occursin("win_day = 18", body)
-        @test occursin("win_week = 28", body)
-        @test occursin("win_month = 12", body)
-        m3 = G4.AppModel(; token_path = tok, secret = "test-secret", seed = false, restore = false)
-        @test m3.gantt_win_day == 18
-        @test m3.gantt_win_week == 28
-        @test m3.gantt_win_month == 12
+        body2 = read(prefs_path, String)
+        @test occursin("win_day = 18", body2)
+        @test occursin("win_week = 28", body2)
+        @test occursin("win_month = 12", body2)
+        m3b = G4.AppModel(; token_path = tok, secret = "test-secret", seed = false, restore = false)
+        @test m3b.gantt_win_day == 18
+        @test m3b.gantt_win_week == 28
+        @test m3b.gantt_win_month == 12
 
         # Missing prefs → defaults
         m4 = G4.AppModel(; token_path = joinpath(mktempdir(), "session.jwt"),
@@ -3256,6 +3376,33 @@ end
         @test m5.gantt_win_week == G4.GANTT_WEEK_WIN_MAX
         @test m5.gantt_win_month == G4.GANTT_MONTH_WIN_MIN
 
+        # Partial file: only win_day present; week/month stay defaults
+        dir6 = mktempdir()
+        tok6 = joinpath(dir6, "session.jwt")
+        G4.Config._atomic_write_0600(joinpath(dir6, "gantt_ui.toml"),
+            "[gantt]\nwin_day = 18\n")
+        m6 = G4.AppModel(; token_path = tok6, secret = "test-secret", seed = false, restore = false)
+        @test m6.gantt_win_day == 18
+        @test m6.gantt_win_week == 42
+        @test m6.gantt_win_month == 26
+
+        # Mixed good/bad keys: bad win_week does not discard win_day
+        dir7 = mktempdir()
+        tok7 = joinpath(dir7, "session.jwt")
+        G4.Config._atomic_write_0600(joinpath(dir7, "gantt_ui.toml"),
+            "[gantt]\nwin_day = 16\nwin_week = \"nope\"\nwin_month = 10\n")
+        m7 = G4.AppModel(; token_path = tok7, secret = "test-secret", seed = false, restore = false)
+        @test m7.gantt_win_day == 16
+        @test m7.gantt_win_week == 42   # bad key skipped
+        @test m7.gantt_win_month == 10
+
+        # Corrupt TOML body → defaults (no throw)
+        dir8 = mktempdir()
+        tok8 = joinpath(dir8, "session.jwt")
+        write(joinpath(dir8, "gantt_ui.toml"), "{{{not toml")
+        m8 = G4.AppModel(; token_path = tok8, secret = "test-secret", seed = false, restore = false)
+        @test m8.gantt_win_day == 14 && m8.gantt_win_week == 42 && m8.gantt_win_month == 26
+
         # _gantt_init! does not reset windows (D7/Q5)
         m.gantt_win_day = 11
         G4._gantt_init!(m)
@@ -3266,6 +3413,14 @@ end
         @test G4.gantt_view_window(m, :unknown) == 1
         @test G4.gantt_set_view_window!(m, :unknown, 9) == 9  # clamp floor only; no field write
         @test m.gantt_win_day == 11  # unchanged by unknown set
+
+        # Stretch-in fattens bars: smaller window → higher cpd on same physical width
+        G4.gantt_set_view_window!(m, :day, 28)
+        lay_lo = G4.gantt_layout(m, T.Rect(1, 1, 120, 20))
+        G4.gantt_set_view_window!(m, :day, 14)
+        lay_hi = G4.gantt_layout(m, T.Rect(1, 1, 120, 20))
+        @test lay_hi.cols_per_day > lay_lo.cols_per_day
+        @test lay_hi.view_ncols < lay_lo.view_ncols || lay_hi.cols_per_day >= lay_lo.cols_per_day
     end
 end
 

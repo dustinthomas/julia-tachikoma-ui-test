@@ -27,6 +27,17 @@ gm_click(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_press, false, 
 gm_wheel(col, row, btn) = T.MouseEvent(col, row, btn, T.mouse_press, false, false, false)
 gm_drag(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_drag, false, false, false)
 gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, false, false, false)
+_gpx(lay, log_c) = lay.chart_x + GM.gantt_phys_c0(log_c, lay.cols_per_day)
+_gpmid(lay, c0, c1) = begin
+    p0, p1 = GM.gantt_phys_extent(c0, c1, lay.cols_per_day)
+    lay.chart_x + p0 + (p1 - p0) ÷ 2
+end
+_gpd(lay, n) = n * max(1, lay.cols_per_day)
+_gpost(lay, c0, c1; gap=1, max_w=nothing, tcol=nothing) = begin
+    p0, p1 = GM.gantt_phys_extent(c0, c1, lay.cols_per_day)
+    tphys = tcol === nothing ? nothing : GM.gantt_phys_c0(tcol, lay.cols_per_day)
+    GM.gantt_post_bar_label_geom(p0, p1, lay.label_ncols; gap=gap, max_w=max_w, tcol=tphys)
+end
 
 @testset "FEATURE: Gantt mouse click-select (M1 BDD)" begin
 
@@ -59,7 +70,7 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
         @test ext_b !== nothing
 
         @testset "When the user left-clicks issue B's bar Then gantt_sel is issue-only index for B" begin
-            T.update!(m, gm_click(lay.chart_x + ext_b[1], yb))
+            T.update!(m, gm_click(_gpx(lay, ext_b[1]), yb))
             @test m.gantt_sel == 2
             @test GM._gantt_selected_issue(m).id == b.id
             @test m.modal === :none   # click does NOT open detail
@@ -125,8 +136,7 @@ gm_release(col, row) = T.MouseEvent(col, row, T.mouse_left, T.mouse_release, fal
             ext2 = GM.gantt_bar_extent(lay2.win_start, lay2.dpc, b.start_date, b.due_date, lay2.view_ncols)
             @test ext2 !== nothing
             kwb = textwidth(b.key)
-            post = GM.gantt_post_bar_label_geom(ext2[1], ext2[2], lay2.label_ncols;
-                                                gap = 1, max_w = kwb)
+            post = _gpost(lay2, ext2[1], ext2[2]; gap = 1, max_w = kwb)
             @test post !== nothing && post.max_chars >= kwb
             T.update!(m, gm_click(lay2.chart_x + post.start, yb2))
             @test m.gantt_sel == 2
@@ -311,15 +321,15 @@ end
         dur = Dates.value(orig_dd - orig_sd)
 
         @testset "When press+drag+release body Then store updates and duration preserved" begin
-            T.update!(m, gm_click(lay.chart_x + mid, ya))
+            T.update!(m, gm_click(_gpmid(lay, c0, c1), ya))
             @test m.gantt_drag !== nothing
             @test m.gantt_drag.mode === :body
             # Shadow only: store still original mid-drag
-            T.update!(m, gm_drag(lay.chart_x + mid + 3, ya))
+            T.update!(m, gm_drag(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya))
             @test m.gantt_drag.preview_start == orig_sd + Day(3)
             @test m.gantt_drag.preview_due == orig_dd + Day(3)
             @test GM.Stores.get_issue(m.boardstore, a.id).start_date == orig_sd
-            T.update!(m, gm_release(lay.chart_x + mid + 3, ya))
+            T.update!(m, gm_release(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya))
             @test m.gantt_drag === nothing
             u = GM.Stores.get_issue(m.boardstore, a.id)
             @test u.start_date == orig_sd + Day(3)
@@ -352,14 +362,14 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
-        T.update!(m, gm_click(lay.chart_x + ext[1], ya))
+        T.update!(m, gm_click(_gpx(lay, ext[1]), ya))
         @test m.gantt_drag === nothing
         @test occursin("Permission denied", m.message)
         @test GM.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
         @test GM.Stores.get_issue(m.boardstore, a.id).due_date == a.due_date
         # Drag/release without active drag are no-ops
-        T.update!(m, gm_drag(lay.chart_x + ext[1] + 2, ya))
-        T.update!(m, gm_release(lay.chart_x + ext[1] + 2, ya))
+        T.update!(m, gm_drag(_gpx(lay, ext[1]) + _gpd(lay, 2), ya))
+        T.update!(m, gm_release(_gpx(lay, ext[1]) + _gpd(lay, 2), ya))
         @test GM.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
     end
 
@@ -378,10 +388,11 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
-        mid = ext[1] + (ext[2] - ext[1]) ÷ 2
-        T.update!(m, gm_click(lay.chart_x + mid, ya))
+        @test ext !== nothing
+        c0e, c1e = ext
+        T.update!(m, gm_click(_gpmid(lay, c0e, c1e), ya))
         @test m.gantt_drag !== nothing
-        T.update!(m, gm_drag(lay.chart_x + mid + 4, ya))
+        T.update!(m, gm_drag(_gpmid(lay, c0e, c1e) + _gpd(lay, 4), ya))
         @test m.gantt_drag.preview_start != a.start_date
         gm!(m, :escape)
         @test m.gantt_drag === nothing
@@ -405,10 +416,11 @@ end
         ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
         ya = gantt_y(lay, ra)
         ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
         # Press + release without move (no-op commit) then keyboard edit
-        mid = ext[1]
-        T.update!(m, gm_click(lay.chart_x + mid, ya))
-        T.update!(m, gm_release(lay.chart_x + mid, ya))
+        c0k, c1k = ext
+        T.update!(m, gm_click(_gpmid(lay, c0k, c1k), ya))
+        T.update!(m, gm_release(_gpmid(lay, c0k, c1k), ya))
         @test m.gantt_drag === nothing
         @test GM._gantt_selected_issue(m).id == a.id
         gm!(m, 'e')

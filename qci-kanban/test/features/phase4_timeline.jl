@@ -151,9 +151,9 @@ end
         P4.render_gantt!(m, tb.buf, T.Rect(1, 1, w, 20))
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        # position of marker verified via layout chart_x + col; scan grid below ▼
-        # (G3 dual-row axis shifts band→grid offset — no fixed loc.y+2)
-        drawn_x = lay.chart_x + expected_col
+        # position of marker verified via layout chart_x + phys col (cpd fattening);
+        # scan grid below ▼ (G3 dual-row axis shifts band→grid offset — no fixed loc.y+2)
+        drawn_x = lay.chart_x + P4.gantt_phys_c0(expected_col, lay.cols_per_day)
         chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
         @test chv in ('┃', '│', '|')
         # ruler / period chrome present (h=20≥12 dual tabs or ticks)
@@ -180,7 +180,7 @@ end
         @test tcol !== nothing && tcol <= 5
         loc = T.find_text(tb, "▼")
         @test loc !== nothing
-        drawn_x = lay.chart_x + tcol
+        drawn_x = lay.chart_x + P4.gantt_phys_c0(tcol, lay.cols_per_day)
         chv = p4_today_vert_at(tb, drawn_x; from_y = loc.y, h = 20)
         @test chv in ('┃', '│', '|')
     end
@@ -543,7 +543,10 @@ end
             @test P4.gantt_bar_in_window(win, dpc, ncols, span[1], span[2])
             tb = T.TestBackend(120, 20); T.reset!(tb.buf)
             P4.render_gantt!(m, tb.buf, T.Rect(1, 1, 120, 20))
-            @test T.find_text(tb, far.key) !== nothing || occursin("GANTT", something(T.row_text(tb, 1), ""))
+            # Hard UI assert: far key must be on-screen after stretch ensure-visible
+            @test T.find_text(tb, far.key) !== nothing
+            title = T.row_text(tb, 1)
+            @test title !== nothing && occursin("[day]", title)
         end
 
         @testset "Given active drag When stretch or z Then drag is cancelled" begin

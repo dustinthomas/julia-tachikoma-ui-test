@@ -172,7 +172,7 @@ gantt_y(lay, row_index) = lay.grid_y0 + (row_index - lay.row_start) * lay.row_st
         yb = gantt_y(lay, rb)
         ext_b = BM.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
         @test ext_b !== nothing
-        T.update!(m, bm_click(lay.chart_x + ext_b[1], yb))
+        T.update!(m, bm_click(lay.chart_x + BM.gantt_phys_c0(ext_b[1], lay.cols_per_day), yb))
         @test m.gantt_sel == 2
         @test BM._gantt_selected_issue(m).id == b.id
         @test m.modal === :none

@@ -116,6 +116,44 @@ function gantt_cols_per_day(scale::Symbol, physical_ncols::Int)::Int
     gantt_cols_per_day(physical_ncols, gantt_default_view_window(scale))
 end
 
+# ── Stretch: logical ↔ physical chart mapping (cpd fattening) ───────────────
+"""
+    gantt_phys_c0(logical_col, cpd) -> Int
+
+First 0-based physical chart cell for a logical column when each logical unit
+spans `cpd` terminal cells.
+"""
+gantt_phys_c0(logical_col::Int, cpd::Int)::Int = logical_col * max(1, cpd)
+
+"""
+    gantt_phys_c1(logical_col, cpd) -> Int
+
+Last inclusive physical chart cell for a logical column.
+"""
+gantt_phys_c1(logical_col::Int, cpd::Int)::Int = (logical_col + 1) * max(1, cpd) - 1
+
+"""
+    gantt_phys_extent(c0, c1, cpd) -> (p0, p1)
+
+Expand inclusive logical bar/point span to inclusive physical chart cells.
+"""
+gantt_phys_extent(c0::Int, c1::Int, cpd::Int) =
+    (gantt_phys_c0(c0, cpd), gantt_phys_c1(c1, cpd))
+
+"""
+    gantt_logical_col(phys_col, cpd) -> Int
+
+Map a 0-based physical chart cell back to its logical column.
+"""
+gantt_logical_col(phys_col::Int, cpd::Int)::Int = fld(phys_col, max(1, cpd))
+
+"""
+    gantt_paint_ncols(view_ncols, cpd) -> Int
+
+Terminal cells occupied by `view_ncols` logical units at stretch factor `cpd`.
+"""
+gantt_paint_ncols(view_ncols::Int, cpd::Int)::Int = view_ncols * max(1, cpd)
+
 """
     gantt_view_window(m::AppModel, scale::Symbol = m.gantt_scale) -> Int
 
@@ -1026,9 +1064,23 @@ end
 _gantt_ui_prefs_path(m::AppModel) =
     joinpath(dirname(m.session.token_path), "gantt_ui.toml")
 
+"""Apply one prefs key if present and convertible; skip bad values without aborting others."""
+function _apply_gantt_pref_key!(m::AppModel, g::AbstractDict, key::String, scale::Symbol)
+    haskey(g, key) || return
+    try
+        v = g[key]
+        n = v isa Integer ? Int(v) : parse(Int, string(v))
+        gantt_set_view_window!(m, scale, n)
+    catch
+        # Bad/partial value: leave this scale at constructor default
+    end
+    nothing
+end
+
 """
 Load `gantt_ui.toml` if present; clamp windows via `gantt_set_view_window!`.
-Missing/unreadable/corrupt → leave constructor defaults. Never throws.
+Missing/unreadable/corrupt file → leave constructor defaults. Per-key convert so
+one bad value does not discard the others. Never throws.
 """
 function _load_gantt_ui_prefs!(m::AppModel)
     path = _gantt_ui_prefs_path(m)
@@ -1037,15 +1089,9 @@ function _load_gantt_ui_prefs!(m::AppModel)
         t = TOML.parsefile(path)
         g = get(t, "gantt", nothing)
         g isa AbstractDict || return m
-        if haskey(g, "win_day")
-            gantt_set_view_window!(m, :day, Int(g["win_day"]))
-        end
-        if haskey(g, "win_week")
-            gantt_set_view_window!(m, :week, Int(g["win_week"]))
-        end
-        if haskey(g, "win_month")
-            gantt_set_view_window!(m, :month, Int(g["win_month"]))
-        end
+        _apply_gantt_pref_key!(m, g, "win_day", :day)
+        _apply_gantt_pref_key!(m, g, "win_week", :week)
+        _apply_gantt_pref_key!(m, g, "win_month", :month)
     catch err
         @warn "could not read gantt_ui.toml" error = err  # COV_EXCL_LINE (I/O failure rare)
     end
@@ -1331,9 +1377,11 @@ struct GanttLayout
     left_w::Int
     chart_x::Int
     physical_ncols::Int
-    view_ncols::Int
-    label_ncols::Int
-    dpc::Int
+    view_ncols::Int           # logical units in the window
+    label_ncols::Int          # physical clip for post-bar keys (uses chart cells)
+    dpc::Int                  # calendar days per logical column (scale)
+    cols_per_day::Int         # stretch: terminal cells per logical unit (cpd fattening)
+    paint_ncols::Int          # view_ncols * cols_per_day (chart cells painted)
     scale::Symbol
     win_start::Date
     is_narrow::Bool
@@ -1385,11 +1433,15 @@ function gantt_layout(m::AppModel, area::Rect;
     left_w = max(10, min(left_w, area.width - 10))
     chart_x = area.x + left_w
     physical_ncols = area.width - left_w   # physical chart columns
-    # Live per-scale view window (stretch control). view_ncols drives bars/axis/today;
-    # day label_ncols may use the physical gutter past the day strip (legacy G4 geom).
+    # Live per-scale view window (stretch control). Logical view_ncols + cpd fattening:
+    # each logical unit paints `cols_per_day` terminal cells so the strip fills physical
+    # when physical ≥ window (cpd = ⌊physical/window⌋).
     win = gantt_view_window(m)
-    view_ncols = min(physical_ncols, win)
-    label_ncols = m.gantt_scale === :day ? physical_ncols : view_ncols
+    cols_per_day = gantt_cols_per_day(physical_ncols, win)
+    view_ncols = min(physical_ncols, win)   # logical units (≤ win; ≤ physical when cpd=1)
+    paint_ncols = gantt_paint_ncols(view_ncols, cols_per_day)
+    # Post-bar keys clip in physical chart space (gutter past paint strip when any).
+    label_ncols = physical_ncols
     sel_issue = _gantt_selected_issue(m)
     sel_span = sel_issue === nothing ? nothing : gantt_issue_span(sel_issue)
     win_start = gantt_effective_win_start(m.gantt_start, Dates.today(), dpc, view_ncols, sel_span)
@@ -1434,7 +1486,7 @@ function gantt_layout(m::AppModel, area::Rect;
     paint_week_seps = m.gantt_scale !== :month
 
     GanttLayout(area, left_w, chart_x, physical_ncols, view_ncols, label_ncols,
-                dpc, m.gantt_scale, win_start, is_narrow, compact,
+                dpc, cols_per_day, paint_ncols, m.gantt_scale, win_start, is_narrow, compact,
                 has_ruler, has_dual, has_quarter, has_footer,
                 band_y, quarter_y, tab_y, tick_y, ruler_y, grid_y0, content_start,
                 nshow, row_stride, row_start, footer_y, ruler_rows,
@@ -1520,6 +1572,7 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
 
     # Grid body (content lines + inter-bar gap lines from row_stride)
     gh = gantt_grid_height(layout.nshow; stride = layout.row_stride)
+    cpd = max(1, layout.cols_per_day)
     if layout.nshow > 0 && y >= layout.grid_y0 && y < layout.grid_y0 + gh
         vis_i = gantt_vis_i_at(layout.grid_y0, y, layout.nshow; stride = layout.row_stride)
         # Gap line between bars: chart background only (not a selectable row).
@@ -1527,14 +1580,15 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
             if x < layout.chart_x
                 return _GANTT_HIT_NONE
             end
-            col_g = x - layout.chart_x
-            if col_g < 0 || col_g >= layout.physical_ncols
+            phys_g = x - layout.chart_x
+            if phys_g < 0 || phys_g >= layout.physical_ncols
                 return _GANTT_HIT_NONE
             end
-            date_g = col_g < layout.view_ncols ?
-                     gantt_date_for_col(layout.win_start, layout.dpc, col_g) : nothing
+            log_g = gantt_logical_col(phys_g, cpd)
+            date_g = log_g < layout.view_ncols ?
+                     gantt_date_for_col(layout.win_start, layout.dpc, log_g) : nothing
             return GanttHit(gantt_hit_empty_chart, nothing, nothing, nothing,
-                            col_g < layout.view_ncols ? col_g : nothing, date_g)
+                            log_g < layout.view_ncols ? log_g : nothing, date_g)
         end
         row_index = layout.row_start + vis_i - 1
         (1 <= row_index <= length(rows)) || return _GANTT_HIT_NONE
@@ -1548,10 +1602,11 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
                             nothing, nothing)
         end
 
-        col = x - layout.chart_x  # 0-based into chart strip
-        if col < 0 || col >= layout.physical_ncols
+        phys = x - layout.chart_x  # 0-based physical chart cell
+        if phys < 0 || phys >= layout.physical_ncols
             return _GANTT_HIT_NONE
         end
+        col = gantt_logical_col(phys, cpd)  # logical col for dates / drag
         date = col < layout.view_ncols ?
                gantt_date_for_col(layout.win_start, layout.dpc, col) : nothing
 
@@ -1560,25 +1615,27 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
                             col < layout.view_ncols ? col : nothing, date)
         end
 
-        # Issue: bar / diamond / post-bar key (x-disjoint; key starts after c1 + gap)
+        # Issue: bar / diamond / post-bar key (physical x; col returned is logical)
         iss = row.issue
         if iss !== nothing
             key_w = textwidth(iss.key)
             tcol_hit = gantt_point_col(layout.win_start, layout.dpc, Dates.today(),
                                        layout.view_ncols)
+            tcol_phys = tcol_hit === nothing ? nothing : gantt_phys_c0(tcol_hit, cpd)
             if iss.start_date !== nothing && iss.due_date !== nothing
                 ext = gantt_bar_extent(layout.win_start, layout.dpc,
                                        iss.start_date, iss.due_date, layout.view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
-                    if c0 <= col <= c1
+                    p0, p1 = gantt_phys_extent(c0, c1, cpd)
+                    if p0 <= phys <= p1
                         return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
                                         col, date)
                     end
-                    post = gantt_post_bar_label_geom(c0, c1, layout.label_ncols;
-                                                     gap = 1, max_w = key_w, tcol = tcol_hit)
+                    post = gantt_post_bar_label_geom(p0, p1, layout.label_ncols;
+                                                     gap = 1, max_w = key_w, tcol = tcol_phys)
                     if post !== nothing && post.max_chars >= key_w &&
-                       post.start <= col < post.start + key_w
+                       post.start <= phys < post.start + key_w
                         return GanttHit(gantt_hit_post_bar, row_index, issue_id,
                                         issue_sel, col, date)
                     end
@@ -1587,14 +1644,15 @@ function gantt_hit_test(layout::GanttLayout, rows::Vector{GanttRow},
                 d = iss.start_date === nothing ? iss.due_date : iss.start_date
                 pcol = gantt_point_col(layout.win_start, layout.dpc, d, layout.view_ncols)
                 if pcol !== nothing
-                    if col == pcol
+                    pp0, pp1 = gantt_phys_extent(pcol, pcol, cpd)
+                    if pp0 <= phys <= pp1
                         return GanttHit(gantt_hit_bar, row_index, issue_id, issue_sel,
                                         col, date)
                     end
-                    post = gantt_post_bar_label_geom(pcol, pcol, layout.label_ncols;
-                                                     gap = 1, max_w = key_w, tcol = tcol_hit)
+                    post = gantt_post_bar_label_geom(pp0, pp1, layout.label_ncols;
+                                                     gap = 1, max_w = key_w, tcol = tcol_phys)
                     if post !== nothing && post.max_chars >= key_w &&
-                       post.start <= col < post.start + key_w
+                       post.start <= phys < post.start + key_w
                         return GanttHit(gantt_hit_post_bar, row_index, issue_id,
                                         issue_sel, col, date)
                     end
@@ -1678,9 +1736,10 @@ function _gantt_paint_dates(m::AppModel, iss::Domain.Issue)
     (iss.start_date, iss.due_date)
 end
 
-"Chart column under the pointer (0-based), clamped to the visible view strip."
+"Logical chart column under the pointer (0-based), clamped to the visible view strip."
 function _gantt_evt_col(lay::GanttLayout, x::Int)::Int
-    col = x - lay.chart_x
+    phys = x - lay.chart_x
+    col = gantt_logical_col(phys, max(1, lay.cols_per_day))
     clamp(col, 0, max(0, lay.view_ncols - 1))
 end
 
@@ -1853,6 +1912,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     view_ncols = lay.view_ncols
     label_ncols = lay.label_ncols
     dpc = lay.dpc
+    cpd = max(1, lay.cols_per_day)
+    paint_ncols = lay.paint_ncols
     win_start = lay.win_start
     is_narrow = lay.is_narrow
     has_ruler = lay.has_ruler
@@ -1872,6 +1933,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     paint_weekends = lay.paint_weekends
     paint_week_seps = lay.paint_week_seps
     grid_h = gantt_grid_height(nshow; stride = row_stride)
+    # Screen x of first physical cell of logical column `lc` (0-based).
+    _cx(lc) = chart_x + gantt_phys_c0(lc, cpd)
 
     win_end = gantt_window_end(win_start, dpc, view_ncols)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)  # COV_EXCL_LINE (hoist for coordination; value same as later; exercised via band/today)  # hoist early for band name/today coordination (minimal)
@@ -1888,8 +1951,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     end
     title = base
     # Stretch affordance glyphs (paint-only in PR2; hit-test in PR3). Right-aligned.
+    # `!is_narrow` already implies area.width ≥ 60 (narrow threshold).
     btns = "[+][-]"
-    show_btns = !is_narrow && area.width >= 36
+    show_btns = !is_narrow
     title_budget = show_btns ? max(1, area.width - textwidth(btns)) : area.width
     if ncols >= 10
         leg = if !is_narrow && area.width >= 90
@@ -1913,45 +1977,61 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     Style(; fg = col_text_dim()))
     end
 
-    # z1 — alternating period wash on band (under weekend + sprint)
+    # z1 — alternating period wash on band (under weekend + sprint); expand logical → physical
     for c in gantt_period_shade_cols(win_start, dpc, view_ncols, lay.scale)
-        set_char!(buf, chart_x + c, band_y, ' ', Style(; bg = col_gantt_period_alt()))
+        for pc in gantt_phys_c0(c, cpd):gantt_phys_c1(c, cpd)
+            set_char!(buf, chart_x + pc, band_y, ' ', Style(; bg = col_gantt_period_alt()))
+        end
     end
     # weekend shading on band row first (polish consistency), band will overlay its range
     if paint_weekends
         for c in gantt_weekend_cols(win_start, dpc, view_ncols)
             ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (safe path covered via grid shade + pure tests + other calls)
-            set_string!(buf, chart_x + c, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+            for pc in gantt_phys_c0(c, cpd):gantt_phys_c1(c, cpd)
+                set_string!(buf, chart_x + pc, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
+            end
         end
     end
     # Sprint bands polish (PR6): cleaner edges (▓/safe at ends), better name placement
     # (inside after edge when room; underline+dim always), aggressive truncate narrow.
     for (nm, c0, c1) in gantt_sprint_bands(m, win_start, dpc, view_ncols)
-        bw = c1 - c0 + 1
-        for cc in c0:c1
-            ch = (cc == c0 || cc == c1) ? '▓' : '░'
+        p0, p1 = gantt_phys_extent(c0, c1, cpd)
+        pbw = p1 - p0 + 1
+        for pc in p0:p1
+            # edge cells of the physical span
+            ch = (pc == p0 || pc == p1) ? '▓' : '░'
             ch = gantt_safe_char(ch, is_narrow)  # COV_EXCL_LINE (safe_char + guards covered by dedicated tests + ruler/today/grid/weekend paths)
             if textwidth(ch) != 1
                 ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (guard branch; textwidth==1 always for our safe chars)
             end
-            xx = chart_x + cc
+            xx = chart_x + pc
             xx <= area.x + area.width - 1 && set_string!(buf, xx, band_y, string(ch), Style(; fg = col_text_muted(), dim = true))
         end
-        # name: prefer inside after left edge when fits; dim underline; truncate
-        maxn = max(1, bw - 2)
+        # name: prefer inside after left edge when fits; dim underline; truncate (physical)
+        maxn = max(1, pbw - 2)
         nmsh = _short(nm, maxn)
-        nx = c0 + (bw > textwidth(nmsh) + 1 ? 1 : 0)
-        # avoid today ▼ collision on band_y (name not mangled) + reserve edges
-        if tcol !== nothing && tcol >= c0 && tcol <= c1 && nx <= tcol <= nx + textwidth(nmsh) - 1  # COV_EXCL_LINE (edge case; overlap not in all test data; logic mirrors gantt_point_col)
-            maxn = max(1, tcol - c0)  # COV_EXCL_LINE
-            nmsh = _short(nm, maxn)  # COV_EXCL_LINE
-            nx = c0  # COV_EXCL_LINE
+        nx = p0 + (pbw > textwidth(nmsh) + 1 ? 1 : 0)
+        # avoid today ▼ collision on band_y (name not mangled) + reserve edges.
+        # Today fat unit occupies [tp0,tp1]; if it overlaps the name, shift/truncate.
+        if tcol !== nothing
+            tp0t, tp1t = gantt_phys_extent(tcol, tcol, cpd)
+            nm_end = nx + textwidth(nmsh) - 1
+            if tp0t <= nm_end && tp1t >= nx && tp0t >= p0 && tp0t <= p1  # COV_EXCL_LINE (overlap depends on today vs sprint)
+                # Prefer name after the today fat unit when room remains
+                if tp1t + 1 + textwidth(nmsh) - 1 <= p1  # COV_EXCL_LINE
+                    nx = tp1t + 1  # COV_EXCL_LINE
+                else
+                    maxn = max(1, tp0t - p0)  # COV_EXCL_LINE
+                    nmsh = _short(nm, maxn)  # COV_EXCL_LINE
+                    nx = p0  # COV_EXCL_LINE
+                end
+            end
         end
         set_string!(buf, chart_x + nx, band_y, nmsh, Style(; fg = col_text_dim(), underline = true))
         # re-set edges after name (guarantees cleaner ▓ even on narrow bw)
-        if bw >= 2  # COV_EXCL_LINE (defensive re-assert; covered semantically in band tests + wide data; pure paths exercised)
-            set_string!(buf, chart_x + c0, band_y, string(gantt_safe_char('▓', is_narrow)), Style(; fg = col_text_muted(), dim = true))
-            set_string!(buf, chart_x + c1, band_y, string(gantt_safe_char('▓', is_narrow)), Style(; fg = col_text_muted(), dim = true))
+        if pbw >= 2  # COV_EXCL_LINE (defensive re-assert; covered semantically in band tests + wide data; pure paths exercised)
+            set_string!(buf, chart_x + p0, band_y, string(gantt_safe_char('▓', is_narrow)), Style(; fg = col_text_muted(), dim = true))
+            set_string!(buf, chart_x + p1, band_y, string(gantt_safe_char('▓', is_narrow)), Style(; fg = col_text_muted(), dim = true))
         end
     end
 
@@ -1959,15 +2039,16 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         # G5: optional quarter super-header (month scale, h≥14) above period tabs.
         if has_quarter
             for t in gantt_axis_quarter_tabs(win_start, dpc, view_ncols; narrow = is_narrow)
-                span = t.c1 - t.c0 + 1
+                tp0, tp1 = gantt_phys_extent(t.c0, t.c1, cpd)
+                span = tp1 - tp0 + 1
                 span < 1 && continue
                 lab = t.label
                 textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
-                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
-                start_c = clamp(start_c, t.c0, t.c1)
-                xx = chart_x + start_c
+                start_pc = tp0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_pc = clamp(start_pc, tp0, tp1)
+                xx = chart_x + start_pc
                 xx > area.x + area.width - 1 && continue
-                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                avail = max(1, min(tp1 - start_pc + 1, paint_ncols - start_pc))
                 set_string!(buf, xx, quarter_y, _short(lab, avail),
                             Style(; fg = col_text_dim(), bold = true))
             end
@@ -1977,45 +2058,47 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         if has_dual
             # Tab row — full period names from gantt_axis_period_tabs (bold primary)
             for t in gantt_axis_period_tabs(win_start, dpc, view_ncols, lay.scale; narrow = is_narrow)
-                span = t.c1 - t.c0 + 1
+                tp0, tp1 = gantt_phys_extent(t.c0, t.c1, cpd)
+                span = tp1 - tp0 + 1
                 span < 1 && continue
                 lab = t.label
                 textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
-                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
-                start_c = clamp(start_c, t.c0, t.c1)
-                xx = chart_x + start_c
+                start_pc = tp0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_pc = clamp(start_pc, tp0, tp1)
+                xx = chart_x + start_pc
                 xx > area.x + area.width - 1 && continue
-                # Clip to remaining period cells (t.c1), not just original span from c0
-                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                avail = max(1, min(tp1 - start_pc + 1, paint_ncols - start_pc))
                 set_string!(buf, xx, tab_y, _short(lab, avail),
                             Style(; fg = col_primary(), bold = true))
             end
-            # Tick row — numeric day-of-month with breathing room (muted)
+            # Tick row — numeric day-of-month with breathing room (muted); at phys start of unit
             for (c, lab) in gantt_axis_tick_labels(win_start, dpc, view_ncols; narrow = is_narrow)
                 (c < 0 || c >= view_ncols) && continue
-                xx = chart_x + c
+                xx = _cx(c)
                 xx > area.x + area.width - 1 && continue
+                tick_budget = max(1, min(cpd, paint_ncols - gantt_phys_c0(c, cpd)))
                 if textwidth(lab) <= 1
                     tch = isempty(lab) ? ' ' : lab[1]
                     if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
                     set_char!(buf, xx, tick_y, tch, Style(; fg = col_text_muted(), dim = true))
                 else
-                    set_string!(buf, xx, tick_y, _short(lab, max(1, view_ncols - c)),
+                    set_string!(buf, xx, tick_y, _short(lab, tick_budget),
                                 Style(; fg = col_text_muted(), dim = true))
                 end
             end
         elseif lay.scale === :month
             # Single-row month: prefer full period tabs over dense day ticks
             for t in gantt_axis_period_tabs(win_start, dpc, view_ncols, :month; narrow = is_narrow)
-                span = t.c1 - t.c0 + 1
+                tp0, tp1 = gantt_phys_extent(t.c0, t.c1, cpd)
+                span = tp1 - tp0 + 1
                 span < 1 && continue
                 lab = t.label
                 textwidth(lab) > span && (lab = fit_width(lab, max(1, span)))
-                start_c = t.c0 + max(0, (span - textwidth(lab)) ÷ 2)
-                start_c = clamp(start_c, t.c0, t.c1)
-                xx = chart_x + start_c
+                start_pc = tp0 + max(0, (span - textwidth(lab)) ÷ 2)
+                start_pc = clamp(start_pc, tp0, tp1)
+                xx = chart_x + start_pc
                 xx > area.x + area.width - 1 && continue
-                avail = max(1, min(t.c1 - start_c + 1, view_ncols - start_c))
+                avail = max(1, min(tp1 - start_pc + 1, paint_ncols - start_pc))
                 set_string!(buf, xx, ruler_y, _short(lab, avail),
                             Style(; fg = col_primary(), bold = true))
             end
@@ -2030,14 +2113,15 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             ax = gantt_axis_labels(win_start, dpc, view_ncols; narrow = is_narrow)
             for (c, lab) in ax
                 (c < 0 || c >= view_ncols) && continue
-                xx = chart_x + c
+                xx = _cx(c)
                 xx > area.x + area.width - 1 && continue
+                tick_budget = max(1, min(cpd, paint_ncols - gantt_phys_c0(c, cpd)))
                 if textwidth(lab) <= 1
                     tch = lab == "┬" ? gantt_safe_char('┬', is_narrow) : (isempty(lab) ? ' ' : lab[1])
                     if textwidth(tch) != 1; tch = gantt_safe_char('+', true); end  # COV_EXCL_LINE
                     set_char!(buf, xx, ruler_y, tch, Style(; fg = col_text_muted(), dim = true))
                 else
-                    set_string!(buf, xx, ruler_y, _short(lab, max(1, view_ncols - c)), Style(; fg = col_text_dim()))
+                    set_string!(buf, xx, ruler_y, _short(lab, tick_budget), Style(; fg = col_text_dim()))
                 end
             end
         end
@@ -2052,18 +2136,19 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         return
     end
 
-    canvas = BlockCanvas(view_ncols, max(1, grid_h); style = Style(; fg = col_primary()))
+    # Canvas paints physical cells (logical × cpd) so stretch fattens bars.
+    canvas = BlockCanvas(max(1, paint_ncols), max(1, grid_h); style = Style(; fg = col_primary()))
     diamonds = Tuple{Int,Int,Any}[]
     sel_issue = sel_issue_early
 
     # Track for PR4 selection bar accent (set during label/bar loop; used post-canvas)
     selected_vis_i = nothing
-    selected_bar_ext = nothing
+    selected_bar_ext = nothing  # physical (p0, p1)
 
-    # Cache post-bar key geom per visible row (shared by in-bar suppress + key paint).
-    # Key paints RIGHT of bar (post-bar); left rail always full key+title.
+    # Cache post-bar key geom per visible row (physical chart cols; shared by key paint).
     post_geoms = Vector{Union{Nothing, NamedTuple{(:start, :max_chars), Tuple{Int,Int}}}}(nothing, max(0, nshow))
     tcol_paint = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
+    tcol_phys = tcol_paint === nothing ? nothing : gantt_phys_c0(tcol_paint, cpd)
 
     for i in 1:nshow
         ri = row_start + i - 1
@@ -2088,29 +2173,32 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 ext = gantt_bar_extent(win_start, dpc, psd, pdd, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
-                    g = gantt_post_bar_label_geom(c0, c1, label_ncols;
-                                                  gap = 1, max_w = kw, tcol = tcol_paint)
+                    p0, p1 = gantt_phys_extent(c0, c1, cpd)
+                    g = gantt_post_bar_label_geom(p0, p1, label_ncols;
+                                                  gap = 1, max_w = kw, tcol = tcol_phys)
                     # Full key only (same as prior pre-bar full-key rule)
                     post_geom = (g !== nothing && g.max_chars >= kw) ? g : nothing
-                    for dx in (2 * c0):(2 * c1 + 1), dy in (2 * term_off):(2 * term_off + 1)
+                    for dx in (2 * p0):(2 * p1 + 1), dy in (2 * term_off):(2 * term_off + 1)
                         set_point!(canvas, dx, dy)
                     end
                     if selected
                         selected_vis_i = i
-                        selected_bar_ext = (c0, c1)
+                        selected_bar_ext = (p0, p1)
                     end
                 end
             else
                 d = psd === nothing ? pdd : psd
                 col = gantt_point_col(win_start, dpc, d, view_ncols)
                 if col !== nothing
-                    g = gantt_post_bar_label_geom(col, col, label_ncols;
-                                                  gap = 1, max_w = kw, tcol = tcol_paint)
+                    pp0, pp1 = gantt_phys_extent(col, col, cpd)
+                    g = gantt_post_bar_label_geom(pp0, pp1, label_ncols;
+                                                  gap = 1, max_w = kw, tcol = tcol_phys)
                     post_geom = (g !== nothing && g.max_chars >= kw) ? g : nothing
                     # Shadow diamond uses primary_hi when this issue is mid-drag.
                     dcol = (m.gantt_drag !== nothing && m.gantt_drag.issue_id == iss.id) ?
                            col_primary_hi() : priority_color(iss.priority)
-                    push!(diamonds, (chart_x + col, rowy, dcol))
+                    # Diamond at first physical cell of the fat unit
+                    push!(diamonds, (_cx(col), rowy, dcol))
                 end
             end
             post_geoms[i] = post_geom
@@ -2139,10 +2227,12 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
 
     # z1 — period wash on full grid height (content + inter-bar gaps), under weekend/seps/bars/today.
     for c in gantt_period_shade_cols(win_start, dpc, view_ncols, lay.scale)
-        for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
-            nshow < 1 && break
-            set_char!(buf, chart_x + c, yy, ' ',
-                      Style(; bg = col_gantt_period_alt()))
+        for pc in gantt_phys_c0(c, cpd):gantt_phys_c1(c, cpd)
+            for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
+                nshow < 1 && break
+                set_char!(buf, chart_x + pc, yy, ' ',
+                          Style(; bg = col_gantt_period_alt()))
+            end
         end
     end
     # Weekend shading ░ (dim muted) on grid cols — BEFORE canvas so bars overlay where present.
@@ -2155,22 +2245,26 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     tcol = gantt_point_col(win_start, dpc, Dates.today(), view_ncols)
     if paint_weekends
         for c in wcols
-            for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
-                nshow < 1 && break
-                ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
-                if textwidth(ch) != 1; ch = '#'; end
-                set_string!(buf, chart_x + c, yy, string(ch), Style(; fg = col_text_muted(), dim = true))
+            for pc in gantt_phys_c0(c, cpd):gantt_phys_c1(c, cpd)
+                for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
+                    nshow < 1 && break
+                    ch = gantt_safe_char('░', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
+                    if textwidth(ch) != 1; ch = '#'; end
+                    set_string!(buf, chart_x + pc, yy, string(ch), Style(; fg = col_text_muted(), dim = true))
+                end
             end
         end
     end
     if paint_week_seps
         for c in scols
             c == tcol && continue
+            # Draw sep at first physical cell of the logical unit
+            pc = gantt_phys_c0(c, cpd)
             for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
                 nshow < 1 && break
                 ch = gantt_safe_char('┆', is_narrow)  # COV_EXCL_LINE (duplicate safe path; core covered by pure + narrow tests)
                 if textwidth(ch) != 1; ch = '|'; end
-                set_char!(buf, chart_x + c, yy, ch, Style(; fg = col_text_muted(), dim = true))
+                set_char!(buf, chart_x + pc, yy, ch, Style(; fg = col_text_muted(), dim = true))
             end
         end
     end
@@ -2179,15 +2273,16 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         c == tcol && continue
         # Skip if week sep already painted this col (day/week) — same glyph, avoid double work.
         paint_week_seps && (c in scols) && continue
+        pc = gantt_phys_c0(c, cpd)
         for yy in grid_y0:(grid_y0 + max(grid_h, 1) - 1)
             nshow < 1 && break
             ch = gantt_safe_char('┆', is_narrow)
             if textwidth(ch) != 1; ch = '|'; end  # COV_EXCL_LINE (safe_char always yields width-1 for ┆)
-            set_char!(buf, chart_x + c, yy, ch, Style(; fg = col_text_muted(), dim = true))
+            set_char!(buf, chart_x + pc, yy, ch, Style(; fg = col_text_muted(), dim = true))
         end
     end
 
-    render(canvas, Rect(chart_x, grid_y0, view_ncols, max(1, grid_h)), buf)
+    render(canvas, Rect(chart_x, grid_y0, max(1, paint_ncols), max(1, grid_h)), buf)
 
     # PR3: post-canvas overlays — keep base █ from canvas; refined ends ▌▐, status density ▓ (using status_progress),
     # inside labels (issue key via fit_width) when wide; use finalized contrast (dim or primary_hi bold on sel; never col_bg()).
@@ -2205,31 +2300,32 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                     ext = gantt_bar_extent(win_start, dpc, psd, pdd, view_ncols)
                     if ext !== nothing
                         c0, c1 = ext
+                        p0, p1 = gantt_phys_extent(c0, c1, cpd)
                         # explicit bounds guard (mirrors ruler/band: xx > ... continue); though gantt_bar_extent clamps
-                        if chart_x + c0 < chart_x || chart_x + c1 > area.x + area.width - 1
+                        if chart_x + p0 < chart_x || chart_x + p1 > area.x + area.width - 1
                             continue  # COV_EXCL_LINE (defensive; extent always clamps c0/c1 valid for current render paths; see review fix)
                         end
                         selected = sel_issue !== nothing && iss.id == sel_issue.id
                         dragging = m.gantt_drag !== nothing && m.gantt_drag.issue_id == iss.id
                         bar_col = dragging ? col_primary_hi() :
                                   (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
-                        bw = c1 - c0 + 1
+                        pbw = p1 - p0 + 1
                         # status density fill (partial ▓ or full █ for Done) first
                         # NOTE (bichrome warning addressed by doc): canvas always uses col_primary() cyan for entire base █ track (per design "Keep base █ from canvas").
                         # Only prefix (nfill) + ends get bar_col tint; suffix remains cyan unless overwritten by label/caps. This is intentional augmentation, not full recolor.
                         # Uniform suffix tint would require additional sets over canvas result (not done for minimal + fidelity to "keep base").
                         p = status_progress(iss)
-                        nfill = max(0, floor(Int, bw * p))
+                        nfill = max(0, floor(Int, pbw * p))
                         for k in 0:(nfill - 1)
-                            cc = c0 + k
+                            cc = p0 + k
                             ch = (p >= 0.999 ? '█' : '▓')
                             set_char!(buf, chart_x + cc, rowy, ch, Style(; fg = bar_col))
                         end
                         # In-bar key deferred to post-today identity pass (PR-V: key wins over ┃).
                         # bar end caps (unicode) LAST so they win over density at edge cells
-                        set_char!(buf, chart_x + c0, rowy, '▌', Style(; fg = bar_col))
-                        if bw >= 2
-                            set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                        set_char!(buf, chart_x + p0, rowy, '▌', Style(; fg = bar_col))
+                        if pbw >= 2
+                            set_char!(buf, chart_x + p1, rowy, '▐', Style(; fg = bar_col))
                         end
                     end
                 end
@@ -2244,9 +2340,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # PR4: selection accent on bar (in addition to ▸ label). Brighter left ▌ segment using col_primary_hi().
     # After canvas so it overwrites base █ (compatible with PR3-style post-overlays). Theming only; no y/layout shift.
     if selected_vis_i !== nothing && selected_bar_ext !== nothing
-        c0, _ = selected_bar_ext
+        p0, _ = selected_bar_ext
         rowy = gantt_row_y(grid_y0, selected_vis_i; stride = row_stride)
-        ax = chart_x + c0
+        ax = chart_x + p0
         if ax <= area.x + area.width - 1
             set_char!(buf, ax, rowy, '▌', Style(; fg = col_primary_hi(), bold = true))
         end
@@ -2256,8 +2352,9 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # Z-order: after bars/diamonds/selection, before today + pre-bar keys (keys win on collision).
     # Only when both endpoints are in the nshow window and have visible bar/diamond geometry.
     # y coords are terminal-relative (row_stride-scaled) so verticals fill inter-bar gaps.
+    # Link x is physical (stretch-aware): map logical endpoint cols → phys_c0.
     if m.active_project_id !== nothing && nshow > 0
-        # Map issue id → (0-based terminal y, c0, c1) for visible issue rows only.
+        # Map issue id → (0-based terminal y, phys c0, phys c1) for visible issue rows only.
         ep_map = Dict{String, Tuple{Int,Int,Int}}()
         for i in 1:nshow
             ri = row_start + i - 1
@@ -2270,7 +2367,8 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
             cols = gantt_issue_endpoint_cols(win_start, dpc, psd, pdd, view_ncols)
             cols === nothing && continue
             c0e, c1e = cols
-            ep_map[iss.id] = ((i - 1) * row_stride, c0e, c1e)
+            p0e, p1e = gantt_phys_extent(c0e, c1e, cpd)
+            ep_map[iss.id] = ((i - 1) * row_stride, p0e, p1e)
         end
         if !isempty(ep_map)
             for ln in Stores.list_links(m.boardstore; project_id = m.active_project_id,
@@ -2281,7 +2379,7 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 from_y, _, c_from = fr
                 to_y, c_to, _ = to
                 for seg in gantt_link_segments(from_y, to_y, c_from, c_to; narrow = is_narrow)
-                    (seg.x < 0 || seg.x >= view_ncols) && continue
+                    (seg.x < 0 || seg.x >= paint_ncols) && continue
                     (seg.y < 0 || seg.y >= grid_h) && continue
                     xx = chart_x + seg.x
                     xx > area.x + area.width - 1 && continue
@@ -2296,26 +2394,31 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # Use gantt_safe_char + textwidth guard (PR6). Painted before pre/in-bar keys so issue
     # identifiers win over today on collision (PR-V primary chart identity).
     # Continuous through inter-bar gaps so the marker reads as one column.
+    # At cpd>1, paint the full fat unit so the marker is as wide as a stretched day.
     if tcol !== nothing
-        set_char!(buf, chart_x + tcol, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
+        tp0, tp1 = gantt_phys_extent(tcol, tcol, cpd)
+        # ▼ at first cell of fat today unit (stable hit vs sprint names; grid paints full unit)
+        set_char!(buf, chart_x + tp0, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
         today_ch = is_narrow ? '│' : '┃'
         if nshow >= 1
-            for yy in grid_y0:(grid_y0 + grid_h - 1)
-                set_char!(buf, chart_x + tcol, yy, today_ch, Style(; fg = col_primary_hi(), bold = true))
+            for pc in tp0:tp1
+                for yy in grid_y0:(grid_y0 + grid_h - 1)
+                    set_char!(buf, chart_x + pc, yy, today_ch, Style(; fg = col_primary_hi(), bold = true))
+                end
             end
         end
         # "TODAY" on tick/single axis row. Skip on single-row month where tabs are the
         # primary axis content (TODAY would clobber month chips). Dual keeps TODAY on ticks.
         if has_ruler && (view_ncols - tcol) > 5 && !(!has_dual && lay.scale === :month)
-            lx = chart_x + tcol + 1
-            if lx + 4 < chart_x + view_ncols
+            lx = chart_x + tp1 + 1
+            if lx + 4 < chart_x + paint_ncols
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
             end
         end
     end
 
     # Chart identity keys after today: post-bar key preferred; in-bar fallback.
-    # Post-bar: immediately right of bar/diamond (gap 1). In-bar: only when post-bar cannot fit (bw≥5).
+    # Post-bar: immediately right of bar/diamond (gap 1). In-bar: only when post-bar cannot fit (bw≥5 phys).
     for i in 1:nshow
         ri = row_start + i - 1
         ri > length(rows) && break
@@ -2342,21 +2445,22 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
                 ext = gantt_bar_extent(win_start, dpc, psd, pdd, view_ncols)
                 if ext !== nothing
                     c0, c1 = ext
-                    bw = c1 - c0 + 1
-                    if bw >= 5
-                        avail = max(1, bw - 2)
+                    p0, p1 = gantt_phys_extent(c0, c1, cpd)
+                    pbw = p1 - p0 + 1
+                    if pbw >= 5
+                        avail = max(1, pbw - 2)
                         lbl = fit_width(iss.key, avail)
                         lsty = selected ? Style(; fg = col_primary_hi(), bold = true) :
                                Style(; fg = col_text_dim(), dim = true)
-                        set_string!(buf, chart_x + c0 + 1, rowy, lbl, lsty)
+                        set_string!(buf, chart_x + p0 + 1, rowy, lbl, lsty)
                         # re-assert caps so key never eats bar ends
                         dragging = m.gantt_drag !== nothing && m.gantt_drag.issue_id == iss.id
                         bar_col = dragging ? col_primary_hi() :
                                   (iss.status == "Done" ? col_ok() : priority_color(iss.priority))
-                        set_char!(buf, chart_x + c0, rowy, '▌',
+                        set_char!(buf, chart_x + p0, rowy, '▌',
                                   selected ? Style(; fg = col_primary_hi(), bold = true) :
                                              Style(; fg = bar_col))
-                        set_char!(buf, chart_x + c1, rowy, '▐', Style(; fg = bar_col))
+                        set_char!(buf, chart_x + p1, rowy, '▐', Style(; fg = bar_col))
                     end
                 end
             end
