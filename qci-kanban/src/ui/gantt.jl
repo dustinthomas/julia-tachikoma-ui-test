@@ -2052,14 +2052,14 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
         nmsh = _short(nm, maxn)
         nx = p0 + (pbw > textwidth(nmsh) + 1 ? 1 : 0)
         # avoid today ▼ collision on band_y (name not mangled) + reserve edges.
-        # Today fat unit occupies [tp0,tp1]; if it overlaps the name, shift/truncate.
+        # Today marker is one physical cell (tp0); if it overlaps the name, shift/truncate.
         if tcol !== nothing
-            tp0t, tp1t = gantt_phys_extent(tcol, tcol, cpd)
+            tp0t = gantt_phys_c0(tcol, cpd)
             nm_end = nx + textwidth(nmsh) - 1
-            if tp0t <= nm_end && tp1t >= nx && tp0t >= p0 && tp0t <= p1  # COV_EXCL_LINE (overlap depends on today vs sprint)
-                # Prefer name after the today fat unit when room remains
-                if tp1t + 1 + textwidth(nmsh) - 1 <= p1  # COV_EXCL_LINE
-                    nx = tp1t + 1  # COV_EXCL_LINE
+            if tp0t <= nm_end && tp0t >= nx && tp0t >= p0 && tp0t <= p1  # COV_EXCL_LINE (overlap depends on today vs sprint)
+                # Prefer name after the today marker when room remains
+                if tp0t + 1 + textwidth(nmsh) - 1 <= p1  # COV_EXCL_LINE
+                    nx = tp0t + 1  # COV_EXCL_LINE
                 else
                     maxn = max(1, tp0t - p0)  # COV_EXCL_LINE
                     nmsh = _short(nm, maxn)  # COV_EXCL_LINE
@@ -2434,23 +2434,20 @@ function render_gantt!(m::AppModel, buf::Buffer, area::Rect)
     # Use gantt_safe_char + textwidth guard (PR6). Painted before pre/in-bar keys so issue
     # identifiers win over today on collision (PR-V primary chart identity).
     # Continuous through inter-bar gaps so the marker reads as one column.
-    # At cpd>1, paint the full fat unit so the marker is as wide as a stretched day.
+    # Always 1 physical cell (standard Gantt), even when the day unit is stretched (cpd>1).
     if tcol !== nothing
-        tp0, tp1 = gantt_phys_extent(tcol, tcol, cpd)
-        # ▼ at first cell of fat today unit (stable hit vs sprint names; grid paints full unit)
-        set_char!(buf, chart_x + tp0, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
+        tpc = gantt_phys_c0(tcol, cpd)
+        set_char!(buf, chart_x + tpc, band_y, '▼', Style(; fg = col_primary_hi(), bold = true))
         today_ch = is_narrow ? '│' : '┃'
         if nshow >= 1
-            for pc in tp0:tp1
-                for yy in grid_y0:(grid_y0 + grid_h - 1)
-                    set_char!(buf, chart_x + pc, yy, today_ch, Style(; fg = col_primary_hi(), bold = true))
-                end
+            for yy in grid_y0:(grid_y0 + grid_h - 1)
+                set_char!(buf, chart_x + tpc, yy, today_ch, Style(; fg = col_primary_hi(), bold = true))
             end
         end
         # "TODAY" on tick/single axis row. Skip on single-row month where tabs are the
         # primary axis content (TODAY would clobber month chips). Dual keeps TODAY on ticks.
         if has_ruler && (view_ncols - tcol) > 5 && !(!has_dual && lay.scale === :month)
-            lx = chart_x + tp1 + 1
+            lx = chart_x + tpc + 1
             if lx + 4 < chart_x + paint_ncols
                 set_string!(buf, lx, ruler_y, "TODAY", Style(; fg = col_primary_hi(), bold = true))
             end

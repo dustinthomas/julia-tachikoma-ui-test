@@ -1061,6 +1061,35 @@ end
         @test tcol2 <= 5
     end
 
+    @testset "today marker is 1 cell wide even when day unit is stretched (cpd>1)" begin
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "Now")
+        G4.Stores.create_issue!(m.boardstore; title = "Around today", epic_id = e.id,
+                                start_date = Dates.today() - Day(1), due_date = Dates.today() + Day(1))
+        g4!(m, 'G')
+        # Force high stretch so one day spans multiple physical cols
+        m.gantt_win_day = G4.GANTT_DAY_WIN_MIN
+        w = 120
+        lay = G4.gantt_layout(m, T.Rect(1, 1, w, 20))
+        @test lay.cols_per_day > 1
+        tcol = G4.gantt_point_col(lay.win_start, lay.dpc, Dates.today(), lay.view_ncols)
+        @test tcol !== nothing
+        tx = lay.chart_x + G4.gantt_phys_c0(tcol, lay.cols_per_day)
+        tb = gantt_render(m; w = w, h = 20)
+        # Grid content: single ┃ at today's physical col; neighbors in the fat unit are not ┃
+        found = false
+        for y in 1:20
+            T.char_at(tb, tx, y) == '┃' || continue
+            found = true
+            @test T.char_at(tb, tx, y) == '┃'
+            for dx in 1:(lay.cols_per_day - 1)
+                @test T.char_at(tb, tx + dx, y) != '┃'
+            end
+            break
+        end
+        @test found
+    end
+
     @testset "day view positions today near left with limited past (traditional gantt; 1 day per column, 14-day window max)" begin
         m = gantt_login()
         e = G4.Stores.create_epic!(m.boardstore; name = "OldData")
