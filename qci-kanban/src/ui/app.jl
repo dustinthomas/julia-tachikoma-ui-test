@@ -246,6 +246,7 @@ function _clear_project_selection!(m::AppModel)
     m.card_issue_id = nothing
     m.backlog_sel = 1
     m.gantt_sel = 1
+    m.board_hover = nothing         # B0: design clear table — project switch drops board mouse UI
     m.label_filter = nothing
     empty!(m.active_filters)
     set_text!(m.search_input, "")

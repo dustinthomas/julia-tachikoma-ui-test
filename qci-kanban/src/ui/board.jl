@@ -389,8 +389,9 @@ end
 
 """
 Snapshot of board card geometry for a given AppModel + content Rect.
-Built by pure computation from m + area (same formulas as paint). B0: paint
-consumes `slots`; later hit-test reuses the same builder.
+Same geometry formulas as paint. **Not fully pure**: clamps `m.sel_*` via
+`_clamp_selection!` (identical to render) so scroll-follow uses in-range
+selection. B0: paint consumes `slots`; later hit-test reuses this builder.
 """
 struct BoardLayout
     area::Rect                 # original body rect (pre-stats split input)
@@ -406,8 +407,11 @@ end
 
 Encode stats strip, filter/header rows, lane heights, scroll-follow start,
 bordered vs flat cards, and each visible card `Rect` — identical to the paint
-path. Clamps selection (same as render) so scroll-follow uses in-range `sel_*`.
-B0 leaves move-button rects as `nothing`.
+path.
+
+**Side effect:** calls `_clamp_selection!(m)` (same as render) so scroll-follow
+uses in-range `sel_*`. Not safe for speculative “what-if” layouts without
+restoring selection. B0 leaves move-button rects as `nothing`.
 """
 function board_layout(m::AppModel, area::Rect)::BoardLayout
     show_stats = m.show_stats && area.height >= STATS_HEIGHT + 6
@@ -577,6 +581,8 @@ function render_board!(m::AppModel, buf::Buffer, area::Rect)
     (area.width < 20 || area.height < 6) && return
     # Single layout snapshot: paint cards exclusively from layout.slots (acceptance A).
     layout = board_layout(m, area)
+    # Invariant: show_stats ⇒ area.width ≥ 20 ⇒ render_board_stats! returns STATS_HEIGHT
+    # (never 0). Layout insets by STATS_HEIGHT; must stay aligned with used height.
     if layout.show_stats
         render_board_stats!(m, buf, Rect(area.x, area.y, area.width, STATS_HEIGHT))
     end
@@ -624,8 +630,8 @@ end
 
 """
 The swimlane × status card grid from a `BoardLayout` snapshot (board render
-minus the optional stats strip). Lane frames / headers / "+N more" use the same
-metrics as `board_layout`; **cards paint exclusively from `layout.slots`**.
+minus the optional stats strip). Lane frames / headers use shared lane metrics;
+**"+N more" and cards derive from `layout.slots`** (no second scroll-window formula).
 """
 function _render_board_grid!(m::AppModel, buf::Buffer, layout::BoardLayout)
     area = layout.grid_area
@@ -652,6 +658,11 @@ function _render_board_grid!(m::AppModel, buf::Buffer, layout::BoardLayout)
                     Style(; fg = col_text_dim()))
         y += 1
     end
+    # Index slots by (lane, col) once — drives +N more without re-deriving the window.
+    slots_by_cell = Dict{Tuple{Int,Int},Vector{BoardCardSlot}}()
+    for s in layout.slots
+        push!(get!(() -> BoardCardSlot[], slots_by_cell, (s.lane, s.col)), s)
+    end
     frame = Style(; fg = col_text_muted())
     for (li, lane) in enumerate(g)
         lh = min(lane_h, bottom_lim - y)
@@ -673,30 +684,28 @@ function _render_board_grid!(m::AppModel, buf::Buffer, layout::BoardLayout)
                                         Style(; fg = col_text_dim())
             set_string!(buf, area.x + 2, y, _short(" $(lane.name) ($(total)) ", area.width - 4), tstyle)
         end
-        # "+N more" still needs per-cell scroll window (cards themselves come from slots).
-        inner_h = lh - 2
-        bordered = inner_h >= MODERN_CARD_H
-        card_h = bordered ? MODERN_CARD_H : clamp(inner_h, 1, 4)
-        max_cards = max(1, inner_h ÷ max(1, card_h))
+        # "+N more" from layout.slots (last shown idx + bottom of last slot rect).
         for (ci, cell) in enumerate(lane.cols)
-            cx = inner_x + (ci - 1) * col_w
-            sel_here = (li == m.sel_lane && ci == m.sel_col)
-            start = (sel_here && m.sel_idx > max_cards) ? (m.sel_idx - max_cards + 1) : 1
-            last = min(length(cell), start + max_cards - 1)
-            shown = max(0, last - start + 1)
-            hidden = length(cell) - last
-            if hidden > 0
-                my = y + 1 + shown * card_h
-                my <= y + lh - 2 &&
-                    set_string!(buf, cx, my, _short("+$(hidden) more", col_w - 1), Style(; fg = col_text_muted()))
-            end
+            col_slots = get(slots_by_cell, (li, ci), BoardCardSlot[])
+            isempty(col_slots) && continue
+            last_idx = maximum(s.idx for s in col_slots)
+            hidden = length(cell) - last_idx
+            hidden <= 0 && continue
+            bot = maximum(s.rect.y + s.rect.height for s in col_slots)
+            my = bot
+            cx = col_slots[1].rect.x
+            my <= y + lh - 2 &&
+                set_string!(buf, cx, my, _short("+$(hidden) more", col_w - 1), Style(; fg = col_text_muted()))
         end
         y += lh
     end
-    # Acceptance A: paint cards exclusively from layout.slots (no parallel card loop).
+    # Acceptance A: paint cards exclusively from layout.slots.
+    # Resolve Issue from the in-memory grid by (lane,col,idx) — no N× store get_issue.
     for s in layout.slots
-        iss = Stores.get_issue(m.boardstore, s.issue_id)
-        iss === nothing && continue
+        cell = _cell(g, s.lane, s.col)
+        (1 <= s.idx <= length(cell)) || continue
+        iss = cell[s.idx]
+        iss.id == s.issue_id || continue      # layout/grid must agree
         sel = (s.lane == m.sel_lane && s.col == m.sel_col && s.idx == m.sel_idx)
         if s.bordered
             _render_card_modern!(m, buf, s.rect, iss, sel)

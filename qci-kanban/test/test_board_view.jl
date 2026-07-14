@@ -469,9 +469,26 @@ end
         @test !isempty(sel_slots)
         s = only(sel_slots)
         @test s.lane == m.sel_lane && s.col == m.sel_col && s.idx == m.sel_idx
-        # Window starts past index 1 when selection is deep
         col_slots = filter(s -> s.lane == m.sel_lane && s.col == m.sel_col, lay.slots)
-        @test minimum(s.idx for s in col_slots) > 1 || m.sel_idx <= length(col_slots)
+        @test !isempty(col_slots)
+        # Unconditional: deep selection + short height must advance the window past 1.
+        @test m.sel_idx > length(col_slots)     # more cards than fit ⇒ scroll-follow
+        @test minimum(s.idx for s in col_slots) > 1
+        @test maximum(s.idx for s in col_slots) == m.sel_idx
+        # Window start matches formula: sel_idx - max_cards + 1
+        max_cards = length(col_slots)
+        @test minimum(s.idx for s in col_slots) == m.sel_idx - max_cards + 1
+        # +N more count agrees with slots (hidden = total - last shown idx)
+        g = Q3.board_grid(m)
+        cell = g[m.sel_lane].cols[m.sel_col]
+        last_idx = maximum(s.idx for s in col_slots)
+        hidden = length(cell) - last_idx
+        @test hidden > 0
+        # Paint shows "+N more" with that count
+        tb = T.TestBackend(100, 20); T.reset!(tb.buf)
+        Q3.render_board!(m, tb.buf, area)
+        blob = join([T.row_text(tb, i) for i in 1:20], "\n")
+        @test occursin("+$(hidden) more", blob)
     end
 
     @testset "flat degrade: short height → bordered=false slots" begin
@@ -535,6 +552,10 @@ end
         # View switch also clears (hygiene for B1/B2)
         m.board_hover = :stale
         mkey(m, 'G')                              # board → gantt
+        @test m.board_hover === nothing
+        # Project selection clear (design clear table)
+        m.board_hover = :stale2
+        Q3._clear_project_selection!(m)
         @test m.board_hover === nothing
     end
 end
