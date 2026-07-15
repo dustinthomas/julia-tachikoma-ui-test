@@ -3194,19 +3194,19 @@ end
         @test m5.gantt_drag !== nothing
         segs_n = G4.build_toast_segments(m5; width = max(1, 50 - 4))
         @test all(s -> s.boxed === false, segs_n)
+        # Strict: :start chip must survive narrow fit with matrix warn + unboxed
         start_segs = filter(s -> s.role === :start, segs_n)
-        if !isempty(start_segs)
-            @test only(start_segs).style.fg == warn
-        end
-        # if start chip still visible on frame, style_at must match
+        @test !isempty(start_segs)
+        @test only(start_segs).style.fg == warn
+        @test only(start_segs).boxed === false
+        # Frame paint: require visible start chip (full or D6-shortened) + warn fg
         ps_n = Dates.format(m5.gantt_drag.preview_start, dateformat"u d")
         loc_n = T.find_text(tb_n, "start $ps_n")
         if loc_n === nothing
             loc_n = T.find_text(tb_n, "s " * replace(ps_n, " " => ""))  # shortened form
         end
-        if loc_n !== nothing
-            @test T.style_at(tb_n, loc_n.x, loc_n.y).fg == warn
-        end
+        @test loc_n !== nothing
+        @test T.style_at(tb_n, loc_n.x, loc_n.y).fg == warn
     end
 
     @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin
