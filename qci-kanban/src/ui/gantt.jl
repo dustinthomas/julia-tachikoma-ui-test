@@ -1730,16 +1730,27 @@ toast_seg(role::Symbol, text::AbstractString, style::Style; boxed::Bool = true) 
 with_boxed(seg, b::Bool) = (; seg..., boxed = b)
 with_text(seg, t::AbstractString) = (; seg..., text = String(t))
 
-"""Copy Style fields into a new Style, optionally forcing bg (Style is immutable)."""
-function style_with(; fg, bg = nothing, bold::Bool = false, dim::Bool = false)
-    bg === nothing ? Style(; fg = fg, bold = bold, dim = dim) :
-                     Style(; fg = fg, bg = bg, bold = bold, dim = dim)
+"""Copy Style fields into a new Style, optionally forcing bg (Style is immutable).
+
+Passes through the full Tachikoma Style flag set so chip-bg rebuilds do not
+drop italic/underline/strikethrough/hyperlink when a later toast role uses them.
+"""
+function style_with(; fg, bg = nothing, bold::Bool = false, dim::Bool = false,
+                    italic::Bool = false, underline::Bool = false,
+                    strikethrough::Bool = false, hyperlink::AbstractString = "")
+    kwargs = (fg = fg, bold = bold, dim = dim, italic = italic,
+              underline = underline, strikethrough = strikethrough,
+              hyperlink = String(hyperlink))
+    bg === nothing ? Style(; kwargs...) : Style(; bg = bg, kwargs...)
 end
 
 function with_chip_bg(seg)
     st = seg.style
     new_st = style_with(; fg = st.fg, bg = col_surface_hi(),
-                          bold = st.bold, dim = st.dim)
+                          bold = st.bold, dim = st.dim,
+                          italic = st.italic, underline = st.underline,
+                          strikethrough = st.strikethrough,
+                          hyperlink = st.hyperlink)
     (; seg..., style = new_st)
 end
 
@@ -1788,10 +1799,13 @@ function gantt_drag_tooltip_segments(mode::Symbol,
 end
 
 """
-    gantt_drag_tooltip(mode, preview_start, preview_due; key="") -> String
+    gantt_drag_tooltip(mode, preview_start, preview_due;
+                       key="", orig_start=nothing, orig_due=nothing) -> String
 
 Live status-bar tooltip while dragging a Gantt bar. Join of segment texts
 with `" · "` so string tests and structured chips share one source of truth.
+`orig_start` / `orig_due` accepted for API forward-compat with the segment
+builder (T3 color matrix); ignored for string content.
 """
 function gantt_drag_tooltip(mode::Symbol,
                             preview_start::Union{Nothing,Date},

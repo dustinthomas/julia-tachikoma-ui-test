@@ -2851,6 +2851,19 @@ end
         @test chipped.style.fg == neut
         @test chipped.style.bg == G4.Theming.col_surface_hi()
         @test base.style.bg != chipped.style.bg  # original unchanged
+        # style_with / with_chip_bg pass through italic/underline/strikethrough/hyperlink
+        rich = G4.toast_seg(:warn, "Role warning: no",
+            T.Style(; fg = G4.Theming.col_warn(), bold = true, italic = true,
+                      underline = true, strikethrough = true,
+                      hyperlink = "https://example.test"); boxed = true)
+        rich_chip = G4.with_chip_bg(rich)
+        @test rich_chip.style.bold === true
+        @test rich_chip.style.italic === true
+        @test rich_chip.style.underline === true
+        @test rich_chip.style.strikethrough === true
+        @test rich_chip.style.hyperlink == "https://example.test"
+        @test rich_chip.style.bg == G4.Theming.col_surface_hi()
+        @test rich.style.bg != rich_chip.style.bg
     end
 
     @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin
