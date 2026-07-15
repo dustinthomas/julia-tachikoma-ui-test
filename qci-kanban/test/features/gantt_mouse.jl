@@ -13,6 +13,7 @@
 #   • Left-press on title [+] / [-] → _gantt_stretch!(±1); wheel never stretch
 #   M3 drag-reschedule:
 #   • Drag bar body shifts start/due in store (duration preserved)
+#   • Live status tooltip shows zone + start/due + interval while dragging
 #   • Denied role (viewer + enforce_roles) does not write
 #   • Esc cancels drag without commit
 #   • Keyboard edit (e) still works after mouse
@@ -404,6 +405,12 @@ end
             T.update!(m, gm_drag(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya))
             @test m.gantt_drag.preview_start == orig_sd + Day(3)
             @test m.gantt_drag.preview_due == orig_dd + Day(3)
+            # Tooltip on status message while dragging
+            @test occursin(a.key, m.message)
+            @test occursin("start", lowercase(m.message))
+            @test occursin("due", lowercase(m.message))
+            days = (m.gantt_drag.preview_due - m.gantt_drag.preview_start).value + 1
+            @test occursin("$(days)d", m.message)
             @test GM.Stores.get_issue(m.boardstore, a.id).start_date == orig_sd
             T.update!(m, gm_release(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya))
             @test m.gantt_drag === nothing

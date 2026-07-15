@@ -1720,6 +1720,48 @@ function gantt_drag_mode_for_bar(c0::Int, c1::Int, col::Int)::Symbol
 end
 
 """
+    gantt_drag_tooltip(mode, preview_start, preview_due; key="") -> String
+
+Live status-bar tooltip while dragging a Gantt bar. Names the zone
+(move / start / due / date), optional issue key, preview dates, and inclusive
+day interval when both ends are set.
+"""
+function gantt_drag_tooltip(mode::Symbol,
+                            preview_start::Union{Nothing,Date},
+                            preview_due::Union{Nothing,Date};
+                            key::AbstractString = "")
+    _fmt(d::Date) = Dates.format(d, dateformat"u d")
+    zone = mode === :start ? "Drag start" :
+           mode === :end   ? "Drag due"   :
+           mode === :body  ? "Drag move"  :
+           mode === :point ? "Drag date"  : "Drag"
+    head = isempty(key) ? zone : string(zone, " · ", key)
+    if mode === :point
+        d = preview_start !== nothing ? preview_start : preview_due
+        return d === nothing ? head : string(head, " · ", _fmt(d))
+    end
+    if preview_start !== nothing && preview_due !== nothing
+        days = Dates.value(preview_due - preview_start) + 1
+        return string(head, " · start ", _fmt(preview_start),
+                      " · due ", _fmt(preview_due), " · ", days, "d")
+    end
+    parts = String[head]
+    preview_start !== nothing && push!(parts, "start " * _fmt(preview_start))
+    preview_due !== nothing && push!(parts, "due " * _fmt(preview_due))
+    return join(parts, " · ")
+end
+
+function _gantt_set_drag_tooltip!(m::AppModel)
+    drag = m.gantt_drag
+    drag === nothing && return m
+    iss = Stores.get_issue(m.boardstore, drag.issue_id)
+    key = iss === nothing ? "" : iss.key
+    _set_message!(m, gantt_drag_tooltip(drag.mode, drag.preview_start, drag.preview_due;
+                                         key = key))
+    m
+end
+
+"""
     gantt_compute_drag_preview(mode, win_start, dpc, origin_col, cur_col,
                                orig_start, orig_due) -> (preview_start, preview_due)
 
@@ -1796,6 +1838,7 @@ function _gantt_begin_drag!(m::AppModel, iss::Domain.Issue, mode::Symbol,
         preview_start = iss.start_date,
         preview_due = iss.due_date,
     )
+    _gantt_set_drag_tooltip!(m)
     m
 end
 
@@ -1814,6 +1857,7 @@ function _gantt_update_drag_preview!(m::AppModel, lay::GanttLayout, cur_col::Int
         preview_start = ps,
         preview_due = pd,
     )
+    _gantt_set_drag_tooltip!(m)
     m
 end
 

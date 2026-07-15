@@ -2691,6 +2691,39 @@ end
         @test G4.gantt_drag_mode_for_bar(2, 4, 4) === :end
     end
 
+    # Live status-bar tooltip during M3 drag: zone label + start/due + interval.
+    @testset "gantt_drag_tooltip pure: mode + dates + interval" begin
+        s = Dates.Date(2026, 7, 10)
+        d = Dates.Date(2026, 7, 15)
+        t_body = G4.gantt_drag_tooltip(:body, s, d; key = "QCI-1")
+        @test occursin("move", lowercase(t_body)) || occursin("Move", t_body)
+        @test occursin("QCI-1", t_body)
+        @test occursin("start", lowercase(t_body))
+        @test occursin("due", lowercase(t_body))
+        @test occursin("6d", t_body)   # inclusive Jul 10–15
+        t_start = G4.gantt_drag_tooltip(:start, s + Day(2), d; key = "QCI-1")
+        @test occursin("start", lowercase(t_start))
+        @test occursin("4d", t_start)
+        t_end = G4.gantt_drag_tooltip(:end, s, d + Day(3); key = "QCI-1")
+        @test occursin("due", lowercase(t_end))
+        @test occursin("9d", t_end)
+        t_pt = G4.gantt_drag_tooltip(:point, nothing, Dates.Date(2026, 7, 12); key = "QCI-2")
+        @test occursin("date", lowercase(t_pt)) || occursin("Date", t_pt)
+        @test occursin("QCI-2", t_pt)
+        # Partial dual-date (defensive): only start or only due
+        t_ps = G4.gantt_drag_tooltip(:body, s, nothing; key = "QCI-3")
+        @test occursin("start", lowercase(t_ps))
+        @test occursin("QCI-3", t_ps)
+        t_pd = G4.gantt_drag_tooltip(:body, nothing, d; key = "QCI-4")
+        @test occursin("due", lowercase(t_pd))
+        t_empty = G4.gantt_drag_tooltip(:body, nothing, nothing)
+        @test occursin("Drag move", t_empty)
+        t_pt_start = G4.gantt_drag_tooltip(:point, s, nothing; key = "QCI-5")
+        @test occursin("QCI-5", t_pt_start)
+        t_pt_none = G4.gantt_drag_tooltip(:point, nothing, nothing)
+        @test occursin("Drag date", t_pt_none)
+    end
+
     @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin
         ws = Date(2026, 3, 10)
         sd, ed = Date(2026, 3, 12), Date(2026, 3, 15)  # 4-day span (cols 2..5 at dpc=1)
@@ -2761,6 +2794,12 @@ end
         G4._handle_gantt_mouse!(m, drag)
         @test m.gantt_drag.preview_start == a.start_date + Day(2)
         @test m.gantt_drag.preview_due == a.due_date + Day(2)
+        # Live tooltip (status message) while dragging — zone + dates + interval
+        @test occursin(a.key, m.message)
+        @test occursin("start", lowercase(m.message))
+        @test occursin("due", lowercase(m.message))
+        days = (m.gantt_drag.preview_due - m.gantt_drag.preview_start).value + 1
+        @test occursin("$(days)d", m.message)
         # Still not in store
         @test G4.Stores.get_issue(m.boardstore, a.id).start_date == a.start_date
         # Release commits
