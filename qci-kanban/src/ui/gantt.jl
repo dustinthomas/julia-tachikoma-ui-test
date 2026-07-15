@@ -969,6 +969,16 @@ Pure finish-to-start orthogonal polyline for a `blocks` edge (G6b / Criterion 4)
 `(c_from, from_row)` is the source bar **end**; `(c_to, to_row)` is the target
 bar **start**. Rows and columns are 0-based chart-relative indices.
 
+**Forward gap** (`c_to > c_from`): drop at `c_from`, run along the target row
+to `c_to` with `▶`.
+
+**Overlap / zero-gap** (`c_to ≤ c_from`) with inter-bar gutter
+(`abs(to_row - from_row) ≥ 2`, product `GANTT_ROW_STRIDE = 2`): drop from the
+source end into the gutter row between the bars, run **horizontally in that
+vertical space** to the successor **beginning**, then enter with `▶`. The
+horizontal never paints on the target bar row (avoids the cramped through-bar
+stub of `no_wrap_arround.png`). Classic Gantt-style wrap-to-start.
+
 Box-drawing: `─` `│` `╮` `╯` `╰` `╭` `▶` `◀`. When `narrow`, maps via
 `gantt_safe_char`. Caller clips to the visible window and paints after bars,
 before post-bar keys.
@@ -1000,7 +1010,52 @@ function gantt_link_segments(from_row::Int, to_row::Int, c_from::Int, c_to::Int;
     end
 
     going_down = to_row > from_row
-    # Start corner at source bar end; vertical along c_from.
+    dy = abs(to_row - from_row)
+
+    # Overlap / zero-gap with a gutter between bars: horizontal in the gap,
+    # wrap to the successor beginning (▶). Requires dy ≥ 2 (one blank row).
+    if c_to <= c_from && dy >= 2
+        pushseg!(c_from, from_row, going_down ? '╮' : '╯')
+        if going_down
+            # Vertical down to the gutter just above the target row.
+            for y in (from_row + 1):(to_row - 2)
+                pushseg!(c_from, y, '│')
+            end
+            gap_y = to_row - 1
+            if c_to == c_from
+                pushseg!(c_from, gap_y, '│')
+            else
+                # ╯ turn left on gutter, ─ to beginning, ╭ turn down into start.
+                pushseg!(c_from, gap_y, '╯')
+                for x in (c_to + 1):(c_from - 1)
+                    pushseg!(x, gap_y, '─')
+                end
+                pushseg!(c_to, gap_y, '╭')
+            end
+            pushseg!(c_to, to_row, '▶')
+        else
+            # Going up: gutter is just below the target row.
+            for y in (to_row + 2):(from_row - 1)
+                pushseg!(c_from, y, '│')
+            end
+            gap_y = to_row + 1
+            if c_to == c_from
+                pushseg!(c_from, gap_y, '│')
+            else
+                # ╮ turn left on gutter, ─ to beginning, ╰ turn up into start.
+                pushseg!(c_from, gap_y, '╮')
+                for x in (c_to + 1):(c_from - 1)
+                    pushseg!(x, gap_y, '─')
+                end
+                pushseg!(c_to, gap_y, '╰')
+            end
+            pushseg!(c_to, to_row, '▶')
+        end
+        return segs
+    end
+
+    # Classic FS with forward gap (or no gutter): drop at source end, run on
+    # target row to target start.
     pushseg!(c_from, from_row, going_down ? '╮' : '╯')
     if going_down
         for y in (from_row + 1):(to_row - 1)
@@ -1011,7 +1066,6 @@ function gantt_link_segments(from_row::Int, to_row::Int, c_from::Int, c_to::Int;
             pushseg!(c_from, y, '│')
         end
     end
-
     if c_to == c_from
         pushseg!(c_to, to_row, '▶')
     elseif c_to > c_from
@@ -1021,6 +1075,7 @@ function gantt_link_segments(from_row::Int, to_row::Int, c_from::Int, c_to::Int;
         end
         pushseg!(c_to, to_row, '▶')
     else
+        # Overlap without gutter (dy < 2): short reverse on target row (fallback).
         pushseg!(c_from, to_row, going_down ? '╯' : '╮')
         for x in (c_to + 1):(c_from - 1)
             pushseg!(x, to_row, '─')

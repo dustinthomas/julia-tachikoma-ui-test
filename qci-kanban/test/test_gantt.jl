@@ -802,16 +802,18 @@ end
         @test '╮' in chars_d && '│' in chars_d && '╰' in chars_d && '▶' in chars_d
         @test segs_d[1] == (x = 4, y = 0, ch = '╮')
         @test segs_d[end] == (x = 7, y = 2, ch = '▶')
-        # Up + left
-        segs_u = G4.gantt_link_segments(3, 1, 9, 5)
-        chars_u = Set(s.ch for s in segs_u)
-        @test '╯' in chars_u && '│' in chars_u && '▶' ∉ chars_u  # ends with ◀
-        @test segs_u[end].ch == '◀'
-        # Same column down: vertical + ▶ at target
+        # Up + right (classic forward FS): covers going-up vertical at c_from
+        segs_ur = G4.gantt_link_segments(3, 1, 4, 7)
+        chars_ur = Set(s.ch for s in segs_ur)
+        @test '╯' in chars_ur && '│' in chars_ur && '╭' in chars_ur && '▶' in chars_ur
+        @test segs_ur[1] == (x = 4, y = 3, ch = '╯')
+        @test any(s -> s.x == 4 && s.y == 2 && s.ch == '│', segs_ur)
+        @test segs_ur[end] == (x = 7, y = 1, ch = '▶')
+        # Same column down (zero-gap): vertical through gutter, ▶ at target start
         segs_v = G4.gantt_link_segments(0, 3, 2, 2)
-        @test segs_v[1].ch == '╮'
         @test segs_v[end] == (x = 2, y = 3, ch = '▶')
         @test any(s -> s.ch == '│', segs_v)
+        @test maximum(s.x for s in segs_v) == 2  # no right egress
         # Narrow maps box-drawing to ASCII
         segs_n = G4.gantt_link_segments(0, 1, 3, 6; narrow = true)
         @test all(s -> s.ch in ('-', '|', '+', '>', '<'), segs_n)
@@ -821,6 +823,62 @@ end
         @test G4.gantt_issue_endpoint_cols(ws, 1, Date(2026, 3, 2), Date(2026, 3, 5), 14) == (1, 4)
         @test G4.gantt_issue_endpoint_cols(ws, 1, nothing, Date(2026, 3, 3), 14) == (2, 2)
         @test G4.gantt_issue_endpoint_cols(ws, 1, Date(2026, 4, 1), Date(2026, 4, 5), 14) === nothing
+
+        # Overlap / adjacent (c_to ≤ c_from): horizontal lives in the *inter-bar gutter*
+        # (vertical space between rows) and wraps to the successor *beginning* with ▶.
+        # Classic Gantt: not a right-side stub through the target bar body.
+        # from_row=0, to_row=2 → gap_y=1 (matches GANTT_ROW_STRIDE=2).
+        # Wide overlap so gutter has mid-run ─ cells (c_from - c_to > 1).
+        segs_ov = G4.gantt_link_segments(0, 2, 8, 5)
+        gap_y = 1
+        @test segs_ov[1] == (x = 8, y = 0, ch = '╮')
+        @test segs_ov[end] == (x = 5, y = 2, ch = '▶')
+        @test maximum(s.x for s in segs_ov) == 8          # no pad past source end
+        @test any(s -> s.y == gap_y && s.x == 8 && s.ch == '╯', segs_ov)
+        @test any(s -> s.y == gap_y && s.x == 5 && s.ch == '╭', segs_ov)
+        @test any(s -> s.y == gap_y && s.ch == '─', segs_ov)
+        # Horizontal must NOT run on the target bar row (would paint through the bar)
+        @test !any(s -> s.y == 2 && s.ch == '─', segs_ov)
+        # 1-col reverse: corners abut on gutter, still ▶ at beginning (no mid ─)
+        segs_tight = G4.gantt_link_segments(0, 2, 6, 5)
+        @test segs_tight[end] == (x = 5, y = 2, ch = '▶')
+        @test any(s -> s.y == 1 && s.x == 6 && s.ch == '╯', segs_tight)
+        @test any(s -> s.y == 1 && s.x == 5 && s.ch == '╭', segs_tight)
+        # Zero-gap same column: pure vertical through gutter → ▶
+        segs_zg = G4.gantt_link_segments(0, 2, 5, 5)
+        @test segs_zg[end] == (x = 5, y = 2, ch = '▶')
+        @test maximum(s.x for s in segs_zg) == 5
+        @test any(s -> s.y == 1 && s.x == 5 && s.ch == '│', segs_zg)
+        # Classic forward FS (c_to > c_from) unchanged
+        segs_fwd = G4.gantt_link_segments(0, 2, 4, 7)
+        @test segs_fwd[1] == (x = 4, y = 0, ch = '╮')
+        @test segs_fwd[end] == (x = 7, y = 2, ch = '▶')
+        # Up + overlap: horizontal on gap below target (gap_y = to_row+1), ▶ at start
+        segs_up_ov = G4.gantt_link_segments(3, 1, 8, 5)
+        @test segs_up_ov[end] == (x = 5, y = 1, ch = '▶')
+        @test maximum(s.x for s in segs_up_ov) == 8
+        @test any(s -> s.y == 2 && s.x == 8 && s.ch == '╮', segs_up_ov)  # gap below target
+        @test any(s -> s.y == 2 && s.x == 5 && s.ch == '╰', segs_up_ov)
+        @test any(s -> s.y == 2 && s.ch == '─', segs_up_ov)
+        @test !any(s -> s.y == 1 && s.ch == '─', segs_up_ov)  # not on target row
+        # Up + tall gutter (dy≥3): intermediate │ between source and gap
+        segs_up_tall = G4.gantt_link_segments(5, 1, 8, 5)
+        @test any(s -> s.y == 3 && s.x == 8 && s.ch == '│', segs_up_tall)
+        @test segs_up_tall[end] == (x = 5, y = 1, ch = '▶')
+        # Up + zero-gap same column through gutter
+        segs_up_zg = G4.gantt_link_segments(3, 1, 5, 5)
+        @test any(s -> s.y == 2 && s.x == 5 && s.ch == '│', segs_up_zg)
+        @test segs_up_zg[end] == (x = 5, y = 1, ch = '▶')
+        # No gutter (dy=1): classic same-col + reverse-overlap fallbacks
+        segs_nogap = G4.gantt_link_segments(0, 1, 5, 5)
+        @test segs_nogap[end] == (x = 5, y = 1, ch = '▶')
+        segs_fb = G4.gantt_link_segments(0, 1, 8, 5)
+        @test segs_fb[end] == (x = 5, y = 1, ch = '◀')
+        @test any(s -> s.y == 1 && s.ch == '─', segs_fb)
+        # Narrow wrap uses ASCII; still ends with > at beginning
+        segs_ov_n = G4.gantt_link_segments(0, 2, 8, 5; narrow = true)
+        @test segs_ov_n[end] == (x = 5, y = 2, ch = '>')
+        @test any(s -> s.y == 1 && s.ch == '-', segs_ov_n)
     end
 end
 
@@ -3545,6 +3603,44 @@ end
         segs = G4.gantt_link_segments(vis_a, vis_b, ext_a[2], ext_b[1])
         @test !isempty(segs)
         @test segs[end].ch == '▶' || segs[end].ch == '◀'
+    end
+
+    @testset "overlap/adjacent blocks: gutter wrap to successor beginning" begin
+        # Repro no_wrap_arround.png: successor starts before/at predecessor end.
+        # Horizontal must sit in the inter-bar gutter and enter the successor start (▶).
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "WrapEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "WrapFrom", epic_id = e.id,
+                                    start_date = Dates.today(),
+                                    due_date = Dates.today() + Day(5))
+        b = G4.Stores.create_issue!(m.boardstore; title = "WrapTo", epic_id = e.id,
+                                    start_date = Dates.today() + Day(3),
+                                    due_date = Dates.today() + Day(7))
+        G4.Stores.create_link!(m.boardstore; from_id = a.id, to_id = b.id, kind = "blocks")
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        m.gantt_scale = :day
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, T.Rect(1, 1, 120, 24); rows = rows)
+        @test lay.row_stride >= 2  # vertical gutter between bars for the horizontal run
+        ext_a = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        ext_b = G4.gantt_bar_extent(lay.win_start, lay.dpc, b.start_date, b.due_date, lay.view_ncols)
+        @test ext_a !== nothing && ext_b !== nothing
+        c_from, c_to = ext_a[2], ext_b[1]
+        @test c_to <= c_from  # overlap precondition
+        segs = G4.gantt_link_segments(0, lay.row_stride, c_from, c_to)
+        gap_y = lay.row_stride - 1
+        @test segs[end] == (x = c_to, y = lay.row_stride, ch = '▶')
+        @test maximum(s.x for s in segs) == c_from
+        @test any(s -> s.y == gap_y && s.ch == '─', segs) || c_to == c_from
+        @test !any(s -> s.y == lay.row_stride && s.ch == '─', segs)
+        tb = gantt_render(m; w = 120, h = 24)
+        blob = gantt_screen_blob(tb; h = 24)
+        # Gutter elbow + arrow into beginning (not a reverse ◀ stub on the bar)
+        @test occursin('╮', blob)
+        @test occursin('╯', blob) || occursin('╭', blob)
+        @test occursin('▶', blob)
+        @test occursin('─', blob)
     end
 
     @testset "thin UI: L creates blocks link; cycle surfaces message; U deletes" begin
