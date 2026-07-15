@@ -514,12 +514,16 @@ end
         @test m.active_project_id !== nothing
         tb = app_tb(m; w = 100, h = 24)
         @test T.find_text(tb, "PROJECT:") !== nothing
-        # wide content: boxed project chip uses surface_hi bg
+        # wide content (w=100 → toast max_w ≥ TOAST_BOX_MIN_W): boxed chip bg is surface_hi
         loc = T.find_text(tb, "PROJECT:")
         @test loc !== nothing
+        # find_text lands on 'P' of "[PROJECT:…]"; boxed paint puts surface_hi on chip cells
         st = T.style_at(tb, loc.x, loc.y)
-        # content area max_w = width - borders; at w=100 toast is boxed
-        @test st.bg == Q.Theming.col_surface_hi() || st.fg == Q.Theming.col_primary()
+        @test st.bg == Q.Theming.col_surface_hi()
+        @test st.fg == Q.Theming.col_primary()
+        # boxed chip should also show opening bracket on the toast row
+        row = T.row_text(tb, loc.y)
+        @test occursin("[PROJECT:", row) || occursin("PROJECT:", row)
 
         m.message = "Refreshed"
         tb2 = app_tb(m; w = 100, h = 24)
@@ -651,7 +655,12 @@ end
         ]
         Q._paint_toast_segments!(tb2.buf, 1, 1, 20, long_segs)
         row1 = T.row_text(tb2, 1)
-        @test textwidth(strip(row1)) <= 20 || true  # painted without throw
+        # Non-space content width must not exceed max_w=20 (real bound, not tautology)
+        painted = rstrip(row1)
+        @test textwidth(painted) <= 20
+        @test occursin("Drag move", painted)  # first chip painted
+        # Full long plain body must not appear unclipped past the budget
+        @test !occursin("this-is-a-very-long-plain-toast-message-body", painted)
         # empty / zero-width paint no-op
         Q._paint_toast_segments!(tb2.buf, 1, 2, 0, long_segs)
         Q._paint_toast_segments!(tb2.buf, 1, 2, 10, typeof(long_segs[1])[])
@@ -666,5 +675,53 @@ end
         tb3 = app_tb(m; w = 36, h = 14)
         @test tb3 !== nothing
         app_rows(m; w = 36, h = 14)
+    end
+
+    @testset "K13: no-op commit strips drag tip residue" begin
+        m = fresh_app(); app_login_new(m)
+        issues = Q.Stores.list_issues(m.boardstore)
+        iss = first(issues)
+        Q.Stores.update_issue!(m.boardstore, iss.id;
+                               start_date = Dates.today(),
+                               due_date = Dates.today() + Dates.Day(2))
+        iss = Q.Stores.get_issue(m.boardstore, iss.id)
+        m.gantt_drag = (
+            issue_id = iss.id,
+            mode = :body,
+            origin_col = 0,
+            orig_start = iss.start_date,
+            orig_due = iss.due_date,
+            preview_start = iss.start_date,   # no-op: preview == store
+            preview_due = iss.due_date,
+        )
+        Q._gantt_set_drag_tooltip!(m)
+        @test startswith(m.message, "Drag ")
+        Q._gantt_commit_drag!(m)
+        @test m.gantt_drag === nothing
+        @test m.message == "" || !startswith(m.message, "Drag ")
+        @test !occursin("Drag move", m.message)
+
+        # Role-warning + tip → no-op keeps warn only
+        m.current_user = Q.Domain.User(; id = m.current_user.id, email = m.current_user.email,
+                                        name = m.current_user.name, role = "viewer")
+        m.config.enforce_roles = false
+        @test Q.can!(m, :edit_issue) === true
+        warn0 = Q._role_warning_prefix(m.message)
+        m.gantt_drag = (
+            issue_id = iss.id,
+            mode = :body,
+            origin_col = 0,
+            orig_start = iss.start_date,
+            orig_due = iss.due_date,
+            preview_start = iss.start_date,
+            preview_due = iss.due_date,
+        )
+        Q._gantt_set_drag_tooltip!(m)
+        @test occursin("Drag move", m.message)
+        Q._gantt_commit_drag!(m)
+        @test m.gantt_drag === nothing
+        @test startswith(m.message, "Role warning:")
+        @test !occursin("Drag move", m.message)
+        @test m.message == warn0 || m.message == Q._role_warning_prefix(m.message)
     end
 end
