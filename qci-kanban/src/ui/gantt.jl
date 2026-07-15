@@ -1824,8 +1824,11 @@ function _gantt_set_drag_tooltip!(m::AppModel)
     drag === nothing && return m
     iss = Stores.get_issue(m.boardstore, drag.issue_id)
     key = iss === nothing ? "" : iss.key
-    _set_message!(m, gantt_drag_tooltip(drag.mode, drag.preview_start, drag.preview_due;
-                                         key = key))
+    tip = gantt_drag_tooltip(drag.mode, drag.preview_start, drag.preview_due;
+                             key = key,
+                             orig_start = drag.orig_start,
+                             orig_due = drag.orig_due)
+    _set_drag_message!(m, tip)
     m
 end
 
@@ -1930,6 +1933,23 @@ function _gantt_update_drag_preview!(m::AppModel, lay::GanttLayout, cur_col::Int
 end
 
 """
+Strip live drag-tip residue from `m.message` after `gantt_drag` is cleared (K13).
+
+Keeps a Role-warning prefix when present; clears a plain `"Drag …"` tip so the
+non-drag toast does not keep showing move/start/due chips after no-op release
+or before a `"Rescheduled …"` success toast. Explicit — does not rely on `can!`
+rewriting the message.
+"""
+function _clear_drag_tip_residue!(m::AppModel)
+    if startswith(m.message, "Role warning:")
+        m.message = _role_warning_prefix(m.message)
+    elseif startswith(m.message, "Drag ")
+        m.message = ""
+    end
+    m
+end
+
+"""
 Commit shadow drag dates via `Stores.update_issue!` when permission allows.
 Soft-refresh selection clamp; model issues are re-read from store on next paint.
 """
@@ -1943,6 +1963,8 @@ function _gantt_commit_drag!(m::AppModel)
         # can! already set Permission denied / Role warning message
         return m
     end
+    # K13: strip live tip before no-op return or Rescheduled (independent of can!).
+    _clear_drag_tip_residue!(m)
     # Skip no-op commits (press+release without movement).
     if drag.preview_start == iss.start_date && drag.preview_due == iss.due_date
         return m
