@@ -2722,6 +2722,135 @@ end
         @test occursin("QCI-5", t_pt_start)
         t_pt_none = G4.gantt_drag_tooltip(:point, nothing, nothing)
         @test occursin("Drag date", t_pt_none)
+        # Exact golden string shapes (frozen for toast chip join-compat).
+        @test t_body == "Drag move · QCI-1 · start Jul 10 · due Jul 15 · 6d"
+        @test t_start == "Drag start · QCI-1 · start Jul 12 · due Jul 15 · 4d"
+        @test t_end == "Drag due · QCI-1 · start Jul 10 · due Jul 18 · 9d"
+        @test t_pt == "Drag date · QCI-2 · Jul 12"
+        @test t_ps == "Drag move · QCI-3 · start Jul 10"
+        @test t_pd == "Drag move · QCI-4 · due Jul 15"
+        @test t_empty == "Drag move"
+        @test t_pt_start == "Drag date · QCI-5 · Jul 10"
+        @test t_pt_none == "Drag date"
+        # empty key → no empty key segment
+        @test G4.gantt_drag_tooltip(:body, s, d) ==
+              "Drag move · start Jul 10 · due Jul 15 · 6d"
+        # unknown mode
+        @test G4.gantt_drag_tooltip(:unknown, s, d; key = "X") ==
+              "Drag · X · start Jul 10 · due Jul 15 · 6d"
+        # join of segment texts matches string API
+        segs_join = G4.gantt_drag_tooltip_segments(:body, s, d; key = "QCI-1", boxed = false)
+        @test G4.gantt_drag_tooltip(:body, s, d; key = "QCI-1") ==
+              join((seg.text for seg in segs_join), " · ")
+    end
+
+    # Structured drag tooltip segments (T1): pure roles/texts/neutral styles.
+    @testset "gantt_drag_tooltip_segments pure: roles × modes × partial dates" begin
+        s = Dates.Date(2026, 7, 10)
+        d = Dates.Date(2026, 7, 15)
+        neut = G4.Theming.col_text()
+        roles(segs) = [seg.role for seg in segs]
+        texts(segs) = [seg.text for seg in segs]
+        all_neutral(segs) = all(seg -> seg.style.fg == neut, segs)
+
+        # body both ends + key
+        segs = G4.gantt_drag_tooltip_segments(:body, s, d; key = "QCI-1")
+        @test roles(segs) == [:mode, :key, :start, :due, :duration]
+        @test texts(segs) == ["Drag move", "QCI-1", "start Jul 10", "due Jul 15", "6d"]
+        @test all_neutral(segs)
+        @test all(seg -> seg.boxed === true, segs)
+
+        # start edge zone label
+        segs = G4.gantt_drag_tooltip_segments(:start, s + Day(2), d; key = "QCI-1")
+        @test roles(segs) == [:mode, :key, :start, :due, :duration]
+        @test segs[1].text == "Drag start"
+        @test texts(segs)[3:end] == ["start Jul 12", "due Jul 15", "4d"]
+
+        # end edge zone label
+        segs = G4.gantt_drag_tooltip_segments(:end, s, d + Day(3); key = "QCI-1")
+        @test segs[1].role === :mode && segs[1].text == "Drag due"
+        @test texts(segs)[3:end] == ["start Jul 10", "due Jul 18", "9d"]
+
+        # body empty key → no :key segment
+        segs = G4.gantt_drag_tooltip_segments(:body, s, d; key = "")
+        @test roles(segs) == [:mode, :start, :due, :duration]
+        @test !any(seg -> seg.role === :key, segs)
+        @test texts(segs) == ["Drag move", "start Jul 10", "due Jul 15", "6d"]
+
+        # body nothing/nothing
+        segs = G4.gantt_drag_tooltip_segments(:body, nothing, nothing)
+        @test roles(segs) == [:mode]
+        @test texts(segs) == ["Drag move"]
+        @test all_neutral(segs)
+
+        # partial body: start only → no duration
+        segs = G4.gantt_drag_tooltip_segments(:body, s, nothing; key = "QCI-3")
+        @test roles(segs) == [:mode, :key, :start]
+        @test texts(segs) == ["Drag move", "QCI-3", "start Jul 10"]
+        @test !any(seg -> seg.role === :duration, segs)
+
+        # partial body: due only → no duration
+        segs = G4.gantt_drag_tooltip_segments(:body, nothing, d; key = "QCI-4")
+        @test roles(segs) == [:mode, :key, :due]
+        @test texts(segs) == ["Drag move", "QCI-4", "due Jul 15"]
+        @test !any(seg -> seg.role === :duration, segs)
+
+        # point with due only
+        segs = G4.gantt_drag_tooltip_segments(:point, nothing, Dates.Date(2026, 7, 12); key = "QCI-2")
+        @test roles(segs) == [:mode, :key, :date]
+        @test texts(segs) == ["Drag date", "QCI-2", "Jul 12"]
+        @test !any(seg -> seg.role in (:start, :due, :duration), segs)
+
+        # point with start only
+        segs = G4.gantt_drag_tooltip_segments(:point, s, nothing; key = "QCI-5")
+        @test roles(segs) == [:mode, :key, :date]
+        @test texts(segs) == ["Drag date", "QCI-5", "Jul 10"]
+
+        # point none
+        segs = G4.gantt_drag_tooltip_segments(:point, nothing, nothing)
+        @test roles(segs) == [:mode]
+        @test texts(segs) == ["Drag date"]
+
+        # point prefers start when both set
+        segs = G4.gantt_drag_tooltip_segments(:point, s, d; key = "K")
+        @test roles(segs) == [:mode, :key, :date]
+        @test texts(segs) == ["Drag date", "K", "Jul 10"]
+
+        # unknown mode
+        segs = G4.gantt_drag_tooltip_segments(:weird, s, d)
+        @test segs[1].role === :mode && segs[1].text == "Drag"
+        @test roles(segs) == [:mode, :start, :due, :duration]
+
+        # never PROJECT or warn (shell owns those)
+        for mode in (:body, :start, :end, :point, :other)
+            segs = G4.gantt_drag_tooltip_segments(mode, s, d; key = "X")
+            @test !any(seg -> seg.role in (:project, :warn, :plain), segs)
+        end
+
+        # boxed flag propagates
+        segs_b = G4.gantt_drag_tooltip_segments(:body, s, d; key = "K", boxed = true)
+        segs_u = G4.gantt_drag_tooltip_segments(:body, s, d; key = "K", boxed = false)
+        @test all(seg -> seg.boxed === true, segs_b)
+        @test all(seg -> seg.boxed === false, segs_u)
+
+        # orig_* kwargs accepted (forward-compat) but do not change T1 neutral styles/texts
+        segs_o = G4.gantt_drag_tooltip_segments(:body, s, d; key = "K",
+                                                 orig_start = s - Day(1),
+                                                 orig_due = d + Day(1))
+        segs_n = G4.gantt_drag_tooltip_segments(:body, s, d; key = "K")
+        @test texts(segs_o) == texts(segs_n)
+        @test all_neutral(segs_o)
+
+        # toast_seg / with_boxed / with_text helpers
+        base = G4.toast_seg(:mode, "Drag move", T.Style(; fg = neut); boxed = true)
+        @test base.role === :mode && base.text == "Drag move" && base.boxed === true
+        @test G4.with_boxed(base, false).boxed === false
+        @test G4.with_text(base, "Drag").text == "Drag"
+        # with_chip_bg rebuilds style (immutable) with surface_hi bg
+        chipped = G4.with_chip_bg(base)
+        @test chipped.style.fg == neut
+        @test chipped.style.bg == G4.Theming.col_surface_hi()
+        @test base.style.bg != chipped.style.bg  # original unchanged
     end
 
     @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin

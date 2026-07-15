@@ -1719,36 +1719,90 @@ function gantt_drag_mode_for_bar(c0::Int, c1::Int, col::Int)::Symbol
     :body
 end
 
-"""
-    gantt_drag_tooltip(mode, preview_start, preview_due; key="") -> String
+# ── Toast segment shape (shared with shell painter in later PRs) ────────────
+# role ∈ :project | :warn | :mode | :key | :start | :due | :date | :duration | :plain
+# NamedTuples and Tachikoma Style are IMMUTABLE — never assign into fields.
+# Always rebuild via toast_seg / with_* helpers / (; seg..., field=…).
 
-Live status-bar tooltip while dragging a Gantt bar. Names the zone
-(move / start / due / date), optional issue key, preview dates, and inclusive
-day interval when both ends are set.
+toast_seg(role::Symbol, text::AbstractString, style::Style; boxed::Bool = true) =
+    (role = role, text = String(text), style = style, boxed = boxed)
+
+with_boxed(seg, b::Bool) = (; seg..., boxed = b)
+with_text(seg, t::AbstractString) = (; seg..., text = String(t))
+
+"""Copy Style fields into a new Style, optionally forcing bg (Style is immutable)."""
+function style_with(; fg, bg = nothing, bold::Bool = false, dim::Bool = false)
+    bg === nothing ? Style(; fg = fg, bold = bold, dim = dim) :
+                     Style(; fg = fg, bg = bg, bold = bold, dim = dim)
+end
+
+function with_chip_bg(seg)
+    st = seg.style
+    new_st = style_with(; fg = st.fg, bg = col_surface_hi(),
+                          bold = st.bold, dim = st.dim)
+    (; seg..., style = new_st)
+end
+
 """
-function gantt_drag_tooltip(mode::Symbol,
-                            preview_start::Union{Nothing,Date},
-                            preview_due::Union{Nothing,Date};
-                            key::AbstractString = "")
+    gantt_drag_tooltip_segments(mode, preview_start, preview_due;
+                                key="", orig_start=nothing, orig_due=nothing,
+                                boxed=true) -> Vector{<:NamedTuple}
+
+Pure drag-tooltip segment builder. Never includes PROJECT or Role warning
+(shell owns those). Never emits `:duration` unless both preview ends are set.
+T1: neutral styles only (`col_text`); color matrix lands in a later PR.
+`orig_start` / `orig_due` accepted for API forward-compat; ignored for styles.
+"""
+function gantt_drag_tooltip_segments(mode::Symbol,
+                                     preview_start::Union{Nothing,Date},
+                                     preview_due::Union{Nothing,Date};
+                                     key::AbstractString = "",
+                                     orig_start::Union{Nothing,Date} = nothing,
+                                     orig_due::Union{Nothing,Date} = nothing,
+                                     boxed::Bool = true)
+    # orig_* reserved for live color matrix (T3); silence unused in T1.
+    _ = orig_start
+    _ = orig_due
     _fmt(d::Date) = Dates.format(d, dateformat"u d")
     zone = mode === :start ? "Drag start" :
            mode === :end   ? "Drag due"   :
            mode === :body  ? "Drag move"  :
            mode === :point ? "Drag date"  : "Drag"
-    head = isempty(key) ? zone : string(zone, " · ", key)
+    neut = Style(; fg = col_text())
+    segs = [toast_seg(:mode, zone, neut; boxed = boxed)]
+    !isempty(key) && push!(segs, toast_seg(:key, key, neut; boxed = boxed))
     if mode === :point
         d = preview_start !== nothing ? preview_start : preview_due
-        return d === nothing ? head : string(head, " · ", _fmt(d))
+        d !== nothing && push!(segs, toast_seg(:date, _fmt(d), neut; boxed = boxed))
+        return segs
     end
+    preview_start !== nothing &&
+        push!(segs, toast_seg(:start, "start " * _fmt(preview_start), neut; boxed = boxed))
+    preview_due !== nothing &&
+        push!(segs, toast_seg(:due, "due " * _fmt(preview_due), neut; boxed = boxed))
     if preview_start !== nothing && preview_due !== nothing
         days = Dates.value(preview_due - preview_start) + 1
-        return string(head, " · start ", _fmt(preview_start),
-                      " · due ", _fmt(preview_due), " · ", days, "d")
+        push!(segs, toast_seg(:duration, string(days, "d"), neut; boxed = boxed))
     end
-    parts = String[head]
-    preview_start !== nothing && push!(parts, "start " * _fmt(preview_start))
-    preview_due !== nothing && push!(parts, "due " * _fmt(preview_due))
-    return join(parts, " · ")
+    return segs
+end
+
+"""
+    gantt_drag_tooltip(mode, preview_start, preview_due; key="") -> String
+
+Live status-bar tooltip while dragging a Gantt bar. Join of segment texts
+with `" · "` so string tests and structured chips share one source of truth.
+"""
+function gantt_drag_tooltip(mode::Symbol,
+                            preview_start::Union{Nothing,Date},
+                            preview_due::Union{Nothing,Date};
+                            key::AbstractString = "",
+                            orig_start::Union{Nothing,Date} = nothing,
+                            orig_due::Union{Nothing,Date} = nothing)
+    segs = gantt_drag_tooltip_segments(mode, preview_start, preview_due;
+                                       key = key, orig_start = orig_start,
+                                       orig_due = orig_due, boxed = false)
+    return join((s.text for s in segs), " · ")
 end
 
 function _gantt_set_drag_tooltip!(m::AppModel)
