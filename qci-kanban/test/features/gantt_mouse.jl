@@ -518,4 +518,88 @@ end
         gm!(m, 'j')
         @test GM._gantt_selected_issue(m).id == b.id || m.gantt_sel >= 1
     end
+
+    @testset "Given logged-in user on Gantt with dated bar When body-drag Then toast live/warn colors" begin
+        # Given a logged-in user on Gantt with a dated bar
+        m = gmlogin()
+        e = GM.Stores.create_epic!(m.boardstore; name = "ToastColorRoadmap")
+        a = GM.Stores.create_issue!(m.boardstore; title = "ToastColorShift", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(5))
+        gm!(m, 'G')
+        m.gantt_start = Dates.today()
+        W, H = 120, 28
+        app_tb(m; w = W, h = H)
+        area = m.gantt_last_area
+        rows = GM.gantt_rows(m)
+        lay = GM.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        @test ra !== nothing
+        ya = gantt_y(lay, ra)
+        ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
+        c0, c1 = ext
+        orig_sd, orig_dd = a.start_date, a.due_date
+        warn = GM.Theming.col_warn()
+        phi = GM.Theming.col_primary_hi()
+
+        # When they body-drag the bar so start/due change
+        T.update!(m, gm_click(_gpmid(lay, c0, c1), ya))
+        @test m.gantt_drag !== nothing && m.gantt_drag.mode === :body
+        # begin-drag unmoved → primary_hi
+        tb0 = app_tb(m; w = W, h = H)
+        ps0 = Dates.format(orig_sd, dateformat"u d")
+        loc0 = T.find_text(tb0, "start $ps0")
+        @test loc0 !== nothing
+        @test T.style_at(tb0, loc0.x, loc0.y).fg == phi
+
+        T.update!(m, gm_drag(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya))
+        @test m.gantt_drag.preview_start == orig_sd + Day(3)
+        @test m.gantt_drag.preview_due == orig_dd + Day(3)
+
+        # Then the toast shows the issue key and preview dates
+        @test occursin(a.key, m.message)
+        ps = Dates.format(orig_sd + Day(3), dateformat"u d")
+        pd = Dates.format(orig_dd + Day(3), dateformat"u d")
+        @test occursin("start $ps", m.message)
+        @test occursin("due $pd", m.message)
+        tb = app_tb(m; w = W, h = H)
+        @test T.find_text(tb, a.key) !== nothing
+        loc_s = T.find_text(tb, "start $ps")
+        loc_d = T.find_text(tb, "due $pd")
+        @test loc_s !== nothing
+        @test loc_d !== nothing
+        # And the start/due toast chips use the live/warn colors (style_at)
+        @test T.style_at(tb, loc_s.x, loc_s.y).fg == warn
+        @test T.style_at(tb, loc_d.x, loc_d.y).fg == warn
+        # And PROJECT: still appears once on the frame
+        frame = join(app_rows(m; w = W, h = H), "\n")
+        @test count("PROJECT:", frame) == 1
+
+        # Esc cancel → plain "Drag cancelled"; gantt_drag cleared
+        gm!(m, :escape)
+        @test m.gantt_drag === nothing
+        @test occursin("cancelled", lowercase(m.message))
+        tb_esc = app_tb(m; w = W, h = H)
+        @test T.find_text(tb_esc, "Drag cancelled") !== nothing
+        @test T.find_text(tb_esc, "Drag move") === nothing
+
+        # Re-drag and commit → Rescheduled plain
+        app_tb(m; w = W, h = H)
+        area = m.gantt_last_area
+        rows = GM.gantt_rows(m)
+        lay = GM.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        ya = gantt_y(lay, ra)
+        ext = GM.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        c0, c1 = ext
+        T.update!(m, gm_click(_gpmid(lay, c0, c1), ya))
+        T.update!(m, gm_drag(_gpmid(lay, c0, c1) + _gpd(lay, 2), ya))
+        T.update!(m, gm_release(_gpmid(lay, c0, c1) + _gpd(lay, 2), ya))
+        @test m.gantt_drag === nothing
+        @test occursin("Rescheduled", m.message)
+        tb_ok = app_tb(m; w = W, h = H)
+        @test T.find_text(tb_ok, "Rescheduled") !== nothing
+        @test T.find_text(tb_ok, "Drag move") === nothing
+    end
 end

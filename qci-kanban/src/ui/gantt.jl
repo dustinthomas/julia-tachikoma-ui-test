@@ -1754,6 +1754,61 @@ function with_chip_bg(seg)
     (; seg..., style = new_st)
 end
 
+# ── Live date color matrix (T3) ──────────────────────────────────────────────
+# Julia == on Union{Nothing,Date}: nothing == nothing → true; nothing == Date → false.
+changed_start(preview, orig) = preview != orig
+changed_due(preview, orig)   = preview != orig
+
+"""
+    point_changed(preview_start, preview_due, orig_start, orig_due) -> Bool
+
+`:point` "changed": compare the single live date against the corresponding orig.
+Prefer start path when both orig ends are set (matches `gantt_compute_drag_preview`).
+"""
+function point_changed(preview_start, preview_due, orig_start, orig_due)::Bool
+    if orig_start !== nothing && orig_due === nothing
+        return preview_start != orig_start
+    elseif orig_due !== nothing && orig_start === nothing
+        return preview_due != orig_due
+    elseif orig_start !== nothing
+        return preview_start != orig_start
+    else
+        return preview_start !== nothing || preview_due !== nothing
+    end
+end
+
+span_days(s::Date, d::Date) = Dates.value(d - s) + 1
+
+"""
+    gantt_drag_date_style(mode, which; changed) -> Style
+
+Mode × endpoint × changed color matrix for drag toast chips.
+`which` ∈ {:mode, :key, :start, :due, :date, :duration}.
+Inactive edge endpoints (`:start` mode's due, `:end` mode's start) are always dim.
+"""
+function gantt_drag_date_style(mode::Symbol, which::Symbol; changed::Bool)::Style
+    which === :mode && return Style(; fg = col_primary_hi(), bold = true)
+    which === :key  && return Style(; fg = col_text())
+    if which === :duration
+        return changed ? Style(; fg = col_warn(), bold = true) :
+                         Style(; fg = col_ok())
+    end
+    # Inactive endpoint on edge-drag modes (ignore `changed`).
+    if mode === :start && which === :due
+        return Style(; fg = col_text_dim())
+    end
+    if mode === :end && which === :start
+        return Style(; fg = col_text_dim())
+    end
+    # Active date chips: :start / :due (body or matching edge) and :date (point).
+    if which === :start || which === :due || which === :date
+        return changed ? Style(; fg = col_warn(), bold = true) :
+                         Style(; fg = col_primary_hi(), bold = true)
+    end
+    # Unknown which — neutral fallback.
+    Style(; fg = col_text())
+end
+
 """
     gantt_drag_tooltip_segments(mode, preview_start, preview_due;
                                 key="", orig_start=nothing, orig_due=nothing,
@@ -1761,8 +1816,8 @@ end
 
 Pure drag-tooltip segment builder. Never includes PROJECT or Role warning
 (shell owns those). Never emits `:duration` unless both preview ends are set.
-T1: neutral styles only (`col_text`); color matrix lands in a later PR.
-`orig_start` / `orig_due` accepted for API forward-compat; ignored for styles.
+Styles follow the live color matrix via `gantt_drag_date_style` + orig_*
+changed detection. Body-move dual-warn when both dates shift is intentional.
 """
 function gantt_drag_tooltip_segments(mode::Symbol,
                                      preview_start::Union{Nothing,Date},
@@ -1771,29 +1826,40 @@ function gantt_drag_tooltip_segments(mode::Symbol,
                                      orig_start::Union{Nothing,Date} = nothing,
                                      orig_due::Union{Nothing,Date} = nothing,
                                      boxed::Bool = true)
-    # orig_* reserved for live color matrix (T3); silence unused in T1.
-    _ = orig_start
-    _ = orig_due
     _fmt(d::Date) = Dates.format(d, dateformat"u d")
     zone = mode === :start ? "Drag start" :
            mode === :end   ? "Drag due"   :
            mode === :body  ? "Drag move"  :
            mode === :point ? "Drag date"  : "Drag"
-    neut = Style(; fg = col_text())
-    segs = [toast_seg(:mode, zone, neut; boxed = boxed)]
-    !isempty(key) && push!(segs, toast_seg(:key, key, neut; boxed = boxed))
+    segs = [toast_seg(:mode, zone,
+        gantt_drag_date_style(mode, :mode; changed = false); boxed = boxed)]
+    !isempty(key) && push!(segs, toast_seg(:key, key,
+        gantt_drag_date_style(mode, :key; changed = false); boxed = boxed))
     if mode === :point
         d = preview_start !== nothing ? preview_start : preview_due
-        d !== nothing && push!(segs, toast_seg(:date, _fmt(d), neut; boxed = boxed))
+        if d !== nothing
+            pc = point_changed(preview_start, preview_due, orig_start, orig_due)
+            push!(segs, toast_seg(:date, _fmt(d),
+                gantt_drag_date_style(mode, :date; changed = pc); boxed = boxed))
+        end
         return segs
     end
-    preview_start !== nothing &&
-        push!(segs, toast_seg(:start, "start " * _fmt(preview_start), neut; boxed = boxed))
-    preview_due !== nothing &&
-        push!(segs, toast_seg(:due, "due " * _fmt(preview_due), neut; boxed = boxed))
+    if preview_start !== nothing
+        cs = changed_start(preview_start, orig_start)
+        push!(segs, toast_seg(:start, "start " * _fmt(preview_start),
+            gantt_drag_date_style(mode, :start; changed = cs); boxed = boxed))
+    end
+    if preview_due !== nothing
+        cd = changed_due(preview_due, orig_due)
+        push!(segs, toast_seg(:due, "due " * _fmt(preview_due),
+            gantt_drag_date_style(mode, :due; changed = cd); boxed = boxed))
+    end
     if preview_start !== nothing && preview_due !== nothing
-        days = Dates.value(preview_due - preview_start) + 1
-        push!(segs, toast_seg(:duration, string(days, "d"), neut; boxed = boxed))
+        days = span_days(preview_start, preview_due)
+        sc = (orig_start !== nothing && orig_due !== nothing &&
+              span_days(preview_start, preview_due) != span_days(orig_start, orig_due))
+        push!(segs, toast_seg(:duration, string(days, "d"),
+            gantt_drag_date_style(mode, :duration; changed = sc); boxed = boxed))
     end
     return segs
 end
@@ -1804,8 +1870,7 @@ end
 
 Live status-bar tooltip while dragging a Gantt bar. Join of segment texts
 with `" · "` so string tests and structured chips share one source of truth.
-`orig_start` / `orig_due` accepted for API forward-compat with the segment
-builder (T3 color matrix); ignored for string content.
+`orig_start` / `orig_due` drive the segment color matrix (styles not in string).
 """
 function gantt_drag_tooltip(mode::Symbol,
                             preview_start::Union{Nothing,Date},

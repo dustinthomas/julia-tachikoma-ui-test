@@ -2744,20 +2744,25 @@ end
               join((seg.text for seg in segs_join), " · ")
     end
 
-    # Structured drag tooltip segments (T1): pure roles/texts/neutral styles.
+    # Structured drag tooltip segments: pure roles/texts + live color matrix (T3).
     @testset "gantt_drag_tooltip_segments pure: roles × modes × partial dates" begin
         s = Dates.Date(2026, 7, 10)
         d = Dates.Date(2026, 7, 15)
         neut = G4.Theming.col_text()
+        phi = G4.Theming.col_primary_hi()
+        warn = G4.Theming.col_warn()
+        ok = G4.Theming.col_ok()
+        dim = G4.Theming.col_text_dim()
         roles(segs) = [seg.role for seg in segs]
         texts(segs) = [seg.text for seg in segs]
-        all_neutral(segs) = all(seg -> seg.style.fg == neut, segs)
+        by_role(segs, r) = only(filter(seg -> seg.role === r, segs))
 
-        # body both ends + key
+        # body both ends + key (no orig → dates treat as changed vs nothing)
         segs = G4.gantt_drag_tooltip_segments(:body, s, d; key = "QCI-1")
         @test roles(segs) == [:mode, :key, :start, :due, :duration]
         @test texts(segs) == ["Drag move", "QCI-1", "start Jul 10", "due Jul 15", "6d"]
-        @test all_neutral(segs)
+        @test by_role(segs, :mode).style.fg == phi && by_role(segs, :mode).style.bold === true
+        @test by_role(segs, :key).style.fg == neut
         @test all(seg -> seg.boxed === true, segs)
 
         # start edge zone label
@@ -2777,11 +2782,11 @@ end
         @test !any(seg -> seg.role === :key, segs)
         @test texts(segs) == ["Drag move", "start Jul 10", "due Jul 15", "6d"]
 
-        # body nothing/nothing
+        # body nothing/nothing — mode only (primary_hi)
         segs = G4.gantt_drag_tooltip_segments(:body, nothing, nothing)
         @test roles(segs) == [:mode]
         @test texts(segs) == ["Drag move"]
-        @test all_neutral(segs)
+        @test segs[1].style.fg == phi
 
         # partial body: start only → no duration
         segs = G4.gantt_drag_tooltip_segments(:body, s, nothing; key = "QCI-3")
@@ -2833,13 +2838,16 @@ end
         @test all(seg -> seg.boxed === true, segs_b)
         @test all(seg -> seg.boxed === false, segs_u)
 
-        # orig_* kwargs accepted (forward-compat) but do not change T1 neutral styles/texts
+        # orig_* drive color matrix; texts unchanged
         segs_o = G4.gantt_drag_tooltip_segments(:body, s, d; key = "K",
                                                  orig_start = s - Day(1),
                                                  orig_due = d + Day(1))
         segs_n = G4.gantt_drag_tooltip_segments(:body, s, d; key = "K")
         @test texts(segs_o) == texts(segs_n)
-        @test all_neutral(segs_o)
+        # both dates shifted vs orig → dual warn; span days 6 vs 8 → duration warn
+        @test by_role(segs_o, :start).style.fg == warn && by_role(segs_o, :start).style.bold === true
+        @test by_role(segs_o, :due).style.fg == warn && by_role(segs_o, :due).style.bold === true
+        @test by_role(segs_o, :duration).style.fg == warn
 
         # toast_seg / with_boxed / with_text helpers
         base = G4.toast_seg(:mode, "Drag move", T.Style(; fg = neut); boxed = true)
@@ -2864,6 +2872,341 @@ end
         @test rich_chip.style.hyperlink == "https://example.test"
         @test rich_chip.style.bg == G4.Theming.col_surface_hi()
         @test rich.style.bg != rich_chip.style.bg
+    end
+
+    @testset "gantt_drag_date_style pure matrix + point_changed + segment wire-up" begin
+        s = Dates.Date(2026, 7, 10)
+        d = Dates.Date(2026, 7, 15)
+        phi = G4.Theming.col_primary_hi()
+        warn = G4.Theming.col_warn()
+        ok = G4.Theming.col_ok()
+        dim = G4.Theming.col_text_dim()
+        neut = G4.Theming.col_text()
+        by_role(segs, r) = only(filter(seg -> seg.role === r, segs))
+
+        # helpers
+        @test G4.changed_start(s, s) === false
+        @test G4.changed_start(s + Day(1), s) === true
+        @test G4.changed_start(s, nothing) === true
+        @test G4.changed_due(d, d) === false
+        @test G4.changed_due(d + Day(1), d) === true
+        @test G4.span_days(s, d) == 6
+
+        # point_changed branches
+        @test G4.point_changed(s, nothing, s, nothing) === false
+        @test G4.point_changed(s + Day(1), nothing, s, nothing) === true
+        @test G4.point_changed(nothing, d, nothing, d) === false
+        @test G4.point_changed(nothing, d + Day(1), nothing, d) === true
+        @test G4.point_changed(s + Day(1), nothing, s, d) === true   # both orig → start path
+        @test G4.point_changed(s, nothing, s, d) === false
+        @test G4.point_changed(s, nothing, nothing, nothing) === true
+        @test G4.point_changed(nothing, nothing, nothing, nothing) === false
+
+        # matrix: mode / key always
+        st = G4.gantt_drag_date_style(:body, :mode; changed = false)
+        @test st.fg == phi && st.bold === true
+        st = G4.gantt_drag_date_style(:point, :key; changed = true)
+        @test st.fg == neut && st.bold === false
+
+        # body start/due × changed
+        st = G4.gantt_drag_date_style(:body, :start; changed = false)
+        @test st.fg == phi && st.bold === true
+        st = G4.gantt_drag_date_style(:body, :start; changed = true)
+        @test st.fg == warn && st.bold === true
+        st = G4.gantt_drag_date_style(:body, :due; changed = false)
+        @test st.fg == phi && st.bold === true
+        st = G4.gantt_drag_date_style(:body, :due; changed = true)
+        @test st.fg == warn && st.bold === true
+
+        # start edge: start active, due inactive (ignores changed)
+        st = G4.gantt_drag_date_style(:start, :start; changed = false)
+        @test st.fg == phi && st.bold === true
+        st = G4.gantt_drag_date_style(:start, :start; changed = true)
+        @test st.fg == warn && st.bold === true
+        st = G4.gantt_drag_date_style(:start, :due; changed = false)
+        @test st.fg == dim && st.bold === false
+        st = G4.gantt_drag_date_style(:start, :due; changed = true)
+        @test st.fg == dim && st.bold === false
+
+        # end edge: due active, start inactive
+        st = G4.gantt_drag_date_style(:end, :due; changed = false)
+        @test st.fg == phi && st.bold === true
+        st = G4.gantt_drag_date_style(:end, :due; changed = true)
+        @test st.fg == warn && st.bold === true
+        st = G4.gantt_drag_date_style(:end, :start; changed = false)
+        @test st.fg == dim && st.bold === false
+        st = G4.gantt_drag_date_style(:end, :start; changed = true)
+        @test st.fg == dim && st.bold === false
+
+        # point date
+        st = G4.gantt_drag_date_style(:point, :date; changed = false)
+        @test st.fg == phi && st.bold === true
+        st = G4.gantt_drag_date_style(:point, :date; changed = true)
+        @test st.fg == warn && st.bold === true
+
+        # duration
+        st = G4.gantt_drag_date_style(:body, :duration; changed = false)
+        @test st.fg == ok && st.bold === false
+        st = G4.gantt_drag_date_style(:start, :duration; changed = true)
+        @test st.fg == warn && st.bold === true
+
+        # unknown which fallback
+        st = G4.gantt_drag_date_style(:body, :unknown; changed = false)
+        @test st.fg == neut
+
+        # segment wire-up: body unmoved → primary_hi on dates, ok duration
+        segs = G4.gantt_drag_tooltip_segments(:body, s, d; key = "QCI-1",
+                                              orig_start = s, orig_due = d)
+        @test by_role(segs, :mode).style.fg == phi
+        @test by_role(segs, :key).style.fg == neut
+        @test by_role(segs, :start).style.fg == phi && by_role(segs, :start).style.bold === true
+        @test by_role(segs, :due).style.fg == phi && by_role(segs, :due).style.bold === true
+        @test by_role(segs, :duration).style.fg == ok && by_role(segs, :duration).style.bold === false
+
+        # body shifted +2d → dual warn; span same → duration ok
+        segs = G4.gantt_drag_tooltip_segments(:body, s + Day(2), d + Day(2); key = "QCI-1",
+                                              orig_start = s, orig_due = d)
+        @test by_role(segs, :start).style.fg == warn
+        @test by_role(segs, :due).style.fg == warn
+        @test by_role(segs, :duration).style.fg == ok
+        @test by_role(segs, :duration).text == "6d"
+
+        # start edge moves start → start warn, due dim, duration warn (span shrinks)
+        segs = G4.gantt_drag_tooltip_segments(:start, s + Day(2), d; key = "QCI-1",
+                                              orig_start = s, orig_due = d)
+        @test by_role(segs, :start).style.fg == warn && by_role(segs, :start).style.bold === true
+        @test by_role(segs, :due).style.fg == dim && by_role(segs, :due).style.bold === false
+        @test by_role(segs, :duration).style.fg == warn && by_role(segs, :duration).style.bold === true
+        @test by_role(segs, :duration).text == "4d"
+
+        # end edge moves due → due warn, start dim, duration warn
+        segs = G4.gantt_drag_tooltip_segments(:end, s, d + Day(3); key = "QCI-1",
+                                              orig_start = s, orig_due = d)
+        @test by_role(segs, :start).style.fg == dim
+        @test by_role(segs, :due).style.fg == warn
+        @test by_role(segs, :duration).style.fg == warn
+        @test by_role(segs, :duration).text == "9d"
+
+        # point orig due only, moved
+        segs = G4.gantt_drag_tooltip_segments(:point, nothing, d + Day(1); key = "QCI-2",
+                                              orig_start = nothing, orig_due = d)
+        @test by_role(segs, :date).style.fg == warn
+        @test !any(seg -> seg.role === :duration, segs)
+
+        # point orig due only, unmoved
+        segs = G4.gantt_drag_tooltip_segments(:point, nothing, d; key = "QCI-2",
+                                              orig_start = nothing, orig_due = d)
+        @test by_role(segs, :date).style.fg == phi
+
+        # point orig start only, moved
+        segs = G4.gantt_drag_tooltip_segments(:point, s + Day(1), nothing; key = "QCI-5",
+                                              orig_start = s, orig_due = nothing)
+        @test by_role(segs, :date).style.fg == warn
+
+        # body start-only → no duration
+        segs = G4.gantt_drag_tooltip_segments(:body, s, nothing; key = "QCI-3",
+                                              orig_start = s, orig_due = nothing)
+        @test [seg.role for seg in segs] == [:mode, :key, :start]
+        @test by_role(segs, :start).style.fg == phi
+    end
+
+    @testset "style_at toast during drag: body/start/end/point + Esc/commit plain" begin
+        phi = G4.Theming.col_primary_hi()
+        warn = G4.Theming.col_warn()
+        dim = G4.Theming.col_text_dim()
+        ok = G4.Theming.col_ok()
+        W, H = 120, 28
+
+        # ── body drag: shift → dual warn ──────────────────────────────────
+        m = gantt_login()
+        e = G4.Stores.create_epic!(m.boardstore; name = "StyleEp")
+        a = G4.Stores.create_issue!(m.boardstore; title = "StyleBody", epic_id = e.id,
+                                    start_date = Dates.today() + Day(2),
+                                    due_date = Dates.today() + Day(6))
+        g4!(m, 'G')
+        m.gantt_start = Dates.today()
+        app_tb(m; w = W, h = H)
+        area = m.gantt_last_area
+        rows = G4.gantt_rows(m)
+        lay = G4.gantt_layout(m, area; rows = rows)
+        ra = findfirst(r -> r.kind === :issue && r.issue.id == a.id, rows)
+        @test ra !== nothing
+        ya = gantt_y(lay, ra)
+        ext = G4.gantt_bar_extent(lay.win_start, lay.dpc, a.start_date, a.due_date, lay.view_ncols)
+        @test ext !== nothing
+        c0, c1 = ext
+        orig_sd, orig_dd = a.start_date, a.due_date
+        T.update!(m, T.MouseEvent(_gpmid(lay, c0, c1), ya, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.gantt_drag !== nothing && m.gantt_drag.mode === :body
+        # begin-drag: preview == orig → primary_hi (via segments / paint)
+        tb0 = app_tb(m; w = W, h = H)
+        ps0 = Dates.format(orig_sd, dateformat"u d")
+        loc_s0 = T.find_text(tb0, "start $ps0")
+        @test loc_s0 !== nothing
+        @test T.style_at(tb0, loc_s0.x, loc_s0.y).fg == phi
+        # shift +3 days
+        T.update!(m, T.MouseEvent(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m.gantt_drag.preview_start == orig_sd + Day(3)
+        tb1 = app_tb(m; w = W, h = H)
+        @test occursin(a.key, m.message)
+        ps1 = Dates.format(orig_sd + Day(3), dateformat"u d")
+        pd1 = Dates.format(orig_dd + Day(3), dateformat"u d")
+        loc_s1 = T.find_text(tb1, "start $ps1")
+        loc_d1 = T.find_text(tb1, "due $pd1")
+        @test loc_s1 !== nothing
+        @test loc_d1 !== nothing
+        @test T.style_at(tb1, loc_s1.x, loc_s1.y).fg == warn
+        @test T.style_at(tb1, loc_d1.x, loc_d1.y).fg == warn
+        # duration still ok (span unchanged) — find "6d" or "5d" depending on inclusive span
+        days = Dates.value((orig_dd + Day(3)) - (orig_sd + Day(3))) + 1
+        loc_dur = T.find_text(tb1, "$(days)d")
+        @test loc_dur !== nothing
+        @test T.style_at(tb1, loc_dur.x, loc_dur.y).fg == ok
+        # PROJECT once
+        rows1 = app_rows(m; w = W, h = H)
+        @test count("PROJECT:", join(rows1, "\n")) == 1
+        # commit → Rescheduled plain; drag cleared
+        T.update!(m, T.MouseEvent(_gpmid(lay, c0, c1) + _gpd(lay, 3), ya, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.gantt_drag === nothing
+        @test occursin("Rescheduled", m.message)
+        tb_c = app_tb(m; w = W, h = H)
+        loc_r = T.find_text(tb_c, "Rescheduled")
+        @test loc_r !== nothing
+        # plain message: unboxed (no surface_hi chip bg)
+        @test T.style_at(tb_c, loc_r.x, loc_r.y).bg != G4.Theming.col_surface_hi()
+        # ensure not still painting drag mode chip
+        @test T.find_text(tb_c, "Drag move") === nothing
+
+        # ── start-edge drag: start warn, due dim ─────────────────────────
+        m2 = gantt_login()
+        e2 = G4.Stores.create_epic!(m2.boardstore; name = "StyleStartEp")
+        a2 = G4.Stores.create_issue!(m2.boardstore; title = "StyleStart", epic_id = e2.id,
+                                     start_date = Dates.today() + Day(1),
+                                     due_date = Dates.today() + Day(8))
+        g4!(m2, 'G')
+        m2.gantt_start = Dates.today()
+        app_tb(m2; w = W, h = H)
+        area2 = m2.gantt_last_area
+        rows2 = G4.gantt_rows(m2)
+        lay2 = G4.gantt_layout(m2, area2; rows = rows2)
+        ra2 = findfirst(r -> r.kind === :issue && r.issue.id == a2.id, rows2)
+        ya2 = gantt_y(lay2, ra2)
+        ext2 = G4.gantt_bar_extent(lay2.win_start, lay2.dpc, a2.start_date, a2.due_date, lay2.view_ncols)
+        c0s, c1s = ext2
+        @test G4.gantt_drag_mode_for_bar(c0s, c1s, c0s) === :start
+        T.update!(m2, T.MouseEvent(_gpx(lay2, c0s), ya2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m2.gantt_drag.mode === :start
+        T.update!(m2, T.MouseEvent(_gpx(lay2, c0s) + _gpd(lay2, 2), ya2, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m2.gantt_drag.preview_start == a2.start_date + Day(2)
+        tb_s = app_tb(m2; w = W, h = H)
+        ps_s = Dates.format(a2.start_date + Day(2), dateformat"u d")
+        pd_s = Dates.format(a2.due_date, dateformat"u d")
+        loc_ss = T.find_text(tb_s, "start $ps_s")
+        loc_ds = T.find_text(tb_s, "due $pd_s")
+        @test loc_ss !== nothing
+        @test loc_ds !== nothing
+        @test T.style_at(tb_s, loc_ss.x, loc_ss.y).fg == warn
+        @test T.style_at(tb_s, loc_ds.x, loc_ds.y).fg == dim
+        # Esc → Drag cancelled plain
+        g4!(m2, :escape)
+        @test m2.gantt_drag === nothing
+        @test occursin("cancelled", lowercase(m2.message))
+        tb_esc = app_tb(m2; w = W, h = H)
+        loc_esc = T.find_text(tb_esc, "Drag cancelled")
+        @test loc_esc !== nothing
+        @test T.find_text(tb_esc, "Drag start") === nothing
+
+        # ── end-edge drag: due warn, start dim ───────────────────────────
+        m3 = gantt_login()
+        e3 = G4.Stores.create_epic!(m3.boardstore; name = "StyleEndEp")
+        a3 = G4.Stores.create_issue!(m3.boardstore; title = "StyleEnd", epic_id = e3.id,
+                                     start_date = Dates.today() + Day(1),
+                                     due_date = Dates.today() + Day(7))
+        g4!(m3, 'G')
+        m3.gantt_start = Dates.today()
+        app_tb(m3; w = W, h = H)
+        area3 = m3.gantt_last_area
+        rows3 = G4.gantt_rows(m3)
+        lay3 = G4.gantt_layout(m3, area3; rows = rows3)
+        ra3 = findfirst(r -> r.kind === :issue && r.issue.id == a3.id, rows3)
+        ya3 = gantt_y(lay3, ra3)
+        ext3 = G4.gantt_bar_extent(lay3.win_start, lay3.dpc, a3.start_date, a3.due_date, lay3.view_ncols)
+        c0e, c1e = ext3
+        @test G4.gantt_drag_mode_for_bar(c0e, c1e, c1e) === :end
+        T.update!(m3, T.MouseEvent(_gpx(lay3, c1e), ya3, T.mouse_left, T.mouse_press, false, false, false))
+        @test m3.gantt_drag.mode === :end
+        T.update!(m3, T.MouseEvent(_gpx(lay3, c1e) + _gpd(lay3, 2), ya3, T.mouse_left, T.mouse_drag, false, false, false))
+        tb_e = app_tb(m3; w = W, h = H)
+        ps_e = Dates.format(a3.start_date, dateformat"u d")
+        pd_e = Dates.format(a3.due_date + Day(2), dateformat"u d")
+        loc_se = T.find_text(tb_e, "start $ps_e")
+        loc_de = T.find_text(tb_e, "due $pd_e")
+        @test loc_se !== nothing
+        @test loc_de !== nothing
+        @test T.style_at(tb_e, loc_se.x, loc_se.y).fg == dim
+        @test T.style_at(tb_e, loc_de.x, loc_de.y).fg == warn
+
+        # ── point drag: date warn ────────────────────────────────────────
+        m4 = gantt_login()
+        e4 = G4.Stores.create_epic!(m4.boardstore; name = "StylePtEp")
+        a4 = G4.Stores.create_issue!(m4.boardstore; title = "StylePt", epic_id = e4.id,
+                                     due_date = Dates.today() + Day(4))
+        g4!(m4, 'G')
+        m4.gantt_start = Dates.today()
+        app_tb(m4; w = W, h = H)
+        area4 = m4.gantt_last_area
+        rows4 = G4.gantt_rows(m4)
+        lay4 = G4.gantt_layout(m4, area4; rows = rows4)
+        ra4 = findfirst(r -> r.kind === :issue && r.issue.id == a4.id, rows4)
+        ya4 = gantt_y(lay4, ra4)
+        pcol = G4.gantt_point_col(lay4.win_start, lay4.dpc, a4.due_date, lay4.view_ncols)
+        @test pcol !== nothing
+        T.update!(m4, T.MouseEvent(_gpx(lay4, pcol), ya4, T.mouse_left, T.mouse_press, false, false, false))
+        @test m4.gantt_drag !== nothing && m4.gantt_drag.mode === :point
+        T.update!(m4, T.MouseEvent(_gpx(lay4, pcol) + _gpd(lay4, 2), ya4, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m4.gantt_drag.preview_due == a4.due_date + Day(2)
+        tb_p = app_tb(m4; w = W, h = H)
+        pd_p = Dates.format(a4.due_date + Day(2), dateformat"u d")
+        loc_p = T.find_text(tb_p, pd_p)
+        @test loc_p !== nothing
+        @test T.style_at(tb_p, loc_p.x, loc_p.y).fg == warn
+
+        # ── narrow unboxed still correct fg ──────────────────────────────
+        m5 = gantt_login()
+        e5 = G4.Stores.create_epic!(m5.boardstore; name = "StyleNarEp")
+        a5 = G4.Stores.create_issue!(m5.boardstore; title = "StyleNar", epic_id = e5.id,
+                                     start_date = Dates.today() + Day(2),
+                                     due_date = Dates.today() + Day(5))
+        g4!(m5, 'G')
+        m5.gantt_start = Dates.today()
+        app_tb(m5; w = W, h = H)
+        area5 = m5.gantt_last_area
+        rows5 = G4.gantt_rows(m5)
+        lay5 = G4.gantt_layout(m5, area5; rows = rows5)
+        ra5 = findfirst(r -> r.kind === :issue && r.issue.id == a5.id, rows5)
+        ya5 = gantt_y(lay5, ra5)
+        ext5 = G4.gantt_bar_extent(lay5.win_start, lay5.dpc, a5.start_date, a5.due_date, lay5.view_ncols)
+        c0n, c1n = ext5
+        T.update!(m5, T.MouseEvent(_gpmid(lay5, c0n, c1n), ya5, T.mouse_left, T.mouse_press, false, false, false))
+        T.update!(m5, T.MouseEvent(_gpmid(lay5, c0n, c1n) + _gpd(lay5, 2), ya5, T.mouse_left, T.mouse_drag, false, false, false))
+        # width 50 → unboxed (max_w < TOAST_BOX_MIN_W=72); drag segs still painted with matrix fg
+        tb_n = app_tb(m5; w = 50, h = 20)
+        @test m5.gantt_drag !== nothing
+        segs_n = G4.build_toast_segments(m5; width = max(1, 50 - 4))
+        @test all(s -> s.boxed === false, segs_n)
+        start_segs = filter(s -> s.role === :start, segs_n)
+        if !isempty(start_segs)
+            @test only(start_segs).style.fg == warn
+        end
+        # if start chip still visible on frame, style_at must match
+        ps_n = Dates.format(m5.gantt_drag.preview_start, dateformat"u d")
+        loc_n = T.find_text(tb_n, "start $ps_n")
+        if loc_n === nothing
+            loc_n = T.find_text(tb_n, "s " * replace(ps_n, " " => ""))  # shortened form
+        end
+        if loc_n !== nothing
+            @test T.style_at(tb_n, loc_n.x, loc_n.y).fg == warn
+        end
     end
 
     @testset "gantt_compute_drag_preview: body preserves duration; edges clamp; point; month snap" begin
