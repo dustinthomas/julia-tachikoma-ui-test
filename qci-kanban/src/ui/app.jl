@@ -482,6 +482,295 @@ function _set_message!(m::AppModel, text::AbstractString)
     m
 end
 
+"""Return text from start through end of Role warning, excluding any ` · ` payload."""
+function _role_warning_prefix(msg::AbstractString)::String
+    idx = findfirst(" · ", msg)
+    return idx === nothing ? String(msg) : String(msg[1:prevind(msg, first(idx))])
+end
+
+"""
+    _set_drag_message!(m, tip::AbstractString)
+
+Set the live drag tip string. If a Role-warning prefix is present, keep exactly
+the warning text (up to first ` · `) and replace everything after with ` · tip`.
+Otherwise set message = tip (overwrite). Does not change general `_set_message!`
+append semantics for non-drag success toasts.
+"""
+function _set_drag_message!(m::AppModel, tip::AbstractString)
+    if startswith(m.message, "Role warning:")
+        warn = _role_warning_prefix(m.message)
+        m.message = isempty(tip) ? warn : string(warn, " · ", tip)
+    else
+        m.message = String(tip)
+    end
+    m
+end
+
+# ── Toast chips (shell status line under view tabs) ─────────────────────────
+const TOAST_BOX_MIN_W = 72
+const TOAST_KEEP_CORE_W = 50   # at ≥50: keep mode+key+dates after soft drops
+const TOAST_HARD_CLIP_W = 40
+
+_toast_gap_str(segs) = any(s -> s.boxed, segs) ? "  " : " · "
+
+function segment_display_width(seg)::Int
+    t = seg.boxed ? "[" * seg.text * "]" : seg.text
+    return textwidth(t)
+end
+
+function total_toast_width(segs)::Int
+    isempty(segs) && return 0
+    g = textwidth(_toast_gap_str(segs))
+    return sum(segment_display_width, segs) + g * (length(segs) - 1)
+end
+
+function _compress_project_text(text::AbstractString)::String
+    m = match(r"\(([^)]+)\)\s*$", text)
+    m !== nothing && return "P: $(m.captures[1])"
+    name = startswith(text, "PROJECT: ") ? SubString(text, ncodeunits("PROJECT: ") + 1) : text
+    # First ~8 display columns of the name when no (KEY) suffix.
+    return "P: " * fit_width(String(name), 8)
+end
+
+function _shorten_mode_text(text::AbstractString)::String
+    text == "Drag move"  && return "Move"
+    text == "Drag start" && return "Start"
+    text == "Drag due"   && return "Due"
+    text == "Drag date"  && return "Date"
+    return String(text)
+end
+
+function _shorten_start_text(text::AbstractString)::String
+    startswith(text, "start ") || return String(text)
+    rest = SubString(text, ncodeunits("start ") + 1)
+    return "s " * replace(String(rest), " " => "")
+end
+
+function _shorten_due_text(text::AbstractString)::String
+    startswith(text, "due ") || return String(text)
+    rest = SubString(text, ncodeunits("due ") + 1)
+    return "d " * replace(String(rest), " " => "")
+end
+
+function _shorten_date_text(text::AbstractString)::String
+    occursin(' ', text) || return String(text)
+    return replace(String(text), " " => "")
+end
+
+function _apply_toast_transform(segs, step::Symbol)
+    if step === :drop_duration
+        any(s -> s.role === :duration, segs) || return segs
+        return filter(s -> s.role !== :duration, segs)
+    elseif step === :compress_project
+        any(s -> s.role === :project && startswith(s.text, "PROJECT: "), segs) || return segs
+        return map(s -> (s.role === :project && startswith(s.text, "PROJECT: ")) ?
+                        with_text(s, _compress_project_text(s.text)) : s, segs)
+    elseif step === :drop_project
+        any(s -> s.role === :project, segs) || return segs
+        return filter(s -> s.role !== :project, segs)
+    elseif step === :drop_warn
+        any(s -> s.role === :warn, segs) || return segs
+        return filter(s -> s.role !== :warn, segs)
+    elseif step === :shorten_mode
+        any(s -> s.role === :mode && startswith(s.text, "Drag "), segs) || return segs
+        return map(s -> (s.role === :mode && startswith(s.text, "Drag ")) ?
+                        with_text(s, _shorten_mode_text(s.text)) : s, segs)
+    elseif step === :shorten_start
+        any(s -> s.role === :start && startswith(s.text, "start "), segs) || return segs
+        return map(s -> (s.role === :start && startswith(s.text, "start ")) ?
+                        with_text(s, _shorten_start_text(s.text)) : s, segs)
+    elseif step === :shorten_due
+        any(s -> s.role === :due && startswith(s.text, "due "), segs) || return segs
+        return map(s -> (s.role === :due && startswith(s.text, "due ")) ?
+                        with_text(s, _shorten_due_text(s.text)) : s, segs)
+    elseif step === :shorten_date
+        any(s -> s.role === :date && occursin(' ', s.text), segs) || return segs
+        return map(s -> (s.role === :date && occursin(' ', s.text)) ?
+                        with_text(s, _shorten_date_text(s.text)) : s, segs)
+    end
+    return segs
+end
+
+const _TOAST_DROP_PRIORITY = (:duration, :project, :warn, :mode, :due, :start, :date, :key, :plain)
+
+function _toast_has_core(segs)::Bool
+    any(s -> s.role in (:start, :due, :date, :mode), segs)
+end
+
+function _drop_lowest_toast_role(segs, max_w::Int)
+    for role in _TOAST_DROP_PRIORITY
+        any(s -> s.role === role, segs) || continue
+        # Keep :key while mode/dates remain at ≥ TOAST_KEEP_CORE_W. With the
+        # priority order above, core roles are dropped before :key, so this
+        # guard is defensive (documents K keep-core); mark excluded.
+        if role === :key && max_w >= TOAST_KEEP_CORE_W && _toast_has_core(segs)  # COV_EXCL_LINE
+            continue  # COV_EXCL_LINE
+        end
+        return filter(s -> s.role !== role, segs)
+    end
+    return segs
+end
+
+function _hard_clip_toast_segments(segs, max_w::Int)
+    out = collect(segs)
+    while !isempty(out) && total_toast_width(out) > max_w
+        n = length(out)
+        last = out[end]
+        if n == 1
+            budget = max_w
+            text_budget = last.boxed ? max(0, budget - 2) : budget
+            if text_budget < 1
+                out = eltype(out)[]
+                break
+            end
+            nt = fit_width(last.text, text_budget)
+            out = isempty(nt) ? eltype(out)[] : [with_text(last, nt)]
+            break
+        end
+        g = textwidth(_toast_gap_str(out))
+        prefix_w = sum(segment_display_width, out[1:end-1]) + g * (n - 1)
+        budget = max_w - prefix_w
+        if budget < 1
+            out = out[1:end-1]
+            continue
+        end
+        text_budget = last.boxed ? budget - 2 : budget
+        if text_budget < 1
+            out = out[1:end-1]
+            continue
+        end
+        nt = fit_width(last.text, text_budget)
+        if isempty(nt)
+            out = out[1:end-1]
+        else
+            out = vcat(out[1:end-1], [with_text(last, nt)])
+            total_toast_width(out) > max_w && (out = out[1:end-1])
+            break
+        end
+    end
+    return filter(s -> !isempty(s.text), out)
+end
+
+"""
+    fit_toast_segments(segs, max_w) -> Vector
+
+Closed truncation table for toast chips. Rebuild-only (never mutates NamedTuple
+or Style fields). Order: unbox → D1–D8 soft transforms → role drops → hard clip.
+"""
+function fit_toast_segments(segs, max_w::Int)
+    out = collect(segs)
+    # (b) narrow terminals unbox everything
+    if max_w < TOAST_BOX_MIN_W
+        out = map(s -> with_boxed(s, false), out)
+    end
+    # (c) closed shorten / drop table — one transform at a time while over width
+    for step in (:drop_duration, :compress_project, :drop_project, :drop_warn,
+                 :shorten_mode, :shorten_start, :shorten_due, :shorten_date)
+        total_toast_width(out) <= max_w && break
+        out = collect(_apply_toast_transform(out, step))
+    end
+    # (d) drop by role priority (lowest first). Leave a final chip for (e)
+    # hard-clip rather than emptying the list (prefer clip key/text over void).
+    while total_toast_width(out) > max_w && length(out) > 1
+        nxt = collect(_drop_lowest_toast_role(out, max_w))
+        length(nxt) >= length(out) && break
+        out = nxt
+    end
+    # (e) hard-clip rightmost remainder
+    if total_toast_width(out) > max_w
+        out = _hard_clip_toast_segments(out, max_w)
+    end
+    return out
+end
+
+"""
+    build_toast_segments(m; width) -> Vector
+
+PROJECT chip + (drag: optional Role-warning + drag segs from state) or plain
+message. Drag path ignores `m.message` tip payload and rebuilds from
+`m.gantt_drag`. Always runs through `fit_toast_segments`.
+"""
+function build_toast_segments(m::AppModel; width::Int)
+    segs = Any[]
+    boxed = width >= TOAST_BOX_MIN_W
+
+    p = m.active_project_id === nothing ? nothing :
+        Stores.get_project(m.boardstore, m.active_project_id)
+    if p !== nothing
+        proj_text = "PROJECT: $(p.name) ($(p.key))"
+        push!(segs, toast_seg(:project, proj_text,
+            Style(; fg = col_primary(), dim = true); boxed = boxed))
+    end
+
+    drag = m.gantt_drag
+    if drag !== nothing
+        if startswith(m.message, "Role warning:")
+            warn_text = _role_warning_prefix(m.message)
+            push!(segs, toast_seg(:warn, warn_text,
+                Style(; fg = col_warn(), bold = true); boxed = boxed))
+        end
+        iss = Stores.get_issue(m.boardstore, drag.issue_id)
+        key = iss === nothing ? "" : iss.key
+        append!(segs, gantt_drag_tooltip_segments(
+            drag.mode, drag.preview_start, drag.preview_due;
+            key = key,
+            orig_start = drag.orig_start,
+            orig_due = drag.orig_due,
+            boxed = boxed))
+    else
+        if !isempty(m.message)
+            plain_fg = p === nothing ? col_text_muted() : col_primary()
+            push!(segs, toast_seg(:plain, m.message,
+                Style(; fg = plain_fg, dim = true); boxed = false))
+        end
+    end
+
+    return fit_toast_segments(segs, width)
+end
+
+"""
+    _paint_toast_segments!(buf, x, y, max_w, segs)
+
+Left-to-right multi-`set_string!`. Display: boxed → `[text]`, else bare text.
+Boxed chips use `col_surface_hi()` bg via a fresh Style. Gap: two spaces when any
+chip is boxed, else ` · `. Never writes past `x + max_w - 1`.
+"""
+function _paint_toast_segments!(buf::Buffer, x::Int, y::Int, max_w::Int, segs)::Nothing
+    max_w < 1 && return nothing
+    isempty(segs) && return nothing
+    gap = _toast_gap_str(segs)
+    gap_w = textwidth(gap)
+    cx = x
+    max_x = x + max_w - 1
+    for (i, seg) in enumerate(segs)
+        remaining = max_x - cx + 1
+        remaining < 1 && break
+        disp = seg.boxed ? string("[", seg.text, "]") : seg.text
+        if textwidth(disp) > remaining
+            disp = fit_width(disp, remaining)
+        end
+        isempty(disp) && continue
+        paint_style = if seg.boxed
+            st = seg.style
+            style_with(; fg = st.fg, bg = col_surface_hi(),
+                       bold = st.bold, dim = st.dim,
+                       italic = st.italic, underline = st.underline,
+                       strikethrough = st.strikethrough, hyperlink = st.hyperlink)
+        else
+            seg.style
+        end
+        set_string!(buf, cx, y, disp, paint_style)
+        cx += textwidth(disp)
+        if i < length(segs)
+            gr = max_x - cx + 1
+            gr < gap_w && break
+            set_string!(buf, cx, y, gap, Style(; fg = col_text_muted(), dim = true))
+            cx += gap_w
+        end
+    end
+    nothing
+end
+
 # ── Lazy idle logout (PR-H1) ────────────────────────────────────────────────
 """
     _idle_expired!(m) -> Bool
@@ -1122,24 +1411,12 @@ function _render_main!(m::AppModel, buf::Buffer, content_area::Rect)
         x += length(label) + 2
     end
 
-    # message/toast under the tabs — prefix with active project (same row so
+    # message/toast under the tabs — chip-style multi-span (same row so
     # board body height is unchanged; short-terminal layout tests stay green).
-    proj_label = begin
-        p = m.active_project_id === nothing ? nothing :
-            Stores.get_project(m.boardstore, m.active_project_id)
-        p === nothing ? "" : "PROJECT: $(p.name) ($(p.key))"
-    end
-    toast = if isempty(proj_label)
-        m.message
-    elseif isempty(m.message)
-        proj_label
-    else
-        proj_label * "  ·  " * m.message
-    end
-    if !isempty(toast)
-        set_string!(buf, content_area.x + 1, content_area.y + 1,
-                    _clip(toast, content_area.width - 2),
-                    Style(; fg = isempty(proj_label) ? col_text_muted() : col_primary(), dim = true))
+    max_w = content_area.width - 2
+    segs = build_toast_segments(m; width = max_w)
+    if !isempty(segs)
+        _paint_toast_segments!(buf, content_area.x + 1, content_area.y + 1, max_w, segs)
     end
 
     body = Rect(content_area.x + 1, content_area.y + 2,
@@ -1154,8 +1431,6 @@ function _render_main!(m::AppModel, buf::Buffer, content_area::Rect)
         render_gantt!(m, buf, body)
     end
 end
-
-_clip(s::AbstractString, w::Int) = fit_width(s, w)
 
 """Contextual status tips for the focused field (date picker, …). Empty if none."""
 function _field_status_hints(ed)::String

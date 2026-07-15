@@ -1824,8 +1824,11 @@ function _gantt_set_drag_tooltip!(m::AppModel)
     drag === nothing && return m
     iss = Stores.get_issue(m.boardstore, drag.issue_id)
     key = iss === nothing ? "" : iss.key
-    _set_message!(m, gantt_drag_tooltip(drag.mode, drag.preview_start, drag.preview_due;
-                                         key = key))
+    tip = gantt_drag_tooltip(drag.mode, drag.preview_start, drag.preview_due;
+                             key = key,
+                             orig_start = drag.orig_start,
+                             orig_due = drag.orig_due)
+    _set_drag_message!(m, tip)
     m
 end
 
