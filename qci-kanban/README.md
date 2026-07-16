@@ -49,7 +49,7 @@ Projects: **QCI** (product), **MNT** (plant maintenance WOs), **RND** (firmware)
 
 - **Auth** — email + password sign-in against a separate user store (PBKDF2-SHA256
   hashing), HS256 JWT sessions with expiry, create-account flow, session restore
-  on startup, log out from anywhere (`Ctrl-L`).
+  on startup, log out from anywhere (`O` or `Ctrl-L`).
 - **Board** — status columns × swimlanes (`:none | :assignee | :epic | :priority`,
   cycle with `s`) as a real card grid; rich cards (key, wrapped title, priority
   glyph, points, label chips, epic tag, assignee initials, due chip); WIP limits
@@ -86,7 +86,7 @@ status-bar hints are generated from the same table, so they never drift. The
 | `B` | Board · `K` Backlog · `C` Calendar · `G` Gantt |
 | `P` | Switch project |
 | `R` | Soft refresh (reload projects, re-clamp selection) |
-| `Ctrl-L` | Log out |
+| `O` / `Ctrl-L` | Log out (`O` preferred — many terminals steal Ctrl-L as clear-screen) |
 
 ### Board
 | Key | Action |
@@ -96,13 +96,12 @@ status-bar hints are generated from the same table, so they never drift. The
 | `n` new · `e` edit · `d` delete · `v`/`Enter` details |
 | `a` | Assign to me |
 | `<` / `>` | Move to prev/next status |
-| `J` / `K` | Rank down/up |
+| `J` / `I` | Rank down/up |
 | `Spc` | Toggle select · `M` bulk move · `A` bulk assign · `D` bulk delete |
 | `/` | Search |
 | `m` mine · `H` high · `u` due-soon · `p` sprint · `#` label | Quick filters |
 
-> On the board, `K` is rank-up (view bindings beat global); reach the Backlog with
-> `K` from any *other* view.
+> `K` always opens Backlog (including from the board). Rank uses `J` / `I`.
 
 ### Backlog
 | Key | Action |
@@ -205,14 +204,14 @@ For shop-floor maintenance boards (not the software-demo seed):
    ```
 
 5. **Shared kiosk / multi-user seat**:
-   - `Ctrl-L` log out between operators.
+   - `O` (or `Ctrl-L`) log out between operators.
    - Per-seat session file via `session_token_path` / `QCI_SESSION_TOKEN_PATH`
      so two terminals do not clobber the same JWT file.
    - Soft refresh `R` after another seat writes (reloads project cache + clamps
      selection; does not re-seed or restart).
 
 6. **Ops keys**: `P` project switcher · `E` export CSV (Backlog) · `R` refresh ·
-   `Ctrl-L` logout. Work-order fields (`asset_tag`, `location`, `work_type`) live
+   `O` / `Ctrl-L` logout. Work-order fields (`asset_tag`, `location`, `work_type`) live
    on the card create/edit form.
 
 ## Demo recording

@@ -408,6 +408,7 @@ Explicit `role=` is for tests / future admin UI (must be valid_role).
 function create_user!(store::SQLiteUserStore; email::AbstractString, name::AbstractString,
                       password::AbstractString,
                       role::Union{AbstractString,Nothing} = nothing)::User
+    email = lowercase(strip(email))
     valid_email(email) || throw(ArgumentError("invalid email: $email"))
     existing = _query(store.db, "SELECT id FROM users WHERE email = ? LIMIT 1", [email])
     isempty(existing.id) || throw(ArgumentError("email already registered: $email"))
@@ -428,9 +429,11 @@ function create_user!(store::SQLiteUserStore; email::AbstractString, name::Abstr
 end
 
 function authenticate(store::SQLiteUserStore, email::AbstractString, password::AbstractString)
+    # Case-insensitive email lookup (logins typed as Alex@… still match).
+    email = lowercase(strip(email))
     r = _query(store.db, """
         SELECT id, email, name, password_hash, salt, iterations, created, active, role
-        FROM users WHERE email = ? LIMIT 1
+        FROM users WHERE lower(email) = ? LIMIT 1
     """, [email])
     # S3: constant-work dummy verify so absent/inactive email costs the same as
     # a real one — no timing oracle for user enumeration.

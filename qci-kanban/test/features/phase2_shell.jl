@@ -171,7 +171,17 @@ end
             T.update!(m, T.KeyEvent('C')); @test m.view == :calendar
             T.update!(m, T.KeyEvent('B')); @test m.view == :board
         end
+        @testset "When O is pressed Then the session ends (terminal-safe logout)" begin
+            @test m.current_user !== nothing
+            T.update!(m, T.KeyEvent('O'))
+            @test m.current_user === nothing
+        end
         @testset "When Ctrl+L is pressed Then the session ends" begin
+            # re-login for alias path
+            for ch in collect("f@qci.com"); T.update!(m, T.KeyEvent(ch)); end
+            T.update!(m, T.KeyEvent(:tab))
+            for ch in collect("pw12"); T.update!(m, T.KeyEvent(ch)); end
+            T.update!(m, T.KeyEvent(:enter))
             @test m.current_user !== nothing
             T.update!(m, T.KeyEvent(:ctrl, 'l'))
             @test m.current_user === nothing

@@ -119,6 +119,9 @@ end
         @test FS.key_token(KEY('a')) == 'a'
         @test FS.key_token(KEY(:enter)) == :enter
         @test FS.key_token(KEY(:ctrl, 'l')) == (:ctrl, 'l')
+        # Terminals / kitty may deliver uppercase ctrl letters — normalize.
+        @test FS.key_token(KEY(:ctrl, 'L')) == (:ctrl, 'l')
+        @test FS.key_token(KEY(:ctrl, 'S')) == (:ctrl, 's')
     end
 
     @testset "lookup_action resolves per-context and walks the stack" begin
@@ -126,6 +129,12 @@ end
         @test FS.lookup_action(:global, KEY('?')) == :toggle_help
         @test FS.lookup_action(:global, KEY('R')) == :soft_refresh
         @test FS.lookup_action(:global, KEY(:ctrl, 'l')) == :logout
+        # Ctrl+L case-insensitive; plain O is the terminal-safe logout (many
+        # emulators swallow Ctrl+L as "clear screen").
+        @test FS.lookup_action(:global, KEY(:ctrl, 'L')) == :logout
+        @test FS.lookup_action(:global, KEY('O')) == :logout
+        @test FS.lookup_action(Symbol[:board, :global], KEY('O')) == :logout
+        @test FS.lookup_action(Symbol[:board, :global], KEY(:ctrl, 'L')) == :logout
         @test FS.lookup_action(:login, KEY(:enter)) == :login_submit
         @test FS.lookup_action(:login, KEY('c')) == :login_to_create
         @test FS.lookup_action(:login_create, KEY(:escape)) == :login_to_signin
@@ -136,6 +145,11 @@ end
         @test FS.lookup_action(Symbol[:board, :global], KEY('B')) == :view_board
         @test FS.lookup_action(Symbol[:board, :global], KEY('q')) == :quit
         @test FS.lookup_action(Symbol[:board, :global], KEY('z')) === nothing
+        # K is the advertised Backlog switcher — must not be stolen by board rank
+        @test FS.lookup_action(Symbol[:board, :global], KEY('K')) == :view_backlog
+        @test FS.lookup_action(:global, KEY('K')) == :view_backlog
+        # card_edit Ctrl+S save is case-insensitive
+        @test FS.lookup_action(Symbol[:card_edit, :global], KEY(:ctrl, 'S')) == :save_edit
     end
 
     @testset "help + status hints are generated from the table" begin
@@ -145,8 +159,11 @@ end
         hints = FS.status_hints([:board, :global])
         @test occursin("[q] Quit", hints)
         @test occursin("[?] Help", hints)
-        @test occursin("[^L] Log out", hints)
+        # Primary advertised logout is O (terminal-safe); ^L remains as alias.
+        @test occursin("[O] Log out", hints)
         # hint=false bindings (^C) are omitted from the status bar
         @test !occursin("^C", hints)
+        # [K] Backlog is advertised and must match lookup_action (no false map)
+        @test occursin("[K] Backlog", hints)
     end
 end

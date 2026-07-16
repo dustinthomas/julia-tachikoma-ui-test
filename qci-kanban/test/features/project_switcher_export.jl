@@ -107,8 +107,8 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         # ensure at least one WO-ish issue in Default
         Qm.Stores.create_issue!(m.boardstore; title = "Export me", project_id = m.active_project_id,
                                 status = "Backlog", asset_tag = "PUMP-1", work_type = "CM")
-        # Board shadows global 'K' (rank up); leave board first so K → backlog.
-        u!(m, 'C'); u!(m, 'K')
+        # K → backlog from board (no longer shadowed by rank).
+        u!(m, 'K')
         @test m.view === :backlog
         # lowercase e should NOT export (edit card)
         before = readdir(dirname(m.session.token_path); join = true)
@@ -146,7 +146,7 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
     @testset "Given no active project When E Then message and no crash" begin
         m = _login_pe("No Proj Export")
         m.active_project_id = nothing
-        u!(m, 'C'); u!(m, 'K'); u!(m, 'E')
+        u!(m, 'K'); u!(m, 'E')
         @test occursin("No active project", m.message)
     end
 

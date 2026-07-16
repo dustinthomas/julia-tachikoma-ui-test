@@ -51,11 +51,13 @@ typ!(m, s) = (for ch in collect(s); u!(m, ch); end)
         u!(m, '/'); typ!(m, "ZzChipWO"); u!(m, :enter)
         tb = app_tb(m; w = 120, h = 30)
         @test T.find_text(tb, "ZzChipWO") !== nothing || T.find_text(tb, iss.key) !== nothing
-        # work_type chip uses ⟨CM⟩; asset chip uses ⚙PMP-9 (shortened)
+        # work_type chip uses ⟨CM⟩; asset chip is ⚙ + gap + tag (may ellipsize
+        # on narrow columns — e.g. "PMP-9" → "PM…" when gear reserves glyph+gap).
         rows = app_rows(m; w = 120, h = 30)
         joined = join(rows, "\n")
         @test occursin("CM", joined) || occursin("⟨CM⟩", joined)
-        @test occursin("PMP", joined) || occursin("PMP-9", joined)
+        @test occursin("⚙", joined)
+        @test occursin("PM", joined) || occursin("PMP", joined) || occursin("PMP-9", joined)
     end
 
     @testset "Given WO When detail opens Then work-order flow + chips show" begin

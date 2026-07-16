@@ -45,8 +45,8 @@ u!(m, x) = T.update!(m, x isa Tuple ? T.KeyEvent(x...) : T.KeyEvent(x))
         @test Qm.Stores.active_sprint(m.boardstore; project_id = la.id).id == sb.id
         @test Qm.Stores.active_sprint(m.boardstore; project_id = def_id).id == sa.id
         # UI start on Default is blocked (already active in this project).
-        # 'C' first so global 'K' (backlog) is not shadowed by board rank-up.
-        u!(m, 'C'); u!(m, 'K'); u!(m, 'S')
+        # K opens backlog from board.
+        u!(m, 'K'); u!(m, 'S')
         @test occursin("already active", m.message)
     end
 

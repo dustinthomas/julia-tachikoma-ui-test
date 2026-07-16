@@ -755,38 +755,75 @@ function _render_card!(m::AppModel, buf::Buffer, r::Rect, iss::Domain.Issue, sel
         meta_right = r.x + r.width - max(0, right_reserve)
         if iss.epic_id !== nothing
             tag = "◆" * _short(_epic_name(m, iss.epic_id), 7)
-            x + length(tag) <= meta_right && set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
-            x += length(tag) + 1
+            tw = textwidth(tag)
+            if x + tw <= meta_right
+                set_string!(buf, x, y, tag, stl(; fg = epic_color(iss.epic_id)))
+                x += tw + 1
+            end
         end
         if iss.work_type !== nothing
             wt = "⟨" * iss.work_type * "⟩"
-            if x + textwidth(wt) <= meta_right
+            tw = textwidth(wt)
+            if x + tw <= meta_right
                 set_string!(buf, x, y, wt, stl(; fg = col_warn()))
-                x += textwidth(wt) + 1
+                x += tw + 1
             end
         end
         if iss.asset_tag !== nothing
-            at = "⚙" * _short(iss.asset_tag, 6)
-            if x + textwidth(at) <= meta_right
+            avail = meta_right - x
+            at = _asset_chip(iss.asset_tag; max_w = avail)
+            if !isempty(at)
                 set_string!(buf, x, y, at, stl(; fg = col_primary_hi()))
                 x += textwidth(at) + 1
             end
         end
         for lid in iss.labels
             chip = "•"
-            x + 1 <= meta_right && set_string!(buf, x, y, chip, stl(; fg = col_warn()))
-            x += 1
+            tw = textwidth(chip)
+            if x + tw <= meta_right
+                set_string!(buf, x, y, chip, stl(; fg = col_warn()))
+                x += tw
+            end
         end
         if iss.assignee_id !== nothing
             ini = _initials(_user_name(m, iss.assignee_id))
-            x + length(ini) <= meta_right && set_string!(buf, x, y, ini, stl(; fg = col_primary_hi()))
-            x += length(ini) + 1
+            tw = textwidth(ini)
+            if x + tw <= meta_right
+                set_string!(buf, x, y, ini, stl(; fg = col_primary_hi()))
+                x += tw + 1
+            end
         end
         chip, overdue = _due_chip(iss)
-        if !isempty(chip) && x + length(chip) <= meta_right
+        tw = textwidth(chip)
+        if !isempty(chip) && x + tw <= meta_right
             set_string!(buf, x, y, chip, stl(; fg = overdue ? col_err() : col_text_muted()))
         end
     end
+end
+
+"""
+    _asset_chip(tag; max_w) -> String
+
+Asset meta chip (`⚙` + tag) fitted to `max_w` display columns.
+
+U+2699 GEAR is *ambiguous width*: Julia `textwidth` often reports 1 while many
+terminals paint it as 2 columns. Reserve **2 glyph columns** (pad when needed)
+plus **1 gap column** so the tag sits clear of the icon — especially on selected
+cards next to `[<]`/`[>]`.
+"""
+function _asset_chip(tag::AbstractString; max_w::Int)
+    max_w < 2 && return ""
+    glyph = "⚙"
+    gw = 2                                      # forced budget for ambiguous emoji
+    gap = 1                                     # breathing room before tag text
+    prefix_w = gw + gap
+    pad_n = max(0, gw - textwidth(glyph))
+    prefix = glyph * " "^pad_n * " "^gap
+    body_w = max_w - prefix_w
+    # ellipsize needs ≥2 cols for "x…"; smaller budgets keep prefix only
+    body_w < 2 && return fit_width(prefix, max_w)
+    out = prefix * _short(String(tag), body_w)
+    textwidth(out) <= max_w ? out : fit_width(prefix, max_w)
 end
 
 """

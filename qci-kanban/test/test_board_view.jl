@@ -111,14 +111,14 @@ end
         @test any(a.kind == :assigned for a in Q3.Stores.list_activity(m.boardstore, iss.id))
     end
 
-    @testset "rank J/K reorders within the column" begin
+    @testset "rank J/I reorders within the column" begin
         m = lb()
         # Backlog has QCI-100 (pos0) and QCI-101 (pos1); rank the top one down
         top = Q3.selected_issue(m)
         @test top.position == 0
         mkey(m, 'J')
         @test Q3.Stores.get_issue(m.boardstore, top.id).position == 1
-        mkey(m, 'K')
+        mkey(m, 'I')                              # rank up (K is Backlog view)
         @test Q3.Stores.get_issue(m.boardstore, top.id).position == 0
     end
 end
@@ -241,6 +241,72 @@ end
         wide_blob = join([T.row_text(tb2, i) for i in 1:10], "\n")
         @test occursin("▣", wide_blob)
         @test occursin("[<]", wide_blob) && occursin("[>]", wide_blob)
+    end
+
+    @testset "asset gear chip reserves glyph cols + gap before tag text" begin
+        # U+2699 GEAR is ambiguous-width: Julia textwidth often reports 1 while
+        # terminals paint 2 — reserve 2 glyph cols + 1 gap so tag never sits under icon.
+        chip = Q3._asset_chip("my-asset"; max_w = 12)
+        @test startswith(chip, "⚙")
+        @test occursin("my", chip)
+        # Prefer two spaces after gear when Julia thinks gear is 1-col (pad + gap).
+        if textwidth("⚙") < 2
+            @test startswith(chip, "⚙  ")
+        else
+            @test startswith(chip, "⚙ ")
+        end
+        @test textwidth(chip) <= 12
+        # Tight budgets: never overflow max_w
+        @test Q3._asset_chip("x"; max_w = 1) == ""
+        @test textwidth(Q3._asset_chip("my-asset"; max_w = 3)) <= 3
+        @test textwidth(Q3._asset_chip("my-asset"; max_w = 4)) <= 4
+        for w in 1:14
+            c = Q3._asset_chip("my-asset"; max_w = w)
+            @test textwidth(c) <= w
+        end
+    end
+
+    @testset "selected card: asset gear + tag never overlap move buttons" begin
+        # FABON-101 style: selected modern card with asset_tag + move chrome.
+        m = lb()
+        iss = Q3.selected_issue(m)
+        Q3.Stores.update_issue!(m.boardstore, iss.id; asset_tag = "my-asset",
+                                work_type = "Improvement",
+                                due_date = Dates.today() + Dates.Day(7))
+        iss = Q3.Stores.get_issue(m.boardstore, iss.id)
+        for cw in (17, 21, 31, 36)
+            tb = T.TestBackend(50, 10); T.reset!(tb.buf)
+            r = T.Rect(1, 1, cw, Q3.MODERN_CARD_H)
+            Q3._render_card_modern!(m, tb.buf, r, iss, true)
+            my = r.y + r.height - 2
+            row = join([something(T.char_at(tb, x, my), ' ') for x in r.x:(r.x + cw - 1)])
+            # Buttons present on selected cards wide enough for chrome
+            if cw >= Q3.BOARD_BTN_MIN_W
+                @test occursin("[<]", row) && occursin("[>]", row)
+            end
+            # If the gear (or asset body) paints, its last occupied cell must be
+            # strictly left of the first `[` of the move pair (no shared cells).
+            gi = findfirst(==('⚙'), row)
+            br = findfirst("[<", row)
+            bi = br === nothing ? nothing : first(br)
+            if gi !== nothing && bi !== nothing
+                # Chip runs from gear through non-space run; allow one space gap.
+                chip_end = gi
+                j = nextind(row, gi)
+                while j < bi
+                    row[j] == ' ' && break
+                    chip_end = j
+                    j = nextind(row, j)
+                end
+                @test chip_end < bi
+            end
+            # Gear pad: letter of the tag must not be immediately after gear when
+            # textwidth(gear)==1 (that is the bleed that looks like overlap).
+            if gi !== nothing && textwidth("⚙") < 2 && gi < lastindex(row)
+                next = row[nextind(row, gi)]
+                @test next == ' ' || next == '…' || !isletter(next)
+            end
+        end
     end
 
     @testset "overdue due chip uses err color" begin

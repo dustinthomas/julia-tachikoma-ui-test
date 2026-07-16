@@ -146,6 +146,7 @@ remote_row_to_link(d::AbstractDict)::IssueLink =
 function create_user!(store::RemoteUserStore; email::AbstractString, name::AbstractString,
                       password::AbstractString,
                       role::Union{AbstractString,Nothing} = nothing)::User
+    email = lowercase(strip(email))
     valid_email(email) || throw(ArgumentError("invalid email: $email"))
     assigned = if role === nothing
         isempty(list_users(store)) ? "admin" : "supervisor"
@@ -160,7 +161,8 @@ function create_user!(store::RemoteUserStore; email::AbstractString, name::Abstr
 end
 
 function authenticate(store::RemoteUserStore, email::AbstractString, password::AbstractString)
-    rows = store.exec("SELECT id, email, name, password_hash, salt, iterations, created, active, role FROM users WHERE email = \$1 LIMIT 1",
+    email = lowercase(strip(email))
+    rows = store.exec("SELECT id, email, name, password_hash, salt, iterations, created, active, role FROM users WHERE lower(email) = \$1 LIMIT 1",
                       Any[email])
     # S3: constant-work dummy verify for absent/inactive email → no timing oracle.
     (isempty(rows) || !(_get(rows[1], "active") in (1, true))) && (_dummy_verify(password); return nothing)

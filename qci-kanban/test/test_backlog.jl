@@ -5,7 +5,7 @@ Qb = QciKanban
 lbb() = (m = Qb.AppModel(; token_path = tempname(), secret = "s"); app_login_new(m; name = "Lin T"); m)
 kb!(m, x) = T.update!(m, T.KeyEvent(x))
 typb!(m, s) = (for ch in collect(s); T.update!(m, T.KeyEvent(ch)); end)
-goto_backlog(m) = (kb!(m, 'C'); kb!(m, 'K'))   # board→calendar→backlog (board shadows K for rank-up)
+goto_backlog(m) = kb!(m, 'K')   # global K → Backlog (including from board)
 
 @testset "Phase 3 — Backlog view renders sprints + backlog" begin
     m = lbb()

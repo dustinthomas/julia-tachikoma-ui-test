@@ -35,7 +35,9 @@ function key_token(evt::KeyEvent)
     if evt.key === :char
         return evt.char
     elseif evt.key === :ctrl
-        return (:ctrl, evt.char)
+        # Normalize letter case: kitty/shifted layouts may deliver 'L' while the
+        # keymap (and legacy 0x0c→'l' path) use lowercase.
+        return (:ctrl, lowercase(evt.char))
     else
         return evt.key
     end
@@ -53,7 +55,10 @@ const KEYMAP = Binding[
     Binding(:global, 'G',          :view_gantt,    "G",     "Gantt",           true),
     Binding(:global, 'P',          :project_switch,"P",     "Switch project",  true),
     Binding(:global, 'R',          :soft_refresh,  "R",     "Refresh",         true),
-    Binding(:global, (:ctrl, 'l'), :logout,        "^L",    "Log out",         true),
+    # Log out: plain `O` is primary — many terminals swallow Ctrl+L as "clear
+    # screen" so ^L never reaches the app. Keep ^L as an alias (case-normalized).
+    Binding(:global, 'O',          :logout,        "O",     "Log out",         true),
+    Binding(:global, (:ctrl, 'l'), :logout,        "^L",    "Log out",         false),
 
     # Login — sign in (email + password). Printable chars are captured by the
     # focused editor before this table is consulted; 'c' only reaches here on
@@ -74,9 +79,6 @@ const KEYMAP = Binding[
     Binding(:help, '?',     :close_help, "?",   "Close help", true),
 
     # ── Board view ─────────────────────────────────────────────────────────
-    # NOTE: 'K' (rank up) intentionally shadows the global 'K' (Backlog view)
-    # while on the board — view bindings beat global by design. Backlog stays
-    # reachable from every other view via 'K'.
     Binding(:board, 'h',   :nav_left,       "h",   "Left",             true),
     Binding(:board, 'l',   :nav_right,      "l",   "Right",            true),
     Binding(:board, 'j',   :nav_down,       "j",   "Down",             true),
@@ -95,8 +97,10 @@ const KEYMAP = Binding[
     Binding(:board, 'a',   :assign_me,      "a",   "Assign me",        true),
     Binding(:board, '<',   :move_prev,      "<",   "Move ←",           true),
     Binding(:board, '>',   :move_next,      ">",   "Move →",           true),
+    # Rank uses J/I so global 'K' (Backlog) is never shadowed on the board —
+    # status bar advertises [K] Backlog and must match the real action.
     Binding(:board, 'J',   :rank_down,      "J",   "Rank down",        false),
-    Binding(:board, 'K',   :rank_up,        "K",   "Rank up",          false),
+    Binding(:board, 'I',   :rank_up,        "I",   "Rank up",          false),
     Binding(:board, ' ',   :toggle_select,  "Spc", "Select",           true),
     Binding(:board, 'M',   :bulk_move,      "M",   "Bulk move",        false),
     Binding(:board, 'A',   :bulk_assign,    "A",   "Bulk assign",      false),
@@ -252,16 +256,33 @@ context-stack order. Only bindings with `hint=true` are shown.
 function status_hints(contexts::AbstractVector{Symbol}; editors_focused::Bool = false)
     parts = String[]
     seen = Set{String}()
-    for c in contexts, b in bindings_for(c)
-        b.hint || continue
-        # When a text editor owns input, printable-char shortcuts type into the
-        # field rather than firing — so they must NOT be advertised (finding U3).
-        # Structural keys (Enter/Esc/Ctrl-combos) still reach the keymap.
-        (editors_focused && b.token isa Char) && continue
-        s = "[$(b.label)] $(b.help)"
-        if !(s in seen)
-            push!(parts, s)
-            push!(seen, s)
+    # Tokens already claimed by a more-specific context must not reappear as a
+    # fallthrough hint (avoids advertising a global action the view stole).
+    claimed_so_far = Set{Any}()
+    for c in contexts
+        for b in bindings_for(c)
+            tok = b.token
+            if !b.hint
+                push!(claimed_so_far, tok)
+                continue
+            end
+            # When a text editor owns input, printable-char shortcuts type into the
+            # field rather than firing — so they must NOT be advertised (finding U3).
+            # Structural keys (Enter/Esc/Ctrl-combos) still reach the keymap.
+            if editors_focused && b.token isa Char
+                push!(claimed_so_far, tok)
+                continue
+            end
+            # Skip if a higher-priority context already bound this token.
+            if tok in claimed_so_far
+                continue
+            end
+            push!(claimed_so_far, tok)
+            s = "[$(b.label)] $(b.help)"
+            if !(s in seen)
+                push!(parts, s)
+                push!(seen, s)
+            end
         end
     end
     join(parts, "  ")

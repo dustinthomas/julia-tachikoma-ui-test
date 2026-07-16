@@ -193,8 +193,11 @@ end
 @testset "Phase 2d — App frame: views, header, status, help, logout" begin
     @testset "view router switches board/backlog/calendar/gantt" begin
         m = fresh_app(); app_login_new(m)
-        # NOTE: press 'K' (Backlog) from a non-board view — on the board 'K' is
-        # rank-up (Phase 3 view-beats-global binding), so we leave the board first.
+        @test m.view == :board
+        # K must open Backlog from the board (status bar advertises [K] Backlog).
+        T.update!(m, T.KeyEvent('K'))
+        @test m.view == :backlog
+        @test T.find_text(app_tb(m), "BACKLOG") !== nothing
         for (k, v, title) in [('C', :calendar, "CALENDAR"), ('K', :backlog, "BACKLOG"),
                               ('G', :gantt, "GANTT"), ('B', :board, "BOARD")]
             T.update!(m, T.KeyEvent(k))
@@ -242,6 +245,36 @@ end
         tb = app_tb(m)
         # after logout the (now 1) user store means the sign-in form, not first-run
         @test T.find_text(tb, "SIGN IN") !== nothing
+    end
+
+    @testset "logout via O and Ctrl+L (uppercase) from board" begin
+        # Many terminals steal Ctrl+L (clear screen); O is the reliable binding.
+        m = fresh_app(); app_login_new(m)
+        @test m.current_user !== nothing && m.view == :board
+        T.update!(m, T.KeyEvent('O'))
+        @test m.current_user === nothing
+        @test m.auth_stage == :signin
+        @test T.find_text(app_tb(m), "SIGN IN") !== nothing
+
+        m2 = fresh_app(); app_login_new(m2)
+        T.update!(m2, T.KeyEvent(:ctrl, 'L'))   # uppercase L from some keyboards
+        @test m2.current_user === nothing
+        @test m2.auth_stage == :signin
+    end
+
+    @testset "sign-in accepts mixed-case email" begin
+        m = fresh_app()
+        app_login_new(m; email = "CaseUser@qci.com", name = "Case", pw = "secret")
+        @test m.current_user !== nothing
+        T.update!(m, T.KeyEvent('O'))   # logout
+        @test m.current_user === nothing
+        # type mixed-case email + password
+        for ch in collect("caseuser@qci.com"); T.update!(m, T.KeyEvent(ch)); end
+        T.update!(m, T.KeyEvent(:tab))
+        for ch in collect("secret"); T.update!(m, T.KeyEvent(ch)); end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.current_user !== nothing
+        @test lowercase(m.current_user.email) == "caseuser@qci.com"
     end
 
     @testset "quit only from a non-focused context; q types into a focused field" begin

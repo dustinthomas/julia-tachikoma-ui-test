@@ -258,8 +258,7 @@ end
 
     @testset "backlog footer: burndown when sprint active; velocity when closed" begin
         m = gfx_model()
-        T.update!(m, T.KeyEvent('C'))          # leave board (K = rank-up there)
-        T.update!(m, T.KeyEvent('K'))          # backlog view
+        T.update!(m, T.KeyEvent('K'))          # backlog view (works from board)
         @test m.view == :backlog
         # Seeded Sprint 1 is future → no active window → velocity empty state
         tb0 = app_tb(m; w = 90, h = 26)
